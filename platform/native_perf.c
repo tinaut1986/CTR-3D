@@ -660,8 +660,12 @@ internal void NativePerf_Report3DSWindow(void)
 
 	/* platform_end_scene_ms phase by phase, the frame-begin wait and the
 	 * right eye's journal shape (n3ds_backend.h's end-of-scene profile). */
-	N3DS_EndProfFormat(out, (int)sizeof(out));
-	N3DS_DebugLog(out);
+	{
+		char endProf[384]; /* 26 fields: wider than `out` when values grow */
+
+		N3DS_EndProfFormat(endProf, (int)sizeof(endProf));
+		N3DS_DebugLog(endProf);
+	}
 	/* Frame cap / AUTO 3D state and the frame WORK the policy sees
 	 * (n3ds_backend.h's frame-pace block). */
 	N3DS_FramePaceFormat(out, (int)sizeof(out));
