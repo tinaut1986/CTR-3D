@@ -1193,6 +1193,13 @@ static int s_trackDepthWriteState = -1;
  * the other track statics because N3DS_TrackDraw_Begin resets it and sits above
  * the function that uses it. */
 static int s_trackTexturedState = -1;
+/* Track-atlas units bound to texture units 0 and 1 inside the current track
+ * bracket (-1 = unknown; Begin resets both, since the packet path rebinds
+ * unit 0 between brackets). C3D_TexBind marks the unit dirty even when the
+ * texture is the same, which re-emits its configuration on the next draw --
+ * per leaf, and again per leaf in the right eye's replay. */
+static int s_trackBoundUnit0 = -1;
+static int s_trackBoundUnit1 = -1;
 static C3D_AttrInfo s_trackAttrInfo;
 static C3D_BufInfo s_trackBufInfo;
 
@@ -3896,6 +3903,8 @@ void N3DS_TrackDraw_Begin(const float *qx, const float *qy, const float *qw, flo
 	/* The packet path owns texenv 0 between track frames, so whatever
 	 * N3DS_TrackDraw_SetTextured last recorded is stale by now. */
 	s_trackTexturedState = 0;
+	s_trackBoundUnit0 = -1;
+	s_trackBoundUnit1 = -1;
 
 	s_trackDrawActive = 1;
 }
@@ -4015,10 +4024,15 @@ void N3DS_TrackDraw_Leaf(int firstIndex, int indexCount, float otIndexLo, float 
 		 * bilinear off, mode 1 is the nearest single-sample path unchanged. */
 		int split = g_dbg_trackBilinear && (blend == 3);
 
-		N3DS_TrackAtlas_Bind(atlasBin);
-		if (split)
+		if (s_trackBoundUnit0 != atlasBin)
+		{
+			N3DS_TrackAtlas_Bind(atlasBin);
+			s_trackBoundUnit0 = atlasBin;
+		}
+		if (split && (s_trackBoundUnit1 != atlasBin))
 		{
 			N3DS_TrackAtlas_BindNearestView(atlasBin);
+			s_trackBoundUnit1 = atlasBin;
 		}
 		N3DS_TrackDraw_SetTextured(split ? 2 : 1);
 	}
@@ -4711,7 +4725,11 @@ void N3DS_StereoRenderRightEye(void)
 	int i;
 	int lastDoubling = -1;
 	int lastDepthWrite = 1;
-
+	/* Atlas bound to texture unit 0 by the previous packet op; -1 after
+	 * anything else binds it (VRAM quads, track/model brackets). Consecutive
+	 * merge emits often share an atlas, and C3D_TexBind dirties the unit even
+	 * for the same texture. */
+	int lastAtlas = -1;
 	unsigned long long rightT0;
 
 	s_rightEyeLastTicks = 0;
@@ -4783,7 +4801,11 @@ void N3DS_StereoRenderRightEye(void)
 				lastDepthWrite = (int)op->u.pkt.depthWrite;
 			}
 			N3DS_C3DSetBlendMode((int)op->u.pkt.blend);
-			N3DS_C3DBindAtlas((int)op->u.pkt.atlas);
+			if ((int)op->u.pkt.atlas != lastAtlas)
+			{
+				N3DS_C3DBindAtlas((int)op->u.pkt.atlas);
+				lastAtlas = (int)op->u.pkt.atlas;
+			}
 			C3D_DrawArrays(GPU_TRIANGLES, op->u.pkt.baseVertex, op->u.pkt.vertCount);
 			break;
 		}
@@ -4799,6 +4821,7 @@ void N3DS_StereoRenderRightEye(void)
 				lastDoubling = 0;
 			}
 			N3DS_C3DBindVramDisplayTex((int)op->u.pkt.atlas);
+			lastAtlas = -1;
 			C3D_DrawArrays(GPU_TRIANGLES, op->u.pkt.baseVertex, op->u.pkt.vertCount);
 			break;
 		}
@@ -4806,6 +4829,7 @@ void N3DS_StereoRenderRightEye(void)
 		{
 			N3DS_TrackDraw_Begin(op->u.mtx.qx, op->u.mtx.qy, op->u.mtx.qw, op->u.mtx.h);
 			lastDoubling = -1; /* the bracket owns doubling/blend/depth-write */
+			lastAtlas = -1;    /* ... and texture unit 0 */
 			break;
 		}
 		case N3DS_STEREO_OP_TRACK_LEAF:
@@ -4825,6 +4849,7 @@ void N3DS_StereoRenderRightEye(void)
 		{
 			N3DS_ModelDraw_Begin();
 			lastDoubling = -1;
+			lastAtlas = -1;
 			break;
 		}
 		case N3DS_STEREO_OP_MODEL_INSTANCE:
