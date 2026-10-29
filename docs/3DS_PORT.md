@@ -129,6 +129,13 @@ Rules the hardware enforces and emulators do not:
   polled on the first frame and every 64 frames after (`stereo`, `drawmerge`,
   `sdlog`, ...), SELECT chords, `[PERF]` scope windows, screenshots and probes.
   OFF strips all of it from the binary and changes no default.
+- Bottom-screen debug UI (`platform/n3ds/n3ds_debugui.c`): SELECT + D-pad Down
+  opens/closes it in any build; tap X to close. INFO and PERF tabs (FPS, frame
+  time, memory, FTP address, 120-frame sparkline) are always compiled; the DEBUG
+  tab (touch buttons that queue the same dumpreq words, FTP start/stop, log
+  flush, Old-3DS mode) needs `CTR_INTERNAL`. It draws on the CPU into the
+  bottom framebuffer, so it adds no GPU work and no thread; closed, it costs one
+  button-mask test per input poll.
 - In any build, an empty `enable-log.txt` beside the `.3dsx` turns on the SD log
   at `sdmc:/ctr3ds.log`. It is flushed on a timer, because a flush per line
   stalls the game on the card's latency.

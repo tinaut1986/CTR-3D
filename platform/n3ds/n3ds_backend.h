@@ -648,6 +648,11 @@ void N3DS_EarlyInit(void);
  * instead of needing an SD pull. */
 int N3DS_NetloadStreamActive(void);
 
+/* Brings up the process's single socket service (one soc:u session, one 1 MiB
+ * buffer) if it is not up yet; shared by the 3dslink stream and the FTP server.
+ * Main thread, before the worker threads start. Nonzero when sockets work. */
+int N3DS_NetEnsureSoc(void);
+
 /* Nonzero while the SD-card log sink is enabled (g_dbg_sdLog; SELECT+R or
  * dumpreq `sdlog`, default off). Platform_Log's file sink honours the same
  * switch as N3DS_DebugLog's, so one control governs every SD write this build
@@ -675,6 +680,16 @@ void N3DS_DebugSetVRAMForDump(const void *vram, unsigned int bytes, const unsign
  * Reported on screen so runaway allocation is visible as it happens. */
 unsigned long N3DS_HeapUsedBytes(void);
 unsigned long N3DS_LinearFreeBytes(void);
+
+/* Read-only state for the bottom-screen debug UI (n3ds_debugui.c). */
+int N3DS_StereoFrameActive(void);   /* this frame rendered both eyes */
+float N3DS_StereoSliderState(void); /* physical 3D slider, 0..1 */
+int N3DS_SpeedupEnabled(void);      /* New3DS 804MHz clock-up requested */
+#ifdef CTR_INTERNAL
+/* Queue one dumpreq word (e.g. "stereo") from the debug UI; runs through the
+ * same token chain as sdmc:/dumpreq.txt on the next N3DS_ReadButtons. */
+void N3DS_QueueDumpReq(const char *word);
+#endif
 
 /* ------------------------------------------------------------------ app --- */
 /* Zero once the user has closed the applet (HOME/power), meaning the process

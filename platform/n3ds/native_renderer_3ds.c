@@ -41,6 +41,7 @@
 #include <platform/native_renderer.h>
 
 #include "n3ds_backend.h"
+#include "n3ds_debugui.h"
 
 /*
  * PSX VRAM mirror: 1024x512 16-bit. native_renderer.c owns this on the host and
@@ -5677,6 +5678,32 @@ void NativeRenderer_SwapWindow(void)
 				s_statsBlockUs = (unsigned long)(((N3DS_GetTickCount() - statsT0) * 1000000ULL) / freq);
 			}
 		}
+	}
+
+	/* Bottom-screen debug UI (n3ds_debugui.c): one flag test per frame while
+	 * closed; open, hand it the game-side numbers it cannot see (the UI TU has
+	 * no game headers) and let it repaint before the present below. */
+	if (g_n3dsDebugUiOpen)
+	{
+		struct N3DS_DebugUIGameInfo gi;
+
+		memset(&gi, 0, sizeof(gi));
+		gi.drawCalls = (unsigned int)s_drawCallCount;
+		gi.mergeVerts = (unsigned int)(s_mergeVertsOpaque + s_mergeVertsBlend);
+		gi.levelID = NativePerf_CurrentLevelID();
+		gi.gameMode = (sdata->gGT != NULL) ? sdata->gGT->gameMode1 : 0;
+		gi.mainState = (int)sdata->mainGameState;
+#ifdef CTR_INTERNAL
+		gi.perfValid = (s_perfConsoleTotalUs > 0);
+		gi.perfTotalUs = s_perfConsoleTotalUs;
+		gi.perfWorkUs = s_perfConsoleWorkUs;
+		gi.perfWorstUs = s_perfConsoleWorstUs;
+		gi.bucketName[0] = s_perfConsoleName[0];
+		gi.bucketName[1] = s_perfConsoleName[1];
+		gi.bucketUs[0] = s_perfConsoleUs[0];
+		gi.bucketUs[1] = s_perfConsoleUs[1];
+#endif
+		N3DS_DebugUI_Tick(&gi);
 	}
 
 	/* One row of the bottom screen, every frame -- see N3DS_StatsDripRow.

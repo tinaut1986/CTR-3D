@@ -1,0 +1,1171 @@
+/*
+ * In-game FTP server for the New 3DS build. See n3ds_ftp.h for the commands,
+ * the enabling flag file and the CIA install convention.
+ *
+ * Threading, the part that matters for the game:
+ *   - A worker thread of its own, at the LOWEST priority (0x3F), on core 3.
+ *     Core 3 holds only the audio worker, which runs at main-1 and sleeps most
+ *     of every frame; at 0x3F the server only ever gets the gaps, so it cannot
+ *     delay audio. Core 2 (the render worker, main priority) is the fallback if
+ *     core 3 is refused. Core 0 is the game's and core 1 belongs to the system
+ *     (a thread there hangs the console when the Rosalina overlay opens), so
+ *     neither is ever used. Old 3DS has no spare core: the server is not started.
+ *   - Polling from the main loop was rejected: an SD read or a CIA install of
+ *     tens of milliseconds would land inside a frame.
+ *   - libctru funnels every socket call of the process through one SOC session,
+ *     and a blocking poll() would hold up other threads' socket calls (the
+ *     3dslink stream). So the server never blocks in the kernel on a socket:
+ *     it polls with a zero timeout and naps in between (WaitFd).
+ *   - Nothing exists unless the flag file does: no socket buffer, no thread.
+ */
+#include <3ds.h>
+
+#include <arpa/inet.h>
+#include <dirent.h>
+#include <errno.h>
+#include <malloc.h>
+#include <netinet/in.h>
+#include <poll.h>
+#include <stdarg.h>
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include <strings.h>
+#include <sys/socket.h>
+#include <sys/stat.h>
+#include <unistd.h>
+
+#include "n3ds_backend.h"
+#include "n3ds_ftp.h"
+
+#define N3DS_FTP_FLAG_PATH "sdmc:/3ds/ctr_native/ftp.on"
+#define N3DS_FTP_PORT 5021
+#define N3DS_FTP_PASV_FIRST (N3DS_FTP_PORT + 1)
+#define N3DS_FTP_PASV_COUNT 64
+#define N3DS_FTP_PATH_MAX 512
+#define N3DS_FTP_LINE_MAX 600
+#define N3DS_FTP_IO_SIZE (64 * 1024)
+#define N3DS_FTP_SEND_CHUNK (8 * 1024)
+#define N3DS_FTP_NAP_MS 10
+#define N3DS_FTP_IDLE_NAP_MS 50
+#define N3DS_FTP_DATA_ACCEPT_MS 15000
+#define N3DS_FTP_IDLE_MS (10 * 60 * 1000)
+#define N3DS_FTP_STACK_SIZE (64 * 1024)
+#define N3DS_FTP_PRIORITY 0x3F
+#define N3DS_FTP_CIA_IO_SIZE (128 * 1024)
+#define N3DS_FTP_RELAUNCH_DELAY_MS 3000
+
+static Thread s_ftpThread = NULL;
+static volatile int s_ftpRun = 0;
+static int s_ftpStuck = 0; /* the thread did not end at exit */
+static int s_ftpListen = -1;
+static uint32_t s_ftpIp = 0;
+static unsigned char *s_ftpIo = NULL;
+static unsigned s_ftpNextPasv = 0;
+static int s_ftpAtExitSet = 0;
+
+/* Set by a successful SITE INSTALL: osGetTime() after which the main loop quits. */
+static volatile unsigned long long s_ftpRelaunchAt = 0;
+
+typedef struct N3DS_FtpSession
+{
+	int ctrl;
+	int pasv; /* listening data socket after PASV/EPSV, -1 when none */
+	char cwd[N3DS_FTP_PATH_MAX];
+	char rnfr[N3DS_FTP_PATH_MAX];
+	char in[N3DS_FTP_LINE_MAX * 2];
+	unsigned inUsed;
+	unsigned long long rest; /* REST offset for the next RETR/STOR, 0 = none */
+} N3DS_FtpSession;
+
+static N3DS_FtpSession s_session;
+
+/* ---- sockets ---- */
+
+static void N3DS_FtpCloseSocket(int *fd)
+{
+	if (*fd >= 0)
+	{
+		shutdown(*fd, SHUT_RDWR);
+		close(*fd);
+		*fd = -1;
+	}
+}
+
+/* Waits until fd is readable (or writable); false on timeout, error or stop.
+ * Zero-timeout poll plus a nap: see the file comment. */
+static int N3DS_FtpWaitFd(int fd, short events, int timeoutMs)
+{
+	int waited = 0;
+
+	while (s_ftpRun)
+	{
+		struct pollfd p;
+		int r;
+
+		p.fd = fd;
+		p.events = events;
+		p.revents = 0;
+		r = poll(&p, 1, 0);
+		if (r > 0)
+		{
+			return (p.revents & (events | POLLHUP | POLLERR)) != 0;
+		}
+		if (r < 0)
+		{
+			return 0;
+		}
+		svcSleepThread((s64)N3DS_FTP_NAP_MS * 1000000);
+		waited += N3DS_FTP_NAP_MS;
+		if ((timeoutMs > 0) && (waited >= timeoutMs))
+		{
+			return 0;
+		}
+	}
+	return 0;
+}
+
+static int N3DS_FtpSendAll(int fd, const char *data, size_t n)
+{
+	while (n > 0)
+	{
+		ssize_t w;
+
+		if (!N3DS_FtpWaitFd(fd, POLLOUT, 30000))
+		{
+			return 0;
+		}
+		/* Small pieces keep each call inside the SOC session short. */
+		w = send(fd, data, (n > N3DS_FTP_SEND_CHUNK) ? N3DS_FTP_SEND_CHUNK : n, 0);
+		if (w <= 0)
+		{
+			return 0;
+		}
+		data += w;
+		n -= (size_t)w;
+	}
+	return 1;
+}
+
+static int N3DS_FtpReply(N3DS_FtpSession *s, const char *fmt, ...)
+{
+	char line[N3DS_FTP_LINE_MAX];
+	va_list args;
+	int n;
+
+	va_start(args, fmt);
+	n = vsnprintf(line, sizeof(line) - 2, fmt, args);
+	va_end(args);
+	if (n < 0)
+	{
+		return 0;
+	}
+	if (n > (int)sizeof(line) - 3)
+	{
+		n = (int)sizeof(line) - 3;
+	}
+	line[n++] = '\r';
+	line[n++] = '\n';
+	return N3DS_FtpSendAll(s->ctrl, line, (size_t)n);
+}
+
+/* One command line, CR/LF stripped. False when the client left or we stop. */
+static int N3DS_FtpReadLine(N3DS_FtpSession *s, char *out, unsigned cap)
+{
+	for (;;)
+	{
+		unsigned i;
+		ssize_t r;
+
+		for (i = 0; i < s->inUsed; i++)
+		{
+			if (s->in[i] == '\n')
+			{
+				unsigned n = i;
+
+				if ((n > 0) && (s->in[n - 1] == '\r'))
+				{
+					n--;
+				}
+				if (n >= cap)
+				{
+					n = cap - 1;
+				}
+				memcpy(out, s->in, n);
+				out[n] = 0;
+				memmove(s->in, s->in + i + 1, s->inUsed - i - 1);
+				s->inUsed -= i + 1;
+				return 1;
+			}
+		}
+		if (s->inUsed >= sizeof(s->in) - 1)
+		{
+			s->inUsed = 0; /* overlong line: drop it */
+		}
+		if (!N3DS_FtpWaitFd(s->ctrl, POLLIN, N3DS_FTP_IDLE_MS))
+		{
+			return 0;
+		}
+		r = recv(s->ctrl, s->in + s->inUsed, sizeof(s->in) - 1 - s->inUsed, 0);
+		if (r <= 0)
+		{
+			return 0;
+		}
+		s->inUsed += (unsigned)r;
+	}
+}
+
+/* ---- paths: "/" is the root of the SD card ---- */
+
+static void N3DS_FtpResolvePath(const N3DS_FtpSession *s, const char *arg, char *out, unsigned cap)
+{
+	char joined[N3DS_FTP_PATH_MAX * 2];
+	char parts[64][128];
+	int count = 0;
+	int i;
+	unsigned n = 0;
+	char *save = NULL;
+	char *p;
+
+	if ((arg == NULL) || (arg[0] == 0))
+	{
+		snprintf(joined, sizeof(joined), "%s", s->cwd);
+	}
+	else if (arg[0] == '/')
+	{
+		snprintf(joined, sizeof(joined), "%s", arg);
+	}
+	else
+	{
+		snprintf(joined, sizeof(joined), "%s/%s", s->cwd, arg);
+	}
+
+	/* Normalise: drop empty and "." parts, resolve "..". */
+	for (p = strtok_r(joined, "/", &save); p != NULL; p = strtok_r(NULL, "/", &save))
+	{
+		if (strcmp(p, ".") == 0)
+		{
+			continue;
+		}
+		if (strcmp(p, "..") == 0)
+		{
+			if (count > 0)
+			{
+				count--;
+			}
+			continue;
+		}
+		if (count < 64)
+		{
+			snprintf(parts[count++], sizeof(parts[0]), "%s", p);
+		}
+	}
+
+	out[0] = 0;
+	for (i = 0; (i < count) && (n + 1 < cap); i++)
+	{
+		n += (unsigned)snprintf(out + n, cap - n, "/%s", parts[i]);
+	}
+	if (n == 0)
+	{
+		snprintf(out, cap, "/");
+	}
+}
+
+static void N3DS_FtpRealPath(const char *virtualPath, char *out, unsigned cap)
+{
+	size_t n = strnlen(virtualPath, N3DS_FTP_PATH_MAX);
+
+	if (n > cap - 6)
+	{
+		n = cap - 6;
+	}
+	memcpy(out, "sdmc:", 5);
+	memcpy(out + 5, virtualPath, n);
+	out[5 + n] = 0;
+}
+
+/* ---- data connection ---- */
+
+static void N3DS_FtpClosePasv(N3DS_FtpSession *s)
+{
+	N3DS_FtpCloseSocket(&s->pasv);
+}
+
+static int N3DS_FtpOpenPasv(N3DS_FtpSession *s)
+{
+	unsigned attempt;
+
+	N3DS_FtpClosePasv(s);
+	for (attempt = 0; attempt < N3DS_FTP_PASV_COUNT; attempt++)
+	{
+		const unsigned port = N3DS_FTP_PASV_FIRST + (s_ftpNextPasv++ % N3DS_FTP_PASV_COUNT);
+		struct sockaddr_in addr;
+		int yes = 1;
+		int fd = socket(AF_INET, SOCK_STREAM, IPPROTO_IP);
+
+		if (fd < 0)
+		{
+			return -1;
+		}
+		setsockopt(fd, SOL_SOCKET, SO_REUSEADDR, &yes, sizeof(yes));
+		memset(&addr, 0, sizeof(addr));
+		addr.sin_family = AF_INET;
+		addr.sin_port = htons((uint16_t)port);
+		addr.sin_addr.s_addr = INADDR_ANY;
+		if ((bind(fd, (struct sockaddr *)&addr, sizeof(addr)) == 0) && (listen(fd, 1) == 0))
+		{
+			s->pasv = fd;
+			return (int)port;
+		}
+		close(fd);
+	}
+	return -1;
+}
+
+/* Accepts the client's data connection; -1 when none came. */
+static int N3DS_FtpAcceptData(N3DS_FtpSession *s)
+{
+	int fd = -1;
+
+	if (s->pasv < 0)
+	{
+		return -1;
+	}
+	if (N3DS_FtpWaitFd(s->pasv, POLLIN, N3DS_FTP_DATA_ACCEPT_MS))
+	{
+		struct sockaddr_in peer;
+		socklen_t len = sizeof(peer);
+
+		fd = accept(s->pasv, (struct sockaddr *)&peer, &len);
+	}
+	N3DS_FtpClosePasv(s);
+	return fd;
+}
+
+/* ---- commands ---- */
+
+static void N3DS_FtpFormatListLine(char *out, unsigned cap, const char *name, const struct stat *st, int mlsd)
+{
+	const int dir = S_ISDIR(st->st_mode);
+
+	if (mlsd)
+	{
+		snprintf(out, cap, "type=%s;size=%llu; %s\r\n", dir ? "dir" : "file", (unsigned long long)st->st_size, name);
+		return;
+	}
+	/* libctru leaves st_mtime at 0: a fixed date reads better than 1970. */
+	snprintf(out, cap, "%s 1 3ds 3ds %12llu Jan  1 00:00 %s\r\n", dir ? "drwxrwxrwx" : "-rw-rw-rw-",
+	         (unsigned long long)st->st_size, name);
+}
+
+static void N3DS_FtpCmdList(N3DS_FtpSession *s, const char *arg, int kind /* 0 LIST, 1 NLST, 2 MLSD */)
+{
+	char vpath[N3DS_FTP_PATH_MAX], rpath[N3DS_FTP_PATH_MAX + 8];
+	DIR *dir;
+	struct dirent *e;
+	int data;
+	int ok = 1;
+
+	/* Clients send options such as "-a" or "-la": not a path. */
+	if ((arg != NULL) && (arg[0] == '-'))
+	{
+		const char *space = strchr(arg, ' ');
+
+		arg = space ? space + 1 : "";
+	}
+	N3DS_FtpResolvePath(s, arg, vpath, sizeof(vpath));
+	N3DS_FtpRealPath(vpath, rpath, sizeof(rpath));
+	dir = opendir(rpath);
+	if (dir == NULL)
+	{
+		N3DS_FtpClosePasv(s);
+		N3DS_FtpReply(s, "550 No such directory.");
+		return;
+	}
+	N3DS_FtpReply(s, "150 Listing.");
+	data = N3DS_FtpAcceptData(s);
+	if (data < 0)
+	{
+		closedir(dir);
+		N3DS_FtpReply(s, "425 No data connection.");
+		return;
+	}
+	while (ok && ((e = readdir(dir)) != NULL))
+	{
+		char line[N3DS_FTP_PATH_MAX + 96];
+
+		if ((strcmp(e->d_name, ".") == 0) || (strcmp(e->d_name, "..") == 0))
+		{
+			continue;
+		}
+		if (kind == 1)
+		{
+			snprintf(line, sizeof(line), "%s\r\n", e->d_name);
+		}
+		else
+		{
+			char full[N3DS_FTP_PATH_MAX * 2];
+			struct stat st;
+
+			snprintf(full, sizeof(full), "%s/%s", rpath, e->d_name);
+			if (stat(full, &st) != 0)
+			{
+				memset(&st, 0, sizeof(st));
+			}
+			if (e->d_type == DT_DIR)
+			{
+				st.st_mode = S_IFDIR;
+			}
+			N3DS_FtpFormatListLine(line, sizeof(line), e->d_name, &st, kind == 2);
+		}
+		ok = N3DS_FtpSendAll(data, line, strlen(line));
+	}
+	closedir(dir);
+	N3DS_FtpCloseSocket(&data);
+	N3DS_FtpReply(s, ok ? "226 Done." : "426 Transfer aborted.");
+}
+
+static void N3DS_FtpCmdRetr(N3DS_FtpSession *s, const char *arg)
+{
+	char vpath[N3DS_FTP_PATH_MAX], rpath[N3DS_FTP_PATH_MAX + 8];
+	FILE *f;
+	int data;
+	int ok = 1;
+	size_t n;
+
+	N3DS_FtpResolvePath(s, arg, vpath, sizeof(vpath));
+	N3DS_FtpRealPath(vpath, rpath, sizeof(rpath));
+
+	/* The game's log is buffered (16 KB) and flushed on a timer: commit what
+	 * it has so the client sees the latest lines. */
+	if (strncasecmp(vpath, "/ctr3ds", 7) == 0)
+	{
+		N3DS_LogFlushNow();
+	}
+
+	f = fopen(rpath, "rb");
+	if (f == NULL)
+	{
+		N3DS_FtpClosePasv(s);
+		N3DS_FtpReply(s, "550 Cannot open the file.");
+		return;
+	}
+	if ((s->rest > 0) && (fseeko(f, (off_t)s->rest, SEEK_SET) != 0))
+	{
+		fclose(f);
+		N3DS_FtpClosePasv(s);
+		N3DS_FtpReply(s, "551 Cannot seek to the restart offset.");
+		return;
+	}
+	N3DS_FtpReply(s, "150 Sending.");
+	data = N3DS_FtpAcceptData(s);
+	if (data < 0)
+	{
+		fclose(f);
+		N3DS_FtpReply(s, "425 No data connection.");
+		return;
+	}
+	while (ok && ((n = fread(s_ftpIo, 1, N3DS_FTP_IO_SIZE, f)) > 0))
+	{
+		ok = N3DS_FtpSendAll(data, (const char *)s_ftpIo, n);
+	}
+	fclose(f);
+	N3DS_FtpCloseSocket(&data);
+	N3DS_FtpReply(s, ok ? "226 Done." : "426 Transfer aborted.");
+}
+
+/* STOR, or APPE when `append`. A pending REST makes STOR write from that offset
+ * without truncating, so an interrupted upload resumes (curl -C -, lftp, WinSCP,
+ * FileZilla all use REST or APPE for this). */
+static void N3DS_FtpCmdStor(N3DS_FtpSession *s, const char *arg, int append)
+{
+	char vpath[N3DS_FTP_PATH_MAX], rpath[N3DS_FTP_PATH_MAX + 8];
+	FILE *f;
+	int data;
+	int ok = 1;
+	const int resume = (!append) && (s->rest > 0);
+
+	N3DS_FtpResolvePath(s, arg, vpath, sizeof(vpath));
+	N3DS_FtpRealPath(vpath, rpath, sizeof(rpath));
+	f = fopen(rpath, append ? "ab" : (resume ? "r+b" : "wb"));
+	if ((f == NULL) || (resume && (fseeko(f, (off_t)s->rest, SEEK_SET) != 0)))
+	{
+		if (f != NULL)
+		{
+			fclose(f);
+		}
+		N3DS_FtpClosePasv(s);
+		N3DS_FtpReply(s, "553 Cannot create the file.");
+		return;
+	}
+	N3DS_FtpReply(s, "150 Receiving.");
+	data = N3DS_FtpAcceptData(s);
+	if (data < 0)
+	{
+		fclose(f);
+		N3DS_FtpReply(s, "425 No data connection.");
+		return;
+	}
+	for (;;)
+	{
+		ssize_t r;
+
+		if (!N3DS_FtpWaitFd(data, POLLIN, 30000))
+		{
+			ok = 0;
+			break;
+		}
+		r = recv(data, s_ftpIo, N3DS_FTP_IO_SIZE, 0);
+		if (r == 0)
+		{
+			break;
+		}
+		if ((r < 0) || (fwrite(s_ftpIo, 1, (size_t)r, f) != (size_t)r))
+		{
+			ok = 0;
+			break;
+		}
+	}
+	/* The partial file stays on the card and is closed cleanly, so the client's
+	 * SIZE says exactly where to resume from. */
+	if (fclose(f) != 0)
+	{
+		ok = 0;
+	}
+	N3DS_FtpCloseSocket(&data);
+	{
+		char msg[N3DS_FTP_PATH_MAX + 64];
+
+		snprintf(msg, sizeof(msg), "[CTR-3DS] ftp: received %s%s", vpath, ok ? "" : " (failed)");
+		N3DS_DebugLog(msg);
+	}
+	N3DS_FtpReply(s, ok ? "226 Done." : "451 Transfer failed.");
+}
+
+/* ---- CIA install (mzm's cia_install_3ds.c, same steps) ---- */
+
+static int N3DS_FtpInstallCia(const char *sdPath, char *error, unsigned errorCap)
+{
+	u64 title = 0;
+	u8 mediaByte = MEDIATYPE_SD;
+	FS_MediaType media;
+	bool registered = false, loaded = false;
+	APT_AppletAttr attr;
+	Result rc;
+	Handle input = 0, output = 0;
+	int started = 0, ok = 0;
+	u64 size = 0, required = 0, offset;
+	AM_TitleInfo info;
+	FS_ArchiveResource res;
+	unsigned char *data;
+
+	/* The running title's ID and media: the CIA must be for this very title. */
+	if (R_FAILED(APT_GetAppletInfo(APPID_APPLICATION, &title, &mediaByte, &registered, &loaded, &attr)) || (title == 0))
+	{
+		snprintf(error, errorCap, "not running as an installed title");
+		return 0;
+	}
+	media = (mediaByte == MEDIATYPE_NAND) ? MEDIATYPE_NAND : MEDIATYPE_SD;
+
+	rc = amInit();
+	if (R_FAILED(rc))
+	{
+		snprintf(error, errorCap, "AM unavailable (%08lx)", (unsigned long)rc);
+		return 0;
+	}
+
+	data = (unsigned char *)malloc(N3DS_FTP_CIA_IO_SIZE);
+	snprintf(error, errorCap, "out of memory");
+	if (data == NULL)
+	{
+		goto done;
+	}
+	rc = FSUSER_OpenFileDirectly(&input, ARCHIVE_SDMC, fsMakePath(PATH_EMPTY, ""), fsMakePath(PATH_ASCII, sdPath), FS_OPEN_READ, 0);
+	snprintf(error, errorCap, "cannot open %s", sdPath);
+	if (R_FAILED(rc) || R_FAILED(FSFILE_GetSize(input, &size)))
+	{
+		goto done;
+	}
+	rc = AM_GetCiaFileInfo(media, &info, input);
+	snprintf(error, errorCap, "not a CIA of this game (title %016llx)", R_SUCCEEDED(rc) ? (unsigned long long)info.titleID : 0ull);
+	if (R_FAILED(rc) || (info.titleID != title))
+	{
+		goto done;
+	}
+	rc = AM_GetCiaRequiredSpace(&required, media, input);
+	snprintf(error, errorCap, "not enough SD space");
+	if (R_FAILED(rc) || R_FAILED(FSUSER_GetSdmcArchiveResource(&res)) || ((u64)res.freeClusters * res.clusterSize < required + 4 * 1024 * 1024ull))
+	{
+		goto done;
+	}
+	/* Overwrite through AM; the installed title is never deleted first. */
+	rc = AM_StartCiaInstallOverwrite(&output, media);
+	snprintf(error, errorCap, "install start failed (%08lx)", (unsigned long)rc);
+	if (R_FAILED(rc))
+	{
+		goto done;
+	}
+	started = 1;
+	for (offset = 0; offset < size;)
+	{
+		u32 read = 0, wrote = 0;
+		u32 want = (size - offset > N3DS_FTP_CIA_IO_SIZE) ? N3DS_FTP_CIA_IO_SIZE : (u32)(size - offset);
+
+		rc = FSFILE_Read(input, &read, offset, data, want);
+		snprintf(error, errorCap, "SD read failed (%08lx)", (unsigned long)rc);
+		if (R_FAILED(rc) || (read != want))
+		{
+			goto done;
+		}
+		rc = FSFILE_Write(output, &wrote, offset, data, read, 0);
+		snprintf(error, errorCap, "install write failed (%08lx)", (unsigned long)rc);
+		if (R_FAILED(rc) || (wrote != read))
+		{
+			goto done;
+		}
+		offset += read;
+	}
+	rc = AM_FinishCiaInstall(output);
+	started = 0;
+	ok = R_SUCCEEDED(rc);
+	snprintf(error, errorCap, ok ? "" : "install finish failed (%08lx)", (unsigned long)rc);
+
+done:
+	if (started)
+	{
+		AM_CancelCIAInstall(output);
+	}
+	if (input != 0)
+	{
+		FSFILE_Close(input);
+	}
+	free(data);
+	amExit();
+	return ok;
+}
+
+static void N3DS_FtpCmdSite(N3DS_FtpSession *s, char *arg)
+{
+	char *path = strchr(arg, ' ');
+	char *c;
+	char vpath[N3DS_FTP_PATH_MAX];
+
+	if (path != NULL)
+	{
+		*path++ = 0;
+	}
+	for (c = arg; *c; c++)
+	{
+		if ((*c >= 'a') && (*c <= 'z'))
+		{
+			*c = (char)(*c - 32);
+		}
+	}
+	if ((strcmp(arg, "INSTALL") == 0) && (path != NULL) && (*path != 0))
+	{
+		char error[N3DS_FTP_PATH_MAX + 64];
+
+		N3DS_FtpResolvePath(s, path, vpath, sizeof(vpath));
+		if (N3DS_FtpInstallCia(vpath, error, sizeof(error)))
+		{
+			char msg[N3DS_FTP_PATH_MAX + 48];
+
+			snprintf(msg, sizeof(msg), "[CTR-3DS] ftp: installed %s, restarting", vpath);
+			N3DS_DebugLog(msg);
+			N3DS_LogFlushNow();
+			/* libctru's aptExit() starts this title again after the normal exit
+			 * path; jumping at once made the loader load the title twice
+			 * (see mzm's cia_install_3ds.c). The main loop quits when due. */
+			aptSetChainloaderToSelf();
+			N3DS_FtpReply(s, "200 Installed %s; the game restarts in a few seconds.", vpath);
+			s_ftpRelaunchAt = osGetTime() + N3DS_FTP_RELAUNCH_DELAY_MS;
+		}
+		else
+		{
+			char msg[N3DS_FTP_PATH_MAX + 96];
+
+			snprintf(msg, sizeof(msg), "[CTR-3DS] ftp: install failed: %s", error);
+			N3DS_DebugLog(msg);
+			N3DS_FtpReply(s, "550 Install failed: %s", error);
+		}
+	}
+	else if (strcmp(arg, "INSTALL") == 0)
+	{
+		N3DS_FtpReply(s, "501 SITE INSTALL <path to a .cia of this game>");
+	}
+	else
+	{
+		N3DS_FtpReply(s, "504 Unknown SITE command.");
+	}
+}
+
+static void N3DS_FtpHandleSession(int ctrl)
+{
+	N3DS_FtpSession *s = &s_session;
+	char line[N3DS_FTP_LINE_MAX];
+
+	memset(s, 0, sizeof(*s));
+	s->ctrl = ctrl;
+	s->pasv = -1;
+	/* Log in at the SD card's root, like any FTP server. */
+	snprintf(s->cwd, sizeof(s->cwd), "/");
+	N3DS_FtpReply(s, "220 CTR 3D FTP. SD card root; the log is /ctr3ds.log.");
+
+	for (;;)
+	{
+		char vpath[N3DS_FTP_PATH_MAX], rpath[N3DS_FTP_PATH_MAX + 8];
+		struct stat st;
+		char *arg;
+		char *c;
+		int wasRest = 0;
+
+		if (!s_ftpRun || !N3DS_FtpReadLine(s, line, sizeof(line)))
+		{
+			break;
+		}
+		arg = strchr(line, ' ');
+		if (arg != NULL)
+		{
+			*arg++ = 0;
+		}
+		else
+		{
+			arg = line + strlen(line);
+		}
+		for (c = line; *c; c++)
+		{
+			if ((*c >= 'a') && (*c <= 'z'))
+			{
+				*c = (char)(*c - 32);
+			}
+		}
+
+		if ((strcmp(line, "USER") == 0))
+		{
+			N3DS_FtpReply(s, "331 Any password will do.");
+		}
+		else if (strcmp(line, "PASS") == 0)
+		{
+			N3DS_FtpReply(s, "230 Logged in.");
+		}
+		else if (strcmp(line, "SYST") == 0)
+		{
+			N3DS_FtpReply(s, "215 UNIX Type: L8");
+		}
+		else if (strcmp(line, "FEAT") == 0)
+		{
+			N3DS_FtpReply(s, "211-Features:\r\n SIZE\r\n MDTM\r\n MLSD\r\n REST STREAM\r\n EPSV\r\n PASV\r\n UTF8\r\n211 End");
+		}
+		else if ((strcmp(line, "OPTS") == 0) || (strcmp(line, "TYPE") == 0) || (strcmp(line, "MODE") == 0) ||
+		         (strcmp(line, "STRU") == 0) || (strcmp(line, "NOOP") == 0) || (strcmp(line, "ALLO") == 0))
+		{
+			N3DS_FtpReply(s, "200 OK.");
+		}
+		else if (strcmp(line, "REST") == 0)
+		{
+			s->rest = strtoull(arg, NULL, 10);
+			wasRest = 1;
+			N3DS_FtpReply(s, "350 Restarting at %llu.", s->rest);
+		}
+		else if ((strcmp(line, "PWD") == 0) || (strcmp(line, "XPWD") == 0))
+		{
+			N3DS_FtpReply(s, "257 \"%s\"", s->cwd);
+		}
+		else if ((strcmp(line, "CWD") == 0) || (strcmp(line, "CDUP") == 0))
+		{
+			DIR *d;
+
+			N3DS_FtpResolvePath(s, (strcmp(line, "CDUP") == 0) ? ".." : arg, vpath, sizeof(vpath));
+			N3DS_FtpRealPath(vpath, rpath, sizeof(rpath));
+			d = opendir(rpath);
+			if (d != NULL)
+			{
+				closedir(d);
+				snprintf(s->cwd, sizeof(s->cwd), "%s", vpath);
+				N3DS_FtpReply(s, "250 OK.");
+			}
+			else
+			{
+				N3DS_FtpReply(s, "550 No such directory.");
+			}
+		}
+		else if (strcmp(line, "PASV") == 0)
+		{
+			int port = N3DS_FtpOpenPasv(s);
+
+			if (port < 0)
+			{
+				N3DS_FtpReply(s, "425 Cannot open a data port.");
+			}
+			else
+			{
+				N3DS_FtpReply(s, "227 Entering Passive Mode (%lu,%lu,%lu,%lu,%d,%d).", (unsigned long)(s_ftpIp & 0xFF),
+				              (unsigned long)((s_ftpIp >> 8) & 0xFF), (unsigned long)((s_ftpIp >> 16) & 0xFF),
+				              (unsigned long)((s_ftpIp >> 24) & 0xFF), port >> 8, port & 0xFF);
+			}
+		}
+		else if (strcmp(line, "EPSV") == 0)
+		{
+			int port = N3DS_FtpOpenPasv(s);
+
+			if (port < 0)
+			{
+				N3DS_FtpReply(s, "425 Cannot open a data port.");
+			}
+			else
+			{
+				N3DS_FtpReply(s, "229 Entering Extended Passive Mode (|||%d|).", port);
+			}
+		}
+		else if (strcmp(line, "LIST") == 0)
+		{
+			N3DS_FtpCmdList(s, arg, 0);
+		}
+		else if (strcmp(line, "NLST") == 0)
+		{
+			N3DS_FtpCmdList(s, arg, 1);
+		}
+		else if (strcmp(line, "MLSD") == 0)
+		{
+			N3DS_FtpCmdList(s, arg, 2);
+		}
+		else if (strcmp(line, "RETR") == 0)
+		{
+			N3DS_FtpCmdRetr(s, arg);
+		}
+		else if (strcmp(line, "STOR") == 0)
+		{
+			N3DS_FtpCmdStor(s, arg, 0);
+		}
+		else if (strcmp(line, "APPE") == 0)
+		{
+			N3DS_FtpCmdStor(s, arg, 1);
+		}
+		else if ((strcmp(line, "SIZE") == 0) || (strcmp(line, "MDTM") == 0))
+		{
+			N3DS_FtpResolvePath(s, arg, vpath, sizeof(vpath));
+			N3DS_FtpRealPath(vpath, rpath, sizeof(rpath));
+			if ((strcmp(line, "SIZE") == 0) && (strncasecmp(vpath, "/ctr3ds", 7) == 0))
+			{
+				N3DS_LogFlushNow();
+			}
+			if ((stat(rpath, &st) != 0) || S_ISDIR(st.st_mode))
+			{
+				N3DS_FtpReply(s, "550 No such file.");
+			}
+			else if (line[0] == 'S')
+			{
+				N3DS_FtpReply(s, "213 %llu", (unsigned long long)st.st_size);
+			}
+			else
+			{
+				N3DS_FtpReply(s, "213 20260101000000");
+			}
+		}
+		else if ((strcmp(line, "DELE") == 0) || (strcmp(line, "RMD") == 0) || (strcmp(line, "XRMD") == 0) ||
+		         (strcmp(line, "MKD") == 0) || (strcmp(line, "XMKD") == 0))
+		{
+			int r;
+
+			N3DS_FtpResolvePath(s, arg, vpath, sizeof(vpath));
+			N3DS_FtpRealPath(vpath, rpath, sizeof(rpath));
+			if (line[0] == 'D')
+			{
+				r = remove(rpath);
+			}
+			else if (strstr(line, "RMD") != NULL)
+			{
+				r = rmdir(rpath);
+			}
+			else
+			{
+				r = mkdir(rpath, 0777);
+			}
+			if (r != 0)
+			{
+				N3DS_FtpReply(s, "550 Failed.");
+			}
+			else if (strstr(line, "MKD") != NULL)
+			{
+				N3DS_FtpReply(s, "257 \"%s\" created.", vpath);
+			}
+			else
+			{
+				N3DS_FtpReply(s, "250 OK.");
+			}
+		}
+		else if (strcmp(line, "RNFR") == 0)
+		{
+			N3DS_FtpResolvePath(s, arg, s->rnfr, sizeof(s->rnfr));
+			N3DS_FtpReply(s, "350 Ready for RNTO.");
+		}
+		else if (strcmp(line, "RNTO") == 0)
+		{
+			char from[N3DS_FTP_PATH_MAX + 8];
+
+			N3DS_FtpRealPath(s->rnfr, from, sizeof(from));
+			N3DS_FtpResolvePath(s, arg, vpath, sizeof(vpath));
+			N3DS_FtpRealPath(vpath, rpath, sizeof(rpath));
+			N3DS_FtpReply(s, (s->rnfr[0] && (rename(from, rpath) == 0)) ? "250 Renamed." : "550 Rename failed.");
+			s->rnfr[0] = 0;
+		}
+		else if (strcmp(line, "SITE") == 0)
+		{
+			N3DS_FtpCmdSite(s, arg);
+		}
+		else if (strcmp(line, "QUIT") == 0)
+		{
+			N3DS_FtpReply(s, "221 Bye.");
+			break;
+		}
+		else
+		{
+			N3DS_FtpReply(s, "502 Not implemented.");
+		}
+
+		/* REST only applies to the command right after it. */
+		if (!wasRest)
+		{
+			s->rest = 0;
+		}
+	}
+	N3DS_FtpClosePasv(s);
+}
+
+/* ---- thread ---- */
+
+static void N3DS_FtpThreadMain(void *argument)
+{
+	(void)argument;
+
+	/* Wait for Wi-Fi (the game may start long before it is up), then listen. */
+	while (s_ftpRun)
+	{
+		struct sockaddr_in addr;
+		int yes = 1;
+
+		if (osGetWifiStrength() == 0)
+		{
+			svcSleepThread(1000000000LL);
+			continue;
+		}
+		s_ftpListen = socket(AF_INET, SOCK_STREAM, IPPROTO_IP);
+		if (s_ftpListen >= 0)
+		{
+			setsockopt(s_ftpListen, SOL_SOCKET, SO_REUSEADDR, &yes, sizeof(yes));
+			memset(&addr, 0, sizeof(addr));
+			addr.sin_family = AF_INET;
+			addr.sin_port = htons(N3DS_FTP_PORT);
+			addr.sin_addr.s_addr = INADDR_ANY;
+			if ((bind(s_ftpListen, (struct sockaddr *)&addr, sizeof(addr)) == 0) && (listen(s_ftpListen, 1) == 0))
+			{
+				break;
+			}
+			N3DS_FtpCloseSocket(&s_ftpListen);
+		}
+		svcSleepThread(2000000000LL);
+	}
+	if (!s_ftpRun)
+	{
+		return;
+	}
+
+	s_ftpIp = (uint32_t)gethostid();
+	{
+		struct in_addr ia;
+		char msg[64];
+
+		ia.s_addr = s_ftpIp;
+		snprintf(msg, sizeof(msg), "[CTR-3DS] ftp: serving on %s:%d", inet_ntoa(ia), N3DS_FTP_PORT);
+		N3DS_DebugLog(msg);
+	}
+
+	while (s_ftpRun)
+	{
+		struct sockaddr_in peer;
+		socklen_t len = sizeof(peer);
+		int fd;
+
+		/* Nobody connected: a longer nap than a transfer's, to stay cheap. */
+		{
+			struct pollfd p;
+
+			p.fd = s_ftpListen;
+			p.events = POLLIN;
+			p.revents = 0;
+			if (poll(&p, 1, 0) <= 0)
+			{
+				svcSleepThread((s64)N3DS_FTP_IDLE_NAP_MS * 1000000);
+				continue;
+			}
+		}
+		fd = accept(s_ftpListen, (struct sockaddr *)&peer, &len);
+		if (fd < 0)
+		{
+			continue;
+		}
+		N3DS_FtpHandleSession(fd);
+		N3DS_FtpCloseSocket(&fd);
+	}
+	N3DS_FtpCloseSocket(&s_ftpListen);
+}
+
+/* Process exit: ask the thread to stop and give it a second. If it does not
+ * end it is left alone (the kernel reaps it); see N3DS_FtpActive for socExit. */
+static void N3DS_FtpAtExit(void)
+{
+	s_ftpRun = 0;
+	if (s_ftpThread != NULL)
+	{
+		if (threadJoin(s_ftpThread, 1000000000ULL) == 0)
+		{
+			threadFree(s_ftpThread);
+		}
+		else
+		{
+			s_ftpStuck = 1;
+		}
+		s_ftpThread = NULL;
+	}
+}
+
+/* socExit is skipped by the backend when the thread would not end: with a client still
+ * connected it never returned in the author's other ports (the kernel closes
+ * the SOC session when the process ends anyway). */
+int N3DS_FtpActive(void)
+{
+	return s_ftpStuck;
+}
+
+/* Brings the server thread up (no flag-file check). Main thread only. */
+static int N3DS_FtpStartThread(void)
+{
+	bool isNew3DS = false;
+
+	if ((s_ftpThread != NULL) || s_ftpStuck)
+	{
+		return 0; /* already up, still stopping, or wedged */
+	}
+	/* Cores 2 and 3 only exist on the New 3DS; core 1 is forbidden. */
+	APT_CheckNew3DS(&isNew3DS);
+	if (!isNew3DS)
+	{
+		N3DS_DebugLog("[CTR-3DS] ftp: NO (not a New3DS, no spare core)");
+		return 0;
+	}
+	if (!N3DS_NetEnsureSoc())
+	{
+		N3DS_DebugLog("[CTR-3DS] ftp: NO (socket service unavailable)");
+		return 0;
+	}
+	s_ftpIo = (unsigned char *)malloc(N3DS_FTP_IO_SIZE);
+	if (s_ftpIo == NULL)
+	{
+		N3DS_DebugLog("[CTR-3DS] ftp: NO (out of memory)");
+		return 0;
+	}
+
+	s_ftpIp = 0;
+	s_ftpRun = 1;
+	s_ftpThread = threadCreate(N3DS_FtpThreadMain, NULL, N3DS_FTP_STACK_SIZE, N3DS_FTP_PRIORITY, 3, false);
+	if (s_ftpThread == NULL)
+	{
+		s_ftpThread = threadCreate(N3DS_FtpThreadMain, NULL, N3DS_FTP_STACK_SIZE, N3DS_FTP_PRIORITY, 2, false);
+	}
+	if (s_ftpThread == NULL)
+	{
+		s_ftpRun = 0;
+		free(s_ftpIo);
+		s_ftpIo = NULL;
+		N3DS_DebugLog("[CTR-3DS] ftp: NO (threadCreate failed on cores 3 and 2)");
+		return 0;
+	}
+	if (!s_ftpAtExitSet)
+	{
+		atexit(N3DS_FtpAtExit);
+		s_ftpAtExitSet = 1;
+	}
+	N3DS_DebugLog("[CTR-3DS] ftp: thread up (lowest priority, core 3/2), waiting for Wi-Fi");
+	return 1;
+}
+
+void N3DS_FtpStartIfEnabled(void)
+{
+	struct stat st;
+
+	if (stat(N3DS_FTP_FLAG_PATH, &st) != 0)
+	{
+		return;
+	}
+	(void)N3DS_FtpStartThread();
+}
+
+/* ---- runtime control (debug UI, main thread only) ---- */
+
+int N3DS_FtpStatus(void)
+{
+	if (s_ftpStuck)
+	{
+		return N3DS_FTP_STATUS_STUCK;
+	}
+	if (s_ftpThread == NULL)
+	{
+		return N3DS_FTP_STATUS_OFF;
+	}
+	if (!s_ftpRun)
+	{
+		return N3DS_FTP_STATUS_STOPPING;
+	}
+	return (s_ftpIp != 0) ? N3DS_FTP_STATUS_LISTENING : N3DS_FTP_STATUS_WAITING_WIFI;
+}
+
+unsigned int N3DS_FtpAddress(void)
+{
+	return (unsigned int)s_ftpIp;
+}
+
+int N3DS_FtpPort(void)
+{
+	return N3DS_FTP_PORT;
+}
+
+/* Asks the thread to stop without waiting for it: a join here would stall the
+ * game thread for up to the Wi-Fi poll nap or a transfer chunk. N3DS_FtpPoll
+ * reaps the thread once it has ended. */
+void N3DS_FtpSetEnabled(int on)
+{
+	if (on)
+	{
+		(void)N3DS_FtpStartThread();
+	}
+	else if ((s_ftpThread != NULL) && s_ftpRun)
+	{
+		s_ftpRun = 0;
+		N3DS_DebugLog("[CTR-3DS] ftp: stop requested from the debug UI");
+	}
+}
+
+/* Reaps a stopped server thread (non-blocking). Called once per frame while
+ * the debug UI is open; if the UI is closed mid-stop the at-exit join still
+ * covers it. */
+void N3DS_FtpPoll(void)
+{
+	if ((s_ftpThread != NULL) && !s_ftpRun && !s_ftpStuck)
+	{
+		if (threadJoin(s_ftpThread, 0ULL) == 0)
+		{
+			threadFree(s_ftpThread);
+			s_ftpThread = NULL;
+			free(s_ftpIo);
+			s_ftpIo = NULL;
+			s_ftpIp = 0;
+			N3DS_DebugLog("[CTR-3DS] ftp: stopped");
+		}
+	}
+}
+
+int N3DS_FtpRelaunchDue(void)
+{
+	return (s_ftpRelaunchAt != 0) && (osGetTime() >= s_ftpRelaunchAt);
+}

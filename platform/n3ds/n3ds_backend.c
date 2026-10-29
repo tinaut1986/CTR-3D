@@ -14,6 +14,8 @@
 
 #include "n3ds_backend.h"
 #include "n3ds_beat.h"
+#include "n3ds_debugui.h"
+#include "n3ds_ftp.h"
 #include "n3ds_render_thread.h" /* N3DS_RenderWorkerIsSelf -- which thread the frame-begin guard is running on */
 #include "ctr_shbin.h"
 #ifdef CTR_NATIVE_TRACK_RENDERER
@@ -94,10 +96,39 @@ void N3DS_SetSdLogEnabled(int enabled)
 
 static void N3DS_NetloadStreamExit(void)
 {
-	if (s_socBuffer != NULL)
+	if ((s_socBuffer != NULL) && !N3DS_FtpActive())
 	{
 		socExit();
 	}
+}
+
+/*
+ * The one socInit of the process, shared by the 3dslink stream and the FTP
+ * server (n3ds_ftp.c). Call from the main thread before the worker threads
+ * exist; later calls are a no-op. Returns nonzero when the socket service is up.
+ */
+int N3DS_NetEnsureSoc(void)
+{
+	if (s_socBuffer != NULL)
+	{
+		return 1;
+	}
+
+	s_socBuffer = (u32 *)memalign(N3DS_SOC_ALIGN, N3DS_SOC_BUFFER_SIZE);
+	if (s_socBuffer == NULL)
+	{
+		return 0;
+	}
+
+	if (R_FAILED(socInit(s_socBuffer, N3DS_SOC_BUFFER_SIZE)))
+	{
+		free(s_socBuffer);
+		s_socBuffer = NULL;
+		return 0;
+	}
+
+	atexit(N3DS_NetloadStreamExit);
+	return 1;
 }
 
 static void N3DS_NetloadStreamInit(void)
@@ -107,20 +138,10 @@ static void N3DS_NetloadStreamInit(void)
 		return;
 	}
 
-	s_socBuffer = (u32 *)memalign(N3DS_SOC_ALIGN, N3DS_SOC_BUFFER_SIZE);
-	if (s_socBuffer == NULL)
+	if (!N3DS_NetEnsureSoc())
 	{
 		return;
 	}
-
-	if (R_FAILED(socInit(s_socBuffer, N3DS_SOC_BUFFER_SIZE)))
-	{
-		free(s_socBuffer);
-		s_socBuffer = NULL;
-		return;
-	}
-
-	atexit(N3DS_NetloadStreamExit);
 
 	/* stderr only: stdout must stay the bottom-screen console. If the host
 	 * isn't listening (3dslink without -s) this fails fast and boot proceeds
@@ -195,6 +216,9 @@ void N3DS_EarlyInit(void)
 	{
 		N3DS_DebugLog("[CTR-3DS] netload stderr stream connected");
 	}
+
+	/* Opt-in FTP server: off unless the flag file exists (see n3ds_ftp.h). */
+	N3DS_FtpStartIfEnabled();
 }
 
 /* Last SD-log flush, in system ticks. Per-LINE fflush stalls gameplay
@@ -483,6 +507,11 @@ void N3DS_ShowFatalAssetScreen(const char *assetDir)
 	gfxExit();
 }
 
+/* New3DS 804MHz clock-up state as this process last set it (init: on; the
+ * dumpreq speedoff/speedon words and the debug UI's Old-3DS toggle change it).
+ * libctru has no getter. */
+int g_n3dsSpeedup = 1;
+
 void N3DS_GfxInit(void)
 {
 	/*
@@ -560,6 +589,10 @@ static int s_consoleQuietArmed = 0;
  */
 int N3DS_ConsolePaintAllowed(void)
 {
+	if (g_n3dsDebugUiOpen)
+	{
+		return 0; /* the debug UI owns the panel's framebuffer */
+	}
 #ifdef CTR_INTERNAL
 	extern int g_dbg_statsConsole; /* renderer TU, dumpreq 'stats' */
 
@@ -625,7 +658,7 @@ void N3DS_ConsoleStatusLine(const char *text)
 	const PrintConsole *con = consoleGetDefault();
 	int width;
 
-	if (s_bottomMapOwnFrames > 0)
+	if ((s_bottomMapOwnFrames > 0) || g_n3dsDebugUiOpen)
 	{
 		return;
 	}
@@ -669,6 +702,13 @@ void N3DS_GfxPresent(void)
 		 * quiet (see the flag's comment). One-shot. */
 		s_consoleQuietArmed = 1;
 		consoleClear();
+	}
+	if (g_n3dsDebugUiOpen)
+	{
+		/* The debug UI draws straight into the bottom framebuffer (single
+		 * buffered while open): no map pass is in flight to wait out, so fall
+		 * through to the normal flush + swap below. */
+		s_bottomMapOwnFrames = 0;
 	}
 	if (s_bottomMapOwnFrames > 0)
 	{
@@ -3604,6 +3644,10 @@ int N3DS_BottomMapOwnsScreen(void)
 
 int N3DS_BottomMapDraw_Begin(float left, float right, float top, float bottom)
 {
+	if (g_n3dsDebugUiOpen)
+	{
+		return 0; /* debug UI open: the map pass yields the bottom screen */
+	}
 	if (s_renderTargetBottom == NULL)
 	{
 		if (s_bottomTargetFailed)
@@ -3942,6 +3986,18 @@ static void N3DS_DebugCaptureAll(void)
 	NativeRenderer3DS_DebugDumpCacheMeta();
 	NativeRenderer3DS_DebugArmTriangleDump();
 }
+
+/* One dumpreq word queued by the bottom-screen debug UI (main thread only;
+ * consumed by the dumpreq block in N3DS_ReadButtons, which is the same thread). */
+static char s_uiReqWord[24];
+
+void N3DS_QueueDumpReq(const char *word)
+{
+	if (word != NULL)
+	{
+		snprintf(s_uiReqWord, sizeof(s_uiReqWord), "%s", word);
+	}
+}
 #endif
 
 unsigned int N3DS_ReadButtons(void)
@@ -3951,6 +4007,17 @@ unsigned int N3DS_ReadButtons(void)
 
 	hidScanInput();
 	held = hidKeysHeld();
+
+	/* Bottom-screen debug UI: SELECT + D-PAD DOWN opens/closes it (any build).
+	 * Closed, this is one mask test; open, the touch poll lives in the UI TU. */
+	if ((held & KEY_SELECT) && (hidKeysDown() & KEY_DDOWN))
+	{
+		N3DS_DebugUI_Toggle();
+	}
+	if (g_n3dsDebugUiOpen)
+	{
+		N3DS_DebugUI_Touch();
+	}
 
 #ifdef CTR_INTERNAL
 	/* SELECT+R freed (the VRAM/debug capture set). Still reachable as dumpreq `capture`. */
@@ -4094,13 +4161,20 @@ unsigned int N3DS_ReadButtons(void)
 		 * boot so a request staged on the card before launch applies ahead of
 		 * the boot-time loads (texwarm, speedoff), not a second into the intro. */
 		static unsigned int s_dumpPollCountdown = 1;
+		/* A word queued by the bottom-screen debug UI (N3DS_QueueDumpReq) runs
+		 * through the very same token chain below, ahead of the next file
+		 * poll and without touching the SD card or the poll countdown. */
+		const int uiReq = (s_uiReqWord[0] != '\0');
 
-		if (--s_dumpPollCountdown == 0)
+		if (uiReq || (--s_dumpPollCountdown == 0))
 		{
-			FILE *req = fopen("sdmc:/dumpreq.txt", "rb");
+			FILE *req = uiReq ? NULL : fopen("sdmc:/dumpreq.txt", "rb");
 
-			s_dumpPollCountdown = 64;
-			if (req != NULL)
+			if (!uiReq)
+			{
+				s_dumpPollCountdown = 64;
+			}
+			if (uiReq || (req != NULL))
 			{
 				extern int g_dbg_disableSubPage;
 				extern int g_dbg_forceSingleTexture;
@@ -4110,13 +4184,23 @@ unsigned int N3DS_ReadButtons(void)
 				 * order. A word is at most 23 chars ("stereoconv 12000" is 16). */
 				char word[24];
 				char file[256];
-				size_t got = fread(file, 1, sizeof(file) - 1, req);
+				size_t got = 0;
 				size_t lineLen = 0;
 				const char *rest;
 				int consumed = 0;
 
+				if (uiReq)
+				{
+					snprintf(file, sizeof(file), "%s", s_uiReqWord);
+					s_uiReqWord[0] = '\0';
+					got = strlen(file);
+				}
+				else
+				{
+					got = fread(file, 1, sizeof(file) - 1, req);
+					fclose(req);
+				}
 				file[got] = '\0';
-				fclose(req);
 
 				while ((file[lineLen] != '\0') && (file[lineLen] != '\n') && (file[lineLen] != '\r'))
 				{
@@ -4141,7 +4225,11 @@ unsigned int N3DS_ReadButtons(void)
 				 * and acting anyway re-fires the same request every poll -- a
 				 * TOGGLE request flapped a dozen in-place rebuilds that way. Skip
 				 * this poll instead: the file survives and the next poll retries. */
-				if (*rest == '\0')
+				if (uiReq)
+				{
+					consumed = 1; /* nothing on the card to remove */
+				}
+				else if (*rest == '\0')
 				{
 					consumed = (remove("sdmc:/dumpreq.txt") == 0);
 				}
@@ -4313,7 +4401,15 @@ unsigned int N3DS_ReadButtons(void)
 					/* Rosalina-freeze bisect round 2: drop the New3DS
 					 * 804MHz clock-up back to O3DS speed. */
 					osSetSpeedupEnable(false);
+					g_n3dsSpeedup = 0;
 					N3DS_DebugLog("[CTR-3DS] speedoff: New3DS clock-up disabled");
+				}
+				else if (strncmp(word, "speedon", 7) == 0)
+				{
+					/* Undo of speedoff (debug UI "Old 3DS mode" toggle). */
+					osSetSpeedupEnable(true);
+					g_n3dsSpeedup = 1;
+					N3DS_DebugLog("[CTR-3DS] speedon: New3DS clock-up enabled");
 				}
 				else if (strncmp(word, "rosabisect2", 11) == 0)
 				{
@@ -4324,6 +4420,7 @@ unsigned int N3DS_ReadButtons(void)
 
 					N3DS_NdspForceOff();
 					osSetSpeedupEnable(false);
+					g_n3dsSpeedup = 0;
 					N3DS_DebugLog("[CTR-3DS] rosabisect2: DSP released, New3DS clock-up disabled");
 				}
 				else if (strncmp(word, "rosabisect", 10) == 0)
@@ -5837,6 +5934,22 @@ unsigned long N3DS_LinearFreeBytes(void)
 	return (unsigned long)linearSpaceFree();
 }
 
+/* Read-only state for the debug UI (this TU owns the statics). */
+int N3DS_StereoFrameActive(void)
+{
+	return s_stereoFrameActive;
+}
+
+float N3DS_StereoSliderState(void)
+{
+	return osGet3DSliderState();
+}
+
+int N3DS_SpeedupEnabled(void)
+{
+	return g_n3dsSpeedup;
+}
+
 /*
  * Once-per-frame main-thread heartbeat, thaw detector, and light watchdog
  * (Rosalina-freeze hardening). Called exactly
@@ -5961,5 +6074,11 @@ static void N3DS_BeatMainTick(void)
 int N3DS_MainLoopActive(void)
 {
 	N3DS_BeatMainTick();
+	/* An FTP "SITE INSTALL" finished: leave through the normal quit path so
+	 * aptExit() chainloads the freshly installed build. */
+	if (N3DS_FtpRelaunchDue())
+	{
+		return 0;
+	}
 	return aptMainLoop() ? 1 : 0;
 }
