@@ -60,3 +60,24 @@ void acc_mtc2_c15(u32 v) { MTC2(v, 15); }
 void acc_mtc2_c28(u32 v) { MTC2(v, 28); }
 void acc_ctc2_c31(u32 v) { CTC2(v, 31); }
 u32 lzc(u32 v) { return gte_leadingzerocount(v); }
+
+/* The lean projection (native_model_gate.c) when the tree has it: RTPT on V0-V2
+ * through the gate's arithmetic with the capture side effects, FIFO written
+ * back -- gte_main.c checks it against the core's own RTPT. */
+#if __has_include("platform/native_model_gate.c")
+int g_dbg_modelDepthCheck;
+#include "platform/native_model_gate.c"
+#endif
+#ifdef NATIVE_MODEL_GATE_HAS_RTPT_STORE
+u32 lean_rtpt_store(void)
+{
+	struct NativeModelGate g;
+	u32 flag;
+
+	NativeModelGate_Load(&g);
+	flag = NativeModelGate_RtptStore(&g, gteRegs.CP2D.p[0].d, gteRegs.CP2D.p[1].d, gteRegs.CP2D.p[2].d, gteRegs.CP2D.p[3].d, gteRegs.CP2D.p[4].d,
+	                                 gteRegs.CP2D.p[5].d);
+	NativeModelGate_ToGte(&g.fifo);
+	return flag;
+}
+#endif

@@ -5052,6 +5052,9 @@ unsigned int N3DS_ReadButtons(void)
 	 *   triscopes   -- toggle g_dbg_perfTriScopes (per-triangle perf split; taxed)
  *   g4run       -- toggle g_dbg_g4Run (the walk's POLY_G4 run fast path, the
  *                  menu flag; A/B for [PARSEPROF] / draw_otag_parse_ms)
+ *   flaglean    -- toggle g_dbg_flagLean (DEFAULT ON): the menu flag's 360 RTPT
+ *                  through the lean projection, same SXY and Stores; A/B for
+ *                  mainframe_ui_ms
  *   mdlgate     -- toggle g_dbg_modelGate (DEFAULT ON): native-model triangles
  *                  pass the flag/NCLIP/screen gate without the software GTE
  *                  (same triangles); A/B for [INSTPROF] proj
@@ -6362,6 +6365,16 @@ unsigned int N3DS_ReadButtons(void)
 					g_dbg_modelGate ^= 1;
 					N3DS_DebugLog(g_dbg_modelGate ? "[CTR-3DS] model gate: ON (no software GTE for native-model triangles)"
 					                              : "[CTR-3DS] model gate: off (software GTE per triangle)");
+				}
+				else if (strncmp(word, "flaglean", 8) == 0)
+				{
+					extern int g_dbg_flagLean;
+
+					/* Menu/loading flag projected through the lean projection
+					 * (same SXY, same capture Stores) instead of 360 software
+					 * RTPT ops. A/B for mainframe_ui_ms. */
+					g_dbg_flagLean ^= 1;
+					N3DS_DebugLog(g_dbg_flagLean ? "[CTR-3DS] flag lean projection: ON" : "[CTR-3DS] flag lean projection: off (software GTE)");
 				}
 				else if (strncmp(word, "hudui", 5) == 0)
 				{

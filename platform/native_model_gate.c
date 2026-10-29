@@ -10,9 +10,11 @@
 
 #include "platform/native_model_gate.h"
 
-#if defined(CTR_NATIVE) && defined(CTR_NATIVE_MODEL_RENDERER) && CTR_NATIVE_MODEL_RENDERER
+#if defined(CTR_NATIVE)
 
 int g_dbg_modelGate = 1;
+/* The menu flag's projection through NativeModelGate_RtptStore (RaceFlag.c). */
+int g_dbg_flagLean = 1;
 
 /* native_model_emit.c, later in the unity TU. */
 extern int g_dbg_modelDepthCheck;
@@ -24,6 +26,12 @@ int NativeModelGate_Begin(struct NativeModelGate *g)
 		return 0;
 	}
 
+	NativeModelGate_Load(g);
+	return 1;
+}
+
+void NativeModelGate_Load(struct NativeModelGate *g)
+{
 	g->r11 = C2_R11;
 	g->r12 = C2_R12;
 	g->r13 = C2_R13;
@@ -42,7 +50,6 @@ int NativeModelGate_Begin(struct NativeModelGate *g)
 	 * same conversion the RTPS call site makes. */
 	g->h = (u16)C2_H;
 	NativeModelGate_FromGte(&g->fifo);
-	return 1;
 }
 
 /*
@@ -53,7 +60,7 @@ int NativeModelGate_Begin(struct NativeModelGate *g)
  * bit the gate reads, bit 18), h/SZ3 through the UNR divide and Lm_E's 0x1ffff
  * ceiling, then OFX/OFY + IR*q >> 16 clamped to [-0x400, 0x3ff].
  */
-static inline __attribute__((always_inline)) u32 NativeModelGate_Vertex(struct NativeModelGate *g, u32 xy, u32 z, u32 *outSxy)
+static inline __attribute__((always_inline)) u32 NativeModelGate_Vertex(struct NativeModelGate *g, u32 xy, u32 z, u32 *outSxy, int store)
 {
 	const s32 vx = (s16)(xy & 0xffffu);
 	const s32 vy = (s16)(xy >> 16);
@@ -85,8 +92,24 @@ static inline __attribute__((always_inline)) u32 NativeModelGate_Vertex(struct N
 	q = gte_divide(g->h, (u16)sz);
 	q = (q > 0x1ffffu) ? 0x1ffffu : q; /* Lm_E: the overflow value 0xffffffff lands on the same ceiling */
 
-	sx = (s32)(((s64)g->ofx + ((s64)ir1 * (s64)q)) >> 16);
-	sy = (s32)(((s64)g->ofy + ((s64)ir2 * (s64)q)) >> 16);
+	{
+		const s64 sxFull = (s64)g->ofx + ((s64)ir1 * (s64)q);
+		const s64 syFull = (s64)g->ofy + ((s64)ir2 * (s64)q);
+
+		sx = (s32)(sxFull >> 16);
+		sy = (s32)(syFull >> 16);
+#if CTR_NATIVE_GTE_CAPTURE
+		/* The capture side effect of GTE_RotTransPers, same condition, same
+		 * arguments: only for a producer whose packets still resolve depth
+		 * through the capture table (NativeModelGate_RtptStore). */
+		if (store && g_dbg_gteCapture && (sx >= -0x400) && (sx <= 0x3ff) && (sy >= -0x400) && (sy <= 0x3ff))
+		{
+			GTECapture_Store((s16)sx, (s16)sy, sxFull, syFull, (u16)sz, (s32)q, (s16)vx, (s16)vy, (s16)vz);
+		}
+#else
+		(void)store;
+#endif
+	}
 	sx = (sx > 0x3ff) ? 0x3ff : (sx < -0x400) ? -0x400 : sx;
 	sy = (sy > 0x3ff) ? 0x3ff : (sy < -0x400) ? -0x400 : sy;
 
@@ -104,9 +127,27 @@ u32 NativeModelGate_Rtpt(struct NativeModelGate *g, u32 xy0, u32 z0, u32 xy1, u3
 
 	/* RTPT is three RTPS-shaped vertices pushed through the same FIFO; FLAG
 	 * accumulates over the op. */
-	flag = NativeModelGate_Vertex(g, xy0, z0, &g->fifo.sxy[0]);
-	flag |= NativeModelGate_Vertex(g, xy1, z1, &g->fifo.sxy[1]);
-	flag |= NativeModelGate_Vertex(g, xy2, z2, &g->fifo.sxy[2]);
+	flag = NativeModelGate_Vertex(g, xy0, z0, &g->fifo.sxy[0], 0);
+	flag |= NativeModelGate_Vertex(g, xy1, z1, &g->fifo.sxy[1], 0);
+	flag |= NativeModelGate_Vertex(g, xy2, z2, &g->fifo.sxy[2], 0);
+	return flag;
+}
+
+u32 NativeModelGate_RtptStore(struct NativeModelGate *g, u32 xy0, u32 z0, u32 xy1, u32 z1, u32 xy2, u32 z2)
+{
+	u32 flag;
+
+#if CTR_NATIVE_GTE_CAPTURE
+	/* GTE_NoteMatrixForOp: once per projecting op, on the GTE's own control
+	 * words (the producer loaded its matrix there as before). */
+	if (g_dbg_gteCapture == 1)
+	{
+		GTECapture_NoteMatrix(&gteRegs.CP2C.p[0]);
+	}
+#endif
+	flag = NativeModelGate_Vertex(g, xy0, z0, &g->fifo.sxy[0], 1);
+	flag |= NativeModelGate_Vertex(g, xy1, z1, &g->fifo.sxy[1], 1);
+	flag |= NativeModelGate_Vertex(g, xy2, z2, &g->fifo.sxy[2], 1);
 	return flag;
 }
 
@@ -123,7 +164,7 @@ u32 NativeModelGate_Rtps(struct NativeModelGate *g, int reuseFirstVertex, u32 xy
 		g->fifo.sz[2] = g->fifo.sz[1];
 	}
 
-	flag = NativeModelGate_Vertex(g, xy, z, &sxy2);
+	flag = NativeModelGate_Vertex(g, xy, z, &sxy2, 0);
 	g->fifo.sxy[0] = g->fifo.sxy[1];
 	g->fifo.sxy[1] = g->fifo.sxy[2];
 	g->fifo.sxy[2] = sxy2;

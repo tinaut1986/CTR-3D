@@ -619,6 +619,28 @@ force_inline u32 RaceFlag_StripeIndex(int quadY, int wide)
  * is the finest the mesh can express, since squares snap to quad boundaries.
  */
 #define RACE_FLAG_CHECKER_QUADS 3u
+
+/*
+ * The flag's 360 RTPT a frame through the lean projection
+ * (platform/native_model_gate.c, NativeModelGate_RtptStore) instead of the
+ * software GTE's op emulation: the same integer arithmetic, so the same SXY,
+ * and the same capture Stores (the walk still resolves the flag's stereo depth
+ * through them), without the FLAG bookkeeping and register traffic of the full
+ * op. dumpreq `flaglean`, default ON; OFF is the GTE as before.
+ */
+#include <platform/native_model_gate.h>
+extern int g_dbg_flagLean;
+
+/* One row: the three vertices the GTE path loads with CTR_GteLoadSV3WithPad,
+ * projected, and their SXY stored where CTR_GteStoreSXY3 puts them. */
+force_inline void RaceFlag_ProjectRowLean(struct NativeModelGate *lean, const SVECTOR *pos, struct RaceFlagProjectedRow *out)
+{
+	NativeModelGate_RtptStore(lean, CTR_PackS16Pair(pos[0].vx, pos[0].vy), CTR_PackS16Pair(pos[0].vz, pos[0].pad), CTR_PackS16Pair(pos[1].vx, pos[1].vy),
+	                          CTR_PackS16Pair(pos[1].vz, pos[1].pad), CTR_PackS16Pair(pos[2].vx, pos[2].vy), CTR_PackS16Pair(pos[2].vz, pos[2].pad));
+	CTR_GteStoreU32(&out->xy[0], lean->fifo.sxy[0]);
+	CTR_GteStoreU32(&out->xy[1], lean->fifo.sxy[1]);
+	CTR_GteStoreU32(&out->xy[2], lean->fifo.sxy[2]);
+}
 #endif
 
 force_inline char RaceFlag_CalculateBrightness(u32 sine, u8 darkTile)
@@ -680,6 +702,8 @@ void RaceFlag_DrawSelf()
 	SVECTOR pos[3] = {0};
 #ifdef CTR_NATIVE
 	int flagWide = 0;
+	int flagLean = 0;
+	struct NativeModelGate flagGate;
 #endif
 
 	if (sdata->RaceFlag_CanDraw == 0)
@@ -752,6 +776,15 @@ SKIP_LOADING_TEXT:
 	 * jump would be visible). Constants, bounds and the accepted wipe
 	 * caveat: GTECapture_SetStoreDepthRemap (native_gte_capture.c). */
 	GTECapture_SetStoreDepthRemap(1);
+#endif
+#ifdef CTR_NATIVE
+	/* After the matrix, offset and screen loads above: the lean projection
+	 * reads them back out of the GTE. Latched for the whole draw. */
+	flagLean = g_dbg_flagLean;
+	if (flagLean)
+	{
+		NativeModelGate_Load(&flagGate);
+	}
 #endif
 
 	p = (POLY_G4 *)gGT->backBuffer->primMem.cursor;
@@ -844,14 +877,26 @@ SKIP_LOADING_TEXT:
 				vect->vz = (s16)var2 + (s16)(var3 * 0x20 >> 0xd);
 			}
 
-			CTR_GteLoadSV3WithPad(&pos[0], &pos[1], &pos[2]);
-			gte_rtpt();
+#ifdef CTR_NATIVE
+			if (flagLean)
+			{
+				RaceFlag_ProjectRowLean(&flagGate, pos, &writeScreen->row[row]);
+				pos[0].vy += 0x11a;
+				pos[1].vy += 0x11a;
+				pos[2].vy += 0x11a;
+			}
+			else
+#endif
+			{
+				CTR_GteLoadSV3WithPad(&pos[0], &pos[1], &pos[2]);
+				gte_rtpt();
 
-			pos[0].vy += 0x11a;
-			pos[1].vy += 0x11a;
-			pos[2].vy += 0x11a;
+				pos[0].vy += 0x11a;
+				pos[1].vy += 0x11a;
+				pos[2].vy += 0x11a;
 
-			CTR_GteStoreSXY3(&writeScreen->row[row].xy[0], &writeScreen->row[row].xy[1], &writeScreen->row[row].xy[2]);
+				CTR_GteStoreSXY3(&writeScreen->row[row].xy[0], &writeScreen->row[row].xy[1], &writeScreen->row[row].xy[2]);
+			}
 		}
 
 		lightR = lightL;
@@ -926,14 +971,26 @@ SKIP_LOADING_TEXT:
 				vect->vz = (s16)var2 + (s16)(var3 * 0x20 >> 0xd);
 			}
 
-			CTR_GteLoadSV3WithPad(&pos[0], &pos[1], &pos[2]);
-			gte_rtpt();
+#ifdef CTR_NATIVE
+			if (flagLean)
+			{
+				RaceFlag_ProjectRowLean(&flagGate, pos, &writeScreen->row[row]);
+				pos[0].vy += 0x11a;
+				pos[1].vy += 0x11a;
+				pos[2].vy += 0x11a;
+			}
+			else
+#endif
+			{
+				CTR_GteLoadSV3WithPad(&pos[0], &pos[1], &pos[2]);
+				gte_rtpt();
 
-			pos[0].vy += 0x11a;
-			pos[1].vy += 0x11a;
-			pos[2].vy += 0x11a;
+				pos[0].vy += 0x11a;
+				pos[1].vy += 0x11a;
+				pos[2].vy += 0x11a;
 
-			CTR_GteStoreSXY3(&writeScreen->row[row].xy[0], &writeScreen->row[row].xy[1], &writeScreen->row[row].xy[2]);
+				CTR_GteStoreSXY3(&writeScreen->row[row].xy[0], &writeScreen->row[row].xy[1], &writeScreen->row[row].xy[2]);
+			}
 
 			int firstSegment = (row == 0) ? 1 : 0;
 
@@ -1066,6 +1123,13 @@ SKIP_LOADING_TEXT:
 	 * packets and nothing else. */
 	GTECapture_SetStoreDepthRemap(0);
 	GTECapture_SetUIBandExemptRange(gGT->backBuffer->primMem.cursor, p);
+#endif
+#ifdef CTR_NATIVE
+	if (flagLean)
+	{
+		/* Leave the SXY/SZ FIFO as the last RTPT would have. */
+		NativeModelGate_ToGte(&flagGate.fifo);
+	}
 #endif
 
 	gGT->backBuffer->primMem.cursor = p;

@@ -237,6 +237,9 @@ heap/linear use, grep them for the real peak per level):
   the same triangles, no capture Stores, no NCLIP/AVSZ3 ops. A triangle the
   capture declines replays the retail projection from the saved FIFO.
   `[INSTPROF]` `gate=` counts gated projections; `proj` is their cost.
+  The menu flag's 360 RTPT a frame take the same arithmetic
+  (`NativeModelGate_RtptStore`, dumpreq `flaglean`, default on): same SXY and
+  the same capture Stores, without the op emulation.
 - The software GTE (`native_gte_core.c`) issues each constant op word through
   its own specialised copy (`GTE_Op*`, picked by the always-inlined doCOP2) and
   inlines the register moves; the arithmetic is PsyCross's, bit for bit.

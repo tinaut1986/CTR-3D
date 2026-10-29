@@ -37,6 +37,8 @@ DECL(test_)
  * GTE's SXY/SZ FIFO must still match the base; the other GTE registers and the
  * capture table (no Stores) legitimately differ. */
 extern int test_g_dbg_modelGate __attribute__((weak));
+/* A base tree with the gate runs with the same setting as the tested one. */
+extern int base_g_dbg_modelGate __attribute__((weak));
 
 static u64 g_rng = 0x9E3779B97F4A7C15ull;
 static u32 rnd(void) { g_rng ^= g_rng << 13; g_rng ^= g_rng >> 7; g_rng ^= g_rng << 17; return (u32)g_rng; }
@@ -184,6 +186,7 @@ int main(int argc, char **argv)
 		 * trial could not compare them any more. */
 		int gate = (&test_g_dbg_modelGate != 0) && (t >= trials / 2);
 		if (&test_g_dbg_modelGate != 0) test_g_dbg_modelGate = gate;
+		if (&base_g_dbg_modelGate != 0) base_g_dbg_modelGate = gate;
 		gateTrials += gate;
 		base_emitBeginRet = test_emitBeginRet = beginRet; base_emitSkip = test_emitSkip = skip; base_emitClaimMod = test_emitClaimMod = claimMod;
 		base_wideMargin = test_wideMargin = margin;
@@ -259,6 +262,7 @@ int main(int argc, char **argv)
 		{
 			int s = (pass == 0) ? 0 : 1;
 			if (&test_g_dbg_modelGate != 0) test_g_dbg_modelGate = (pass == 2);
+			if (&base_g_dbg_modelGate != 0) base_g_dbg_modelGate = 0;
 			double best = 1e30;
 			for (int rep = 0; rep < 5; rep++)
 			{

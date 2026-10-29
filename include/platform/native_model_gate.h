@@ -58,6 +58,8 @@ extern int g_dbg_modelGate;
 // Reads the control state and the current FIFO out of the GTE. Returns 0 when
 // the gate is off (toggle, [MDLDEPTH]); the caller then uses the GTE as before.
 int NativeModelGate_Begin(struct NativeModelGate *g);
+// The same read, unconditionally (a producer with its own toggle).
+void NativeModelGate_Load(struct NativeModelGate *g);
 
 // RTPT / RTPS on the gate's FIFO. Vertices are the packed GTE V-register pairs
 // the walk would MTC2 (VX | VY << 16, VZ). reuseFirstVertex is the strip's
@@ -65,6 +67,12 @@ int NativeModelGate_Begin(struct NativeModelGate *g);
 // op's FLAG, of which only bit 18 is computed -- the only bit the gate tests.
 u32 NativeModelGate_Rtpt(struct NativeModelGate *g, u32 xy0, u32 z0, u32 xy1, u32 z1, u32 xy2, u32 z2);
 u32 NativeModelGate_Rtps(struct NativeModelGate *g, int reuseFirstVertex, u32 xy, u32 z);
+// RTPT with the GTE's capture side effects as well (the matrix note and one
+// GTECapture_Store per on-screen vertex, same condition and arguments as
+// GTE_RotTransPers): for a producer whose packets still resolve their depth
+// through the capture table -- the menu flag (RaceFlag_DrawSelf).
+u32 NativeModelGate_RtptStore(struct NativeModelGate *g, u32 xy0, u32 z0, u32 xy1, u32 z1, u32 xy2, u32 z2);
+#define NATIVE_MODEL_GATE_HAS_RTPT_STORE 1 /* feature test for the host parity harness */
 
 // NCLIP's MAC0 on the FIFO: the GTE's own expression, in int (|SX|,|SY| <= 1024).
 static inline s32 NativeModelGate_Nclip(const struct NativeModelGateFifo *f)
