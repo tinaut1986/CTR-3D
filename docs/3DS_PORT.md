@@ -147,38 +147,64 @@ Rules the hardware enforces and emulators do not:
   Settings (ftp, btmmap, stereo, cpu804) persist in `ctr3d.cfg` in the app dir.
 - App data lives in `sdmc:/3ds/ctr_native/` (assets/, memcards/, update/,
   ctr3d.cfg, enable-log.txt, dev-ftp.txt) for a .3dsx and an installed CIA alike.
-- FTP (`n3ds_ftp.c`, port 5000, one low-priority thread on core 3, else 2):
+- FTP (`n3ds_ftp.c`, port 5000, one lowest-priority thread on core 3, else 2;
+  on an Old 3DS / 2DS core 0 behind the game, see "Old 3DS / 2DS"):
   `CTR_INTERNAL` builds serve the whole SD card by default (toggle in DEBUG >
   ACTIONS); production builds serve nothing unless `dev-ftp.txt` exists, then only
   `/3ds/ctr_native/update` and `SITE INSTALL` (CANCEL on the Updater tab).
   `./build3ds.sh --install <ip>` uploads and installs the CIA; the game warns on
   the bottom screen (upload %, install %, 10 s countdown) and restarts into it.
 - CIA: `./build3ds.sh` builds the .3dsx and `build-3ds/cia/ctr3d.cia`
-  (`package-cia.sh`; title ID 0x0004000005A2C300, SystemModeExt 178MB on New 3DS,
-  SystemMode 64MB legacy = all an Old 3DS app gets). Old 3DS blockers: see
-  "Old 3DS / 2DS" below.
+  (`package-cia.sh`; title ID 0x0004000005A2C300). One CIA for both consoles, as
+  the author's other ports: SystemModeExt 178MB on a New 3DS, SystemMode 80MB on
+  an Old 3DS / 2DS (exheader ARM11 caps +0xD low nibble = 2, +0xE high nibble = 3;
+  96MB crashed the 2DS HOME menu in the other ports). See "Old 3DS / 2DS" below.
 - In any build, an empty `enable-log.txt` in `sdmc:/3ds/ctr_native/` turns on the SD log
   at `sdmc:/ctr3ds.log`. It is flushed on a timer, because a flush per line
   stalls the game on the card's latency.
 - Frame-rate claims count only from a wall clock on hardware: the `[PERF]`
   windows in the SD log, or the on-screen readout.
 
-## Old 3DS / 2DS (not working yet; how to test it on a New 3DS)
+## Old 3DS / 2DS (memory fits in 80 MB; CPU is the open part)
 
-Blockers, measured on the New 3DS log: (1) memory: ~18.5 MiB code+bss, ~40-48 MiB
-linear, 8-16 MiB malloc outside the optional 32 MiB XA voice cache, so a legacy
-region needs >= 80 MB (64 MB cannot hold it); (2) CPU: 268 MHz without L2 against
-~9-11 ms main thread + 3-7 ms render worker per frame at 804 MHz; (3) the render
-worker (core 2), audio worker (core 3) and FTP (core 3/2) do not exist, so they
-fall back to synchronous work on core 0.
+Memory, measured from the code (`n3ds_heap.c` has the table): ~18 MiB of
+code+bss+stacks, then linear and heap. A New 3DS (178MB) keeps the full split
+(linear 88 MiB, heap ~71 MiB, 11 decode atlases, 3 MiB hw-voice store, 32 MiB XA
+voice cache). A legacy region gets the lean split: linear 32 MiB holds the
+~28.4 MiB Old-3DS linear budget (7 decode atlases = 14 MiB, 2 MiB hw-voice store,
+4 MiB track atlas, ~4 MiB track geometry, ~3.5 MiB gfx/citro3d/vertex buffer),
+the heap the rest: ~29.5 MiB at 80 MB, ~21.5 MiB at 72 MB, ~15.5 MiB at 64 MB
+(below the ~15 MiB loading peak plus margin: 64 MB is not expected to work). The
+decode cache keeps its 96 full-page cells at 7 atlases; only the sub-page tier
+shrinks (208 slots against a measured peak of ~86). The voice cache sizes itself
+to the heap and stays on the SD path when it does not fit. A 2DS gets no
+right-eye render target (VRAM) and no 3D mode; that saves no linear memory (the
+top framebuffers are always allocated at the stereo width).
+
+An allocation the game cannot run without fails loudly: citro3d / atlases at boot
+(N3DS_ShowFatalGfxScreen), the track atlas or track geometry at level load
+(N3DS_FatalMemRequest: the main loop shows the numbers on the top screen and
+quits after START). `[MEM]` lines: `gfxinit`, `atlases`, `trackatlas`,
+`trackgeom +N KiB`, `voicecache-*`, `window` (periodic), `level-end #N`
+(the previous level's heap extent peak and linear low-water mark) and `fatal`.
+
+CPU: 268 MHz without L2 against ~9-11 ms main thread + 3-7 ms render worker per
+frame at 804 MHz, and the render worker (core 2) and audio worker (core 3) do not
+exist, so they fall back to synchronous work on core 0. The FTP server and the
+updater run on core 0 at priority 0x3F: the kernel schedules a core strictly by
+priority, so they only get the time the main thread (0x30) spends blocked on the
+GPU or the vblank. FTP polls with a zero timeout and naps 50 ms idle / 10 ms in a
+transfer (1 s without Wi-Fi). Core 1 is never used (Rosalina hang; see
+`n3ds_audio_thread.c`).
 
 Old-3DS simulation, two ways (both log `[O3DS-SIM]` lines; `[MEM]` lines report
 heap/linear use, grep them for the real peak per level):
 - DEBUG > ACTIONS > OLD 3DS SIM, or an `o3ds-sim.txt` in `sdmc:/3ds/ctr_native/`
   (optional words: `mem=80` legacy region in MiB, `ftp=0`). At start it turns the
   clock-up and L2 off (needs `ptm:sysm`, logged), makes the render and audio
-  workers unavailable as on a real Old 3DS, and parks ballast so heap and linear
-  match a legacy region of `mem` MiB. The button applies the clock at once; memory
+  workers unavailable as on a real Old 3DS, puts FTP and the updater on core 0 as
+  there, and parks ballast so heap and linear match a legacy region of `mem` MiB
+  (the atlas count and the hw-voice store follow the simulated linear heap). The button applies the clock at once; memory
   and workers need a restart.
 - `./build3ds.sh --o3ds-sim` also builds `build-3ds/cia/ctr3d-o3dssim.cia` (own
   title ID 0x0004000005A2C400, SystemModeExt Legacy, SystemMode `O3DS_MEM`
