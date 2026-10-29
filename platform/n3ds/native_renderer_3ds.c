@@ -4173,6 +4173,7 @@ int NativeRenderer_InitialiseRender(char *windowName, int width, int height, int
 	if (!N3DS_C3DInit())
 	{
 		N3DS_DebugLog("[CTR-3DS] citro3d init FAILED");
+		N3DS_ShowFatalGfxScreen("citro3d init failed (out of linear memory?)");
 		return 0;
 	}
 

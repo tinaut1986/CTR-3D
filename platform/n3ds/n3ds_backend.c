@@ -616,6 +616,44 @@ void N3DS_ShowFatalAssetScreen(const char *assetDir)
  * libctru has no getter. */
 int g_n3dsSpeedup = 1;
 
+void N3DS_HeapDescribe(char *out, unsigned cap); /* n3ds_heap.c */
+unsigned long N3DS_LinearHeapSize(void);
+
+/*
+ * citro3d could not start (almost always: not enough linear memory for the
+ * atlases). The game cannot render, so say so with the numbers on the top
+ * screen and wait for START instead of running blind. Called with gfx up
+ * (N3DS_GfxInit done); exits the process afterwards.
+ */
+void N3DS_ShowFatalGfxScreen(const char *what)
+{
+	char heap[200];
+
+	N3DS_HeapDescribe(heap, sizeof(heap));
+	N3DS_DebugLog(heap);
+	N3DS_LogFlushNow();
+	N3DS_BottomUi_SetStatus("GRAPHICS INIT FAILED");
+	consoleInit(GFX_TOP, NULL);
+	printf("\n  CTR 3D\n\n  Graphics could not start:\n  %s\n\n", what);
+	printf("  Linear memory free: %lu KiB\n", (unsigned long)(linearSpaceFree() / 1024));
+	printf("  Linear heap:        %lu KiB\n", N3DS_LinearHeapSize() / 1024);
+	printf("  Heap free:          %lu KiB\n\n", (unsigned long)(mallinfo().fordblks / 1024));
+	printf("  The game needs about 48 MiB of linear\n  memory. On an Old 3DS (64 MB) it does not fit.\n\n");
+	printf("  Press START to exit.\n");
+	while (aptMainLoop())
+	{
+		hidScanInput();
+		if (hidKeysDown() & KEY_START)
+		{
+			break;
+		}
+		gfxFlushBuffers();
+		gfxSwapBuffers();
+		gspWaitForVBlank();
+	}
+	exit(1);
+}
+
 void N3DS_GfxInit(void)
 {
 	/*
@@ -650,6 +688,13 @@ void N3DS_GfxInit(void)
 	 * log, the 3dslink stream and the UI's log view instead.
 	 */
 	N3DS_BottomUi_Init();
+
+	{
+		char heap[200];
+
+		N3DS_HeapDescribe(heap, sizeof(heap));
+		N3DS_DebugLog(heap);
+	}
 }
 
 void N3DS_GfxExit(void)

@@ -40,6 +40,9 @@ void N3DS_GfxInit(void);
  * libctru, which the unity TU cannot see. */
 void N3DS_ShowFatalAssetScreen(const char *assetDir);
 void N3DS_GfxExit(void);
+/* citro3d failed to start: top-screen explanation with the memory numbers, wait for
+ * START, exit. Does not return. */
+void N3DS_ShowFatalGfxScreen(const char *what);
 /* Per-frame present hook: a no-op now (citro3d presents both screens). */
 void N3DS_GfxPresent(void);
 
