@@ -10,10 +10,19 @@
  *     Core 3 holds only the audio worker, which runs at main-1 and sleeps most
  *     of every frame; at 0x3F the server only ever gets the gaps, so it cannot
  *     delay audio. Core 2 (the render worker, main priority) is the fallback if
- *     core 3 is refused. Core 0 is the game's and core 1 belongs to the system
- *     (a thread there hangs the console when the Rosalina overlay opens), so
- *     neither is ever used. Old 3DS has no spare core: the server is not started
- *     (the one thing here that blocks the Old 3DS; see docs/3DS_PORT.md).
+ *     core 3 is refused. Core 1 belongs to the system (a thread there hangs the
+ *     console when the Rosalina overlay opens, and reserving app time on it is
+ *     what wedges the menu-leave: n3ds_audio_thread.c), so it is never used.
+ *   - Old 3DS / 2DS (and the Old-3DS simulation): no cores 2/3, so the thread
+ *     goes on core 0 behind the game, still at 0x3F (as zelda-tmc-3ds and
+ *     legend-of-doom-3ds do there without a core-1 share). The kernel schedules
+ *     a core strictly by priority, so it runs only while the main thread
+ *     (0x30) is blocked -- waiting for the GPU or the vblank -- and the main
+ *     thread preempts it the moment it wakes. Its own cost is a zero-timeout
+ *     poll() IPC every 50 ms when idle (10 ms during a transfer) and every 1 s
+ *     while there is no Wi-Fi; SD writes and the CIA install are blocking IPC,
+ *     so they wait in the kernel, not on the CPU. A frame that never blocks
+ *     starves the server (slow transfers), never the game.
  *   - Polling from the main loop was rejected: an SD read or a CIA install of
  *     tens of milliseconds would land inside a frame.
  *   - libctru funnels every socket call of the process through one SOC session,
@@ -1089,18 +1098,14 @@ int N3DS_FtpActive(void)
 /* Brings the server thread up (no flag-file check). Main thread only. */
 static int N3DS_FtpStartThread(void)
 {
-	bool isNew3DS = false;
+	/* Cores 2 and 3 only exist on the New 3DS (and are withheld by the
+	 * Old-3DS simulation); core 1 is forbidden. Else core 0 behind the game. */
+	const int spareCores = N3DS_ExtraCoresUsable();
+	char msg[128];
 
 	if ((s_ftpThread != NULL) || s_ftpStuck || (s_ftpInstallOnly && s_ftpCancelled))
 	{
 		return 0; /* already up, still stopping, wedged, or cancelled for this run */
-	}
-	/* Cores 2 and 3 only exist on the New 3DS; core 1 is forbidden. */
-	APT_CheckNew3DS(&isNew3DS);
-	if (!isNew3DS)
-	{
-		N3DS_DebugLog("[CTR-3DS] ftp: NO (not a New3DS, no spare core)");
-		return 0;
 	}
 	if (!N3DS_O3dsSimFtpAllowed())
 	{
@@ -1121,25 +1126,36 @@ static int N3DS_FtpStartThread(void)
 
 	s_ftpIp = 0;
 	s_ftpRun = 1;
-	s_ftpThread = threadCreate(N3DS_FtpThreadMain, NULL, N3DS_FTP_STACK_SIZE, N3DS_FTP_PRIORITY, 3, false);
-	if (s_ftpThread == NULL)
 	{
-		s_ftpThread = threadCreate(N3DS_FtpThreadMain, NULL, N3DS_FTP_STACK_SIZE, N3DS_FTP_PRIORITY, 2, false);
-	}
-	if (s_ftpThread == NULL)
-	{
-		s_ftpRun = 0;
-		free(s_ftpIo);
-		s_ftpIo = NULL;
-		N3DS_DebugLog("[CTR-3DS] ftp: NO (threadCreate failed on cores 3 and 2)");
-		return 0;
+		static const int newCores[] = {3, 2};
+		static const int oldCores[] = {0};
+		const int *cores = spareCores ? newCores : oldCores;
+		const int coreCount = spareCores ? 2 : 1;
+		int i;
+		int core = -1;
+
+		for (i = 0; (i < coreCount) && (s_ftpThread == NULL); i++)
+		{
+			core = cores[i];
+			s_ftpThread = threadCreate(N3DS_FtpThreadMain, NULL, N3DS_FTP_STACK_SIZE, N3DS_FTP_PRIORITY, core, false);
+		}
+		if (s_ftpThread == NULL)
+		{
+			s_ftpRun = 0;
+			free(s_ftpIo);
+			s_ftpIo = NULL;
+			N3DS_DebugLog(spareCores ? "[CTR-3DS] ftp: NO (threadCreate failed on cores 3 and 2)" : "[CTR-3DS] ftp: NO (threadCreate failed on core 0)");
+			return 0;
+		}
+		snprintf(msg, sizeof(msg), "[CTR-3DS] ftp: thread up (priority 0x%X, core %d%s), waiting for Wi-Fi", N3DS_FTP_PRIORITY, core,
+		         spareCores ? "" : ": Old 3DS, behind the game, polls every 50 ms idle");
 	}
 	if (!s_ftpAtExitSet)
 	{
 		atexit(N3DS_FtpAtExit);
 		s_ftpAtExitSet = 1;
 	}
-	N3DS_DebugLog("[CTR-3DS] ftp: thread up (lowest priority, core 3/2), waiting for Wi-Fi");
+	N3DS_DebugLog(msg);
 	return 1;
 }
 

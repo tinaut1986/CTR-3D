@@ -289,11 +289,23 @@ static void start(bool downloading) {
   publish(downloading ? UPDATE_DOWNLOADING : UPDATE_CHECKING,
           downloading ? "DOWNLOADING UPDATE" : "CHECKING FOR UPDATES");
   /* Lowest priority on a spare core (3, else 2; the New 3DS' extra cores), core 0 behind the
-   * game on an Old 3DS. Core 1 is the system's and never used. */
+   * game on an Old 3DS and in the Old-3DS simulation (N3DS_ExtraCoresUsable), where it only
+   * runs while the main thread waits for the GPU or the vblank. Core 1 is the system's and
+   * never used (see n3ds_ftp.c). */
   static const int cores[] = { 3, 2, 0 };
-  for (unsigned i = 0; i < sizeof(cores) / sizeof(cores[0]) && !worker; i++)
-    worker = threadCreate(run_job, NULL, UPDATE_THREAD_STACK, UPDATE_PRIORITY, cores[i], false);
+  unsigned first = N3DS_ExtraCoresUsable() ? 0u : 2u;
+  int core = -1;
+  for (unsigned i = first; i < sizeof(cores) / sizeof(cores[0]) && !worker; i++) {
+    core = cores[i];
+    worker = threadCreate(run_job, NULL, UPDATE_THREAD_STACK, UPDATE_PRIORITY, core, false);
+  }
   if (!worker) { __atomic_store_n(&busy, false, __ATOMIC_RELEASE); publish(UPDATE_ERROR, "CANNOT START UPDATE"); }
+  else {
+    char line[96];
+    snprintf(line, sizeof(line), "[UPDATE] worker on core %d (priority 0x%X)%s", core, UPDATE_PRIORITY,
+             core == 0 ? ": Old 3DS, behind the game" : "");
+    N3DS_DebugLog(line);
+  }
 }
 void Updater_Check(void) { start(false); }
 void Updater_Download(void) { start(true); }
