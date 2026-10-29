@@ -164,6 +164,11 @@ global_variable const struct NativePerfBucketInfo s_bucketInfo[NATIVE_PERF_BUCKE
     /* dominantCandidate 0: it only runs in time the frame would have slept,
      * so it never makes a frame late -- see the enum comment. */
     {"voice_cache_fill_ms", 0},
+    /* dominantCandidate 0: the four nest inside mainframe_level_geometry_ms. */
+    {"level_animate_ms", 0},
+    {"level_renderlists_ms", 0},
+    {"level_track_record_ms", 0},
+    {"level_sky_ms", 0},
 };
 
 global_variable FILE *s_csvFile;
@@ -878,6 +883,12 @@ internal void NativePerf_Report3DSWindow(void)
 		N3DS_EndProfFormat(endProf, (int)sizeof(endProf));
 		N3DS_DebugLog(endProf);
 	}
+	/* mainframe_level_geometry_ms by phase (1P), avg us per frame. */
+	snprintf(out, sizeof(out), "[LVLPROF] total=%d anim=%d bsp=%d rec=%d sky=%d",
+	         (int)(s_windowBucketMs[NATIVE_PERF_BUCKET_MAINFRAME_LEVEL_GEOMETRY] * toAvgUs),
+	         (int)(s_windowBucketMs[NATIVE_PERF_BUCKET_LEVEL_ANIMATE] * toAvgUs), (int)(s_windowBucketMs[NATIVE_PERF_BUCKET_LEVEL_RENDERLISTS] * toAvgUs),
+	         (int)(s_windowBucketMs[NATIVE_PERF_BUCKET_LEVEL_TRACK_RECORD] * toAvgUs), (int)(s_windowBucketMs[NATIVE_PERF_BUCKET_LEVEL_SKY] * toAvgUs));
+	N3DS_DebugLog(out);
 	/* Frame cap / AUTO 3D state and the frame WORK the policy sees
 	 * (n3ds_backend.h's frame-pace block). */
 	{
