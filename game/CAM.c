@@ -11,6 +11,26 @@ enum
 
 CTR_STATIC_ASSERT(CAM_FOLLOW_DRIVER_QUAD_FLAGS_SKIP_TERRAIN_HEIGHT == 0x4100);
 
+// 60fps: the camera's frame counters (transitionFrame, BlastedLerp and
+// heightSmoothing framesRemaining) stay in retail 30 Hz frames and step on
+// FPS60_HALF_RATE frames only, instead of ModSDK's FPS_DOUBLE at the writes:
+// CAM_StartOfRace is written during the level load (always 30) and the mode
+// can change mid-count, so doubled counts would be wrong. This reads such a
+// counter in half frames for a smooth 60 Hz curve: on the frames where it
+// steps after the read (odd timer), it is halfway to its next value.
+// Only called when FPS60. step: +1 counting up, -1 counting down.
+static s32 CAM_Fps60_HalfFrames(s32 frames, s32 step)
+{
+	s32 half = frames * 2;
+
+	if ((sdata->gGT->timer & 1) != 0)
+	{
+		half += step;
+	}
+
+	return half;
+}
+
 static u32 CAM_SkyboxGlow_PrimAddr(const void *prim)
 {
 	return CtrGpu_PrimToOTLink24(prim);
@@ -526,6 +546,8 @@ void CAM_StartOfRace(struct CameraDC *cDC)
 		cDC->trackPathNode = (struct CheckpointNode *)(flyInData + 0x18);
 
 		// if 1 or less screens
+		// 60fps: ModSDK CAM_06 doubles 0x1E / 0xA5 here; not ported, these
+		// stay 30 Hz frames counted at half rate (CAM_Fps60_HalfFrames)
 		cDC->transitionFrame = 0xA5;
 		if (gGT->numPlyrCurrGame > 1)
 		{
@@ -542,6 +564,8 @@ void CAM_StartOfRace(struct CameraDC *cDC)
 void CAM_EndOfRace_Battle(struct CameraDC *cDC, struct Driver *d)
 {
 	s32 height = data.Spin360_heightOffset_cameraPos[(s32)sdata->gGT->numPlyrCurrGame];
+	// 60fps: spin speed, halved at its consumer CAM_FollowDriver_Spin360
+	// (ModSDK CAM_07 FPS_HALF(0xffe5) here, which is 0x7ff2, not -13)
 	cDC->transitionTo.pos.x = 0xffe5;
 	cDC->transitionTo.pos.y = height;
 	cDC->transitionTo.pos.z = 0xc0;
@@ -1063,12 +1087,15 @@ void CAM_FollowDriver_Spin360(struct CameraDC *cDC, struct CameraScratchWork *sc
 	// rotate other way for odd number
 	if ((d->driverID & 1) != 0)
 	{
-		cDC->spin360Angle -= cDC->transitionTo.pos.x;
+		// 60fps: half the spin per frame (ModSDK CAM_19_ThTick case 10 and
+		// CAM_07_EndOfRace_Battle halve spinSpeed at the write; done here at
+		// the one consumer so the mode can change while the camera spins)
+		cDC->spin360Angle -= FPS_HALF(cDC->transitionTo.pos.x);
 	}
 	else
 	{
 		// rotate one way
-		cDC->spin360Angle += cDC->transitionTo.pos.x;
+		cDC->spin360Angle += FPS_HALF(cDC->transitionTo.pos.x);
 	}
 
 	s32 angle = cDC->spin360Angle;
@@ -1090,6 +1117,8 @@ void CAM_SetDesiredPosRot(struct CameraDC *cDC, const SVec3 *pos, const SVec3 *r
 	cDC->transitionTo.rot = *rot;
 
 	// 1 second, 30 frames
+	// 60fps: ModSDK CAM_16 doubles this; not ported, 30 Hz frames counted
+	// at half rate in CAM_FollowDriver_Normal (CAM_Fps60_HalfFrames)
 	cDC->transitionFrameCount = 0x1e;
 
 	cDC->transitionFrame = 0;
@@ -1307,7 +1336,8 @@ void CAM_FollowDriver_Normal(struct CameraDC *cDC, struct Driver *d, SVec3 *push
 	// slight-down view angle
 	if ((d->actionsFlagSet & ACTION_WARP) == 0)
 	{
-		cDC->damagePitchOffset -= 8;
+		// 60fps: half the step per frame (ModSDK CAM_17_FollowDriver_Normal)
+		cDC->damagePitchOffset -= FPS_HALF(8);
 		if (cDC->damagePitchOffset < -0x20)
 		{
 			cDC->damagePitchOffset = -0x20;
@@ -1318,7 +1348,8 @@ void CAM_FollowDriver_Normal(struct CameraDC *cDC, struct Driver *d, SVec3 *push
 	// straight-forward angle
 	else
 	{
-		cDC->damagePitchOffset += 8;
+		// 60fps: half the step per frame (ModSDK CAM_17_FollowDriver_Normal)
+		cDC->damagePitchOffset += FPS_HALF(8);
 		if (cDC->damagePitchOffset > 0)
 		{
 			cDC->damagePitchOffset = 0;
@@ -1433,16 +1464,32 @@ void CAM_FollowDriver_Normal(struct CameraDC *cDC, struct Driver *d, SVec3 *push
 		// if frame countdown is not finished
 		if (cDC->BlastedLerp.framesRemaining != 0)
 		{
-			cam->pos.x += (cDC->BlastedLerp.desiredPos.x * cDC->BlastedLerp.framesRemaining) >> 3;
-			cam->pos.y += (cDC->BlastedLerp.desiredPos.y * cDC->BlastedLerp.framesRemaining) >> 3;
-			cam->pos.z += (cDC->BlastedLerp.desiredPos.z * cDC->BlastedLerp.framesRemaining) >> 3;
+			// 60fps: ModSDK CAM_17_FollowDriver_Normal doubles framesRemaining
+			// (8 -> 16) and shifts by 4; here the count stays in 30 Hz frames
+			// (stepped at half rate below) and is read in half frames.
+			s32 blastFrames = cDC->BlastedLerp.framesRemaining;
+			s32 blastShift = 3;
 
-			cam->delta.x += (cDC->BlastedLerp.desiredRot.x * cDC->BlastedLerp.framesRemaining) >> 3;
-			cam->delta.y += (cDC->BlastedLerp.desiredRot.y * cDC->BlastedLerp.framesRemaining) >> 3;
-			cam->delta.z += (cDC->BlastedLerp.desiredRot.z * cDC->BlastedLerp.framesRemaining) >> 3;
+			if (FPS60)
+			{
+				blastFrames = CAM_Fps60_HalfFrames(blastFrames, -1);
+				blastShift = 4;
+			}
+
+			cam->pos.x += (cDC->BlastedLerp.desiredPos.x * blastFrames) >> blastShift;
+			cam->pos.y += (cDC->BlastedLerp.desiredPos.y * blastFrames) >> blastShift;
+			cam->pos.z += (cDC->BlastedLerp.desiredPos.z * blastFrames) >> blastShift;
+
+			cam->delta.x += (cDC->BlastedLerp.desiredRot.x * blastFrames) >> blastShift;
+			cam->delta.y += (cDC->BlastedLerp.desiredRot.y * blastFrames) >> blastShift;
+			cam->delta.z += (cDC->BlastedLerp.desiredRot.z * blastFrames) >> blastShift;
 
 			// decrease frame countdown
-			cDC->BlastedLerp.framesRemaining--;
+			// 60fps: every other frame (30 Hz frames, see above)
+			if (FPS60_HALF_RATE(gGT->timer))
+			{
+				cDC->BlastedLerp.framesRemaining--;
+			}
 		}
 	}
 
@@ -1483,11 +1530,28 @@ void CAM_FollowDriver_Normal(struct CameraDC *cDC, struct Driver *d, SVec3 *push
 		x = cDC->heightSmoothing.framesRemaining;
 		if (x != 0)
 		{
-			cam->pos.y =
+			// 60fps: 8-frame lerp (ModSDK missed it): the count stays in
+			// 30 Hz frames, read in half frames (16 steps) and stepped at
+			// half rate, like BlastedLerp above
+			if (FPS60)
+			{
+				x = CAM_Fps60_HalfFrames(x, -1);
 
-			    ((8 - x) * cam->pos.y + x * ((s32)cDC->heightSmoothing.startOffset + CTR_MipsSra(d->posCurr.y, 8))) >> 3;
+				cam->pos.y =
 
-			cDC->heightSmoothing.framesRemaining += -1;
+				    ((16 - x) * cam->pos.y + x * ((s32)cDC->heightSmoothing.startOffset + CTR_MipsSra(d->posCurr.y, 8))) >> 4;
+			}
+			else
+			{
+				cam->pos.y =
+
+				    ((8 - x) * cam->pos.y + x * ((s32)cDC->heightSmoothing.startOffset + CTR_MipsSra(d->posCurr.y, 8))) >> 3;
+			}
+
+			if (FPS60_HALF_RATE(gGT->timer))
+			{
+				cDC->heightSmoothing.framesRemaining += -1;
+			}
 		}
 	}
 	cDC->heightSmoothing.currentOffset = (s16)cam->pos.y - CTR_MipsSra(d->posCurr.y, 8);
@@ -1506,7 +1570,8 @@ LAB_8001ab04:
 
 	if (d->kartState == KS_MASK_GRABBED)
 	{
-		pb->rot.z -= (pb->rot.z >> 3);
+		// 60fps: per-frame 1/8 decay -> 1/16 (ModSDK missed it)
+		pb->rot.z -= (pb->rot.z >> FPS_RIGHTSHIFT(3));
 
 		// camera dirX, cameraPosX minus driverPosX
 		cam->dir.x = (s32)pb->pos.x - CTR_MipsSra(d->posCurr.x, 8);
@@ -1519,7 +1584,8 @@ LAB_8001ab04:
 
 		if (pb->rot.x < 0x800)
 		{
-			pb->rot.x += 0x10;
+			// 60fps: half the step per frame (ModSDK CAM_17_FollowDriver_Normal)
+			pb->rot.x += FPS_HALF(0x10);
 			if (pb->rot.x > 0x800)
 			{
 				pb->rot.x = 0x800;
@@ -1667,12 +1733,25 @@ LAB_8001ab04:
 				// which frame of fly-in you are in
 				x = 0xa5 - (u16)cDC->transitionFrame;
 
-				if ((s16)x > 0x96)
+				// 60fps: ModSDK CAM_17 / CAM_06 double 0xa5 / 0x96 and the
+				// countdown; here transitionFrame stays in 30 Hz frames
+				// (written at load by CAM_StartOfRace, stepped at half rate
+				// below) and the fly-in is sampled in half frames
+				if (FPS60)
 				{
-					x = 0x96;
+					x = CAM_Fps60_HalfFrames(x, 1);
+					if (x < 0)
+					{
+						x = 0;
+					}
 				}
 
-				CAM_StartLine_FlyIn(&flyInData, 0x96, x, &local_40, &local_38);
+				if ((s16)x > FPS_DOUBLE(0x96))
+				{
+					x = FPS_DOUBLE(0x96);
+				}
+
+				CAM_StartLine_FlyIn(&flyInData, FPS_DOUBLE(0x96), x, &local_40, &local_38);
 
 				x = (s32)cDC->transitionBlend;
 			}
@@ -1714,6 +1793,35 @@ LAB_8001ab04:
 	{
 		iVar12 = (s32)cDC->transitionFrame;
 
+		// 60fps: transitionFrame / transitionFrameCount are 30 Hz frames
+		// (stepped at half rate below, ModSDK CAM_06 / CAM_16 double
+		// them at the write instead); blend from the half-frame value
+		if (FPS60)
+		{
+			// counts up while transitioning away, holds, counts down
+			// coming back and in every other mode (see the counting below)
+			s32 step = -1;
+			u32 tFlags = cDC->flags & (CAMERA_FLAG_TRANSITION_AWAY | CAMERA_FLAG_TRANSITION_BACK | CAMERA_FLAG_TRANSITION_HOLD);
+
+			if (tFlags == CAMERA_FLAG_TRANSITION_AWAY)
+			{
+				step = 1;
+			}
+			else if (tFlags == (CAMERA_FLAG_TRANSITION_AWAY | CAMERA_FLAG_TRANSITION_HOLD))
+			{
+				step = 0;
+			}
+
+			iVar12 = CAM_Fps60_HalfFrames(iVar12, step);
+			x = x * 2;
+			iVar14 = iVar14 * 2;
+
+			if (iVar12 < 0)
+			{
+				iVar12 = 0;
+			}
+		}
+
 		if (iVar12 <= iVar14)
 		{
 			x = x >> 1;
@@ -1753,7 +1861,11 @@ LAB_8001ab04:
 			// |= 0x800, stop transitioning away from player,
 			// sit stationary away from player, wait before moving back
 
-			cDC->transitionFrame++;
+			// 60fps: every other frame (30 Hz frames, see CAM_Fps60_HalfFrames)
+			if (FPS60_HALF_RATE(gGT->timer))
+			{
+				cDC->transitionFrame++;
+			}
 			if (cDC->transitionFrame > cDC->transitionFrameCount)
 			{
 				cDC->transitionFrame = cDC->transitionFrameCount;
@@ -1787,7 +1899,11 @@ LAB_8001ab04:
 
 	CountdownTransitionFrame:
 
-		cDC->transitionFrame--;
+		// 60fps: every other frame (30 Hz frames, see CAM_Fps60_HalfFrames)
+		if (FPS60_HALF_RATE(gGT->timer))
+		{
+			cDC->transitionFrame--;
+		}
 		if (cDC->transitionFrame < 0)
 		{
 			// This is normally not here,
@@ -2167,17 +2283,19 @@ SkipNewCameraEOR:
 						    trap(0x1800);
 						}
 						*/
-						cDC->trackPathProgress = cDC->trackPathProgress + (((cDC->transitionFrame * 0x1000) / 0x1e) * iVar7 >> 0xc);
+						// 60fps: (ModSDK missed it) half the per-frame advance, and the
+						// 30-frame speed ramp in transitionFrame steps every other frame
+						cDC->trackPathProgress = cDC->trackPathProgress + FPS_HALF((((cDC->transitionFrame * 0x1000) / 0x1e) * iVar7 >> 0xc));
 						if (iVar8 < 1)
 						{
 							if (iVar25 < 0x1001)
 							{
-								if (cDC->transitionFrame < 0x1e)
+								if ((cDC->transitionFrame < 0x1e) && FPS60_HALF_RATE(gGT->timer))
 								{
 									cDC->transitionFrame = cDC->transitionFrame + 1;
 								}
 							}
-							else if (cDC->transitionFrame != 0)
+							else if ((cDC->transitionFrame != 0) && FPS60_HALF_RATE(gGT->timer))
 							{
 								cDC->transitionFrame = cDC->transitionFrame + -1;
 							}
@@ -2260,7 +2378,10 @@ SkipNewCameraEOR:
 								SVec3 *trackPathLookaheadPos = &scratchWork->trackPathLookaheadPos;
 
 
-								uVar9 = CAM_FollowDriver_TrackPath(cDC, trackPathPos, cDC->eorModeData.trackPathSpeed, 1);
+								// 60fps: half the path advance per frame (ModSDK CAM_19_ThTick;
+								// ModSDK also halves the +-0xc0 look-ahead below, but that is
+								// a distance, not a per-frame step: not ported)
+								uVar9 = CAM_FollowDriver_TrackPath(cDC, trackPathPos, FPS_HALF(cDC->eorModeData.trackPathSpeed), 1);
 
 								iVar7 = -0xc0;
 								if (-1 < cDC->eorModeData.trackPathSpeed)
