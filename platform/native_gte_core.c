@@ -8,6 +8,9 @@
 #include <psx/gtereg.h>
 #include <psx/libgte.h>
 #include "platform/native_gte_capture.h"
+#if defined(CTR_INTERNAL) && defined(__3DS__)
+#include "platform/native_perf.h" /* [GTEPROF] op counters */
+#endif
 
 #ifndef CTR_NATIVE_GTE_CAPTURE
 #define CTR_NATIVE_GTE_CAPTURE 0
@@ -374,6 +377,10 @@ int GTE_operator(int op)
 	m_sf = GTE_SF(gteop(op));
 
 	C2_FLAG = 0;
+
+#if defined(CTR_INTERNAL) && defined(__3DS__)
+	g_gteProfOps[g_gteProfPhase][GTE_FUNCT(gteop(op))]++;
+#endif
 
 	switch (GTE_FUNCT(gteop(op)))
 	{
