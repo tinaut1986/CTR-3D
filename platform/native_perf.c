@@ -169,6 +169,10 @@ global_variable const struct NativePerfBucketInfo s_bucketInfo[NATIVE_PERF_BUCKE
     {"level_renderlists_ms", 0},
     {"level_track_record_ms", 0},
     {"level_sky_ms", 0},
+    /* dominantCandidate 0: the three nest inside render_submit_ms. */
+    {"submit_flip_ms", 0},
+    {"submit_envs_ms", 0},
+    {"submit_drawotag_ms", 0},
 };
 
 global_variable FILE *s_csvFile;
@@ -888,6 +892,13 @@ internal void NativePerf_Report3DSWindow(void)
 	         (int)(s_windowBucketMs[NATIVE_PERF_BUCKET_MAINFRAME_LEVEL_GEOMETRY] * toAvgUs),
 	         (int)(s_windowBucketMs[NATIVE_PERF_BUCKET_LEVEL_ANIMATE] * toAvgUs), (int)(s_windowBucketMs[NATIVE_PERF_BUCKET_LEVEL_RENDERLISTS] * toAvgUs),
 	         (int)(s_windowBucketMs[NATIVE_PERF_BUCKET_LEVEL_TRACK_RECORD] * toAvgUs), (int)(s_windowBucketMs[NATIVE_PERF_BUCKET_LEVEL_SKY] * toAvgUs));
+	N3DS_DebugLog(out);
+	/* render_submit_ms by phase, avg us per frame. */
+	snprintf(out, sizeof(out), "[SUBPROF] total=%d flip=%d envs=%d drawotag=%d otag=%d parse=%d beginscene=%d endscene=%d",
+	         (int)(s_windowBucketMs[NATIVE_PERF_BUCKET_RENDER_SUBMIT] * toAvgUs), (int)(s_windowBucketMs[NATIVE_PERF_BUCKET_SUBMIT_FLIP] * toAvgUs),
+	         (int)(s_windowBucketMs[NATIVE_PERF_BUCKET_SUBMIT_ENVS] * toAvgUs), (int)(s_windowBucketMs[NATIVE_PERF_BUCKET_SUBMIT_DRAWOTAG] * toAvgUs),
+	         (int)(s_windowBucketMs[NATIVE_PERF_BUCKET_DRAW_OTAG] * toAvgUs), (int)(s_windowBucketMs[NATIVE_PERF_BUCKET_DRAW_OTAG_PARSE] * toAvgUs),
+	         (int)(s_windowBucketMs[NATIVE_PERF_BUCKET_PLATFORM_BEGIN_SCENE] * toAvgUs), (int)(s_windowBucketMs[NATIVE_PERF_BUCKET_PLATFORM_END_SCENE] * toAvgUs));
 	N3DS_DebugLog(out);
 	/* Frame cap / AUTO 3D state and the frame WORK the policy sees
 	 * (n3ds_backend.h's frame-pace block). */

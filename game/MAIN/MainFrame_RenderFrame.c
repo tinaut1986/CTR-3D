@@ -1831,13 +1831,17 @@ void RenderSubmit(struct GameTracker *gGT)
 	// on an Old 3DS -- see Platform_FlipVBlanks.
 	// 60fps: tell the pacer whether this context may be shown at 60.
 	Fps60_BeforeSubmit(gGT);
+	MAINFRAME_PERF_BEGIN(NATIVE_PERF_BUCKET_SUBMIT_FLIP);
 	sdata->vsyncTillFlip = Platform_FlipVBlanks();
+	MAINFRAME_PERF_END(NATIVE_PERF_BUCKET_SUBMIT_FLIP);
 
 	// Native still renders immediately through PsyCross, so keep the host GPU's
 	// active draw/display envs in step with the retail DB selected this frame.
+	MAINFRAME_PERF_BEGIN(NATIVE_PERF_BUCKET_SUBMIT_ENVS);
 	PutDrawEnv(&gGT->backBuffer->drawEnv);
 	gGT->frontBuffer = &gGT->db[1 - gGT->swapchainIndex];
 	PutDispEnv(&gGT->frontBuffer->dispEnv);
+	MAINFRAME_PERF_END(NATIVE_PERF_BUCKET_SUBMIT_ENVS);
 
 #else
 
@@ -1864,7 +1868,9 @@ void RenderSubmit(struct GameTracker *gGT)
 
 	void *ot = &gGT->pushBuffer[0].ptrOT[0x3ff];
 
+	MAINFRAME_PERF_BEGIN(NATIVE_PERF_BUCKET_SUBMIT_DRAWOTAG);
 	DrawOTag(ot);
+	MAINFRAME_PERF_END(NATIVE_PERF_BUCKET_SUBMIT_DRAWOTAG);
 
 	gGT->frameTimer_notPaused = gGT->frameTimer_VsyncCallback;
 
