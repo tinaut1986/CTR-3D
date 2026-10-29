@@ -1506,9 +1506,17 @@ void N3DS_AudioThreadStopAndJoin(void)
 	{
 		s_audioThreadShouldStop = 1;
 		svcSignalEvent(s_audioWakeHandle);
-		threadJoin(s_audioThread, U64_MAX); /* documented infinite-wait sentinel */
-		N3DS_ExitLog("audio worker joined");
-		threadFree(s_audioThread);          /* valid only because detached=false at creation */
+		/* A timeout comes back as a positive code: only 0 is the thread ended.
+		 * If it never ends the exit goes on and the kernel reaps it. */
+		if (threadJoin(s_audioThread, 3000000000ULL) == 0)
+		{
+			N3DS_ExitLog("audio worker joined");
+			threadFree(s_audioThread); /* valid only because detached=false at creation */
+		}
+		else
+		{
+			N3DS_ExitLog("audio worker did not end in 3 s, left running");
+		}
 		s_audioThread = NULL;
 		s_audioThreadRunning = 0;
 	}

@@ -15,6 +15,7 @@ static LightLock s_queueLock;
 static LightEvent s_workEvent;
 static LightEvent s_doneEvent;
 static int s_workerUp;
+static int s_workerStuck;
 
 static void (*s_workerMainFn)(void);
 
@@ -84,11 +85,26 @@ void N3DS_RenderWorkerStopAndJoin(void)
 		return;
 	}
 
-	threadJoin(s_renderThread, U64_MAX);
-	N3DS_ExitLog("render worker joined");
-	threadFree(s_renderThread);
+	/* Timed: a worker inside a GPU wait that never returns (HOME took the GPU)
+	 * must cost the exit 2 s, not the console. Stuck => left running, and
+	 * citro3d is then not torn down under it (N3DS_RenderWorkerStuck). */
+	if (threadJoin(s_renderThread, 2000000000ULL) == 0)
+	{
+		N3DS_ExitLog("render worker joined");
+		threadFree(s_renderThread);
+	}
+	else
+	{
+		s_workerStuck = 1;
+		N3DS_ExitLog("render worker did not end in 2 s, left running");
+	}
 	s_renderThread = NULL;
 	s_workerUp = 0;
+}
+
+int N3DS_RenderWorkerStuck(void)
+{
+	return s_workerStuck;
 }
 
 int N3DS_RenderWorkerIsSelf(void)
