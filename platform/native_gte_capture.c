@@ -1358,6 +1358,13 @@ int GTECapture_NodeFlagTable(void)
 	return s_gteCaptureFlagSlot != NULL;
 }
 
+/* The current flag quad's four table depths (packet-vertex order), NULL when
+ * the walk is not on a table quad. Same slot GTECapture_NodeFlagDepth reads. */
+const u16 *GTECapture_NodeFlagSlot(void)
+{
+	return s_gteCaptureFlagSlot;
+}
+
 /* The table depth of the current flag quad's vertex at (sx, sy): matched
  * against the quad's own four coordinates, so the caller's vertex order does
  * not matter. 0 for a coordinate that is not one of them. */
