@@ -70,7 +70,14 @@
 #define N3DS_FTP_DATA_ACCEPT_MS 15000
 #define N3DS_FTP_IDLE_MS (10 * 60 * 1000)
 #define N3DS_FTP_STACK_SIZE (64 * 1024)
+#ifdef CTR_INTERNAL
+/* Debug builds: above the game (0x30). On an Old 3DS the game thread almost never
+ * blocks, so at 0x3F the server starves (timeouts, "waiting for Wi-Fi"); a poll is
+ * a zero-timeout IPC every 50 ms, so the cost to the frame is small. */
+#define N3DS_FTP_PRIORITY 0x2F
+#else
 #define N3DS_FTP_PRIORITY 0x3F
+#endif
 #define N3DS_FTP_RELAUNCH_DELAY_MS 10000 /* the same wait the author measured safe on the loader */
 
 static Thread s_ftpThread = NULL;
