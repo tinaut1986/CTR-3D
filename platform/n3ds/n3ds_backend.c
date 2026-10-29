@@ -16,6 +16,7 @@
 #include "n3ds_backend.h"
 #include "n3ds_beat.h"
 #include "n3ds_bottomui.h"
+#include "n3ds_debuglink.h"
 #include "n3ds_ftp.h"
 #include "updater.h"
 #include "n3ds_render_thread.h" /* N3DS_RenderWorkerIsSelf -- which thread the frame-begin guard is running on */
@@ -4354,6 +4355,9 @@ unsigned int N3DS_ReadButtons(void)
 
 	hidScanInput();
 	held = hidKeysHeld();
+#ifdef CTR_INTERNAL
+	held |= N3DS_DebugLinkKeys();
+#endif
 
 	/* Bottom-screen UI touch poll (tabs, options, updater, debug). */
 	N3DS_BottomUi_Touch();
