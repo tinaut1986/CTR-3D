@@ -4837,6 +4837,15 @@ unsigned int N3DS_ReadButtons(void)
 	 *   triscopes   -- toggle g_dbg_perfTriScopes (per-triangle perf split; taxed)
  *   g4run       -- toggle g_dbg_g4Run (the walk's POLY_G4 run fast path, the
  *                  menu flag; A/B for [PARSEPROF] / draw_otag_parse_ms)
+ *   flaglean    -- toggle g_dbg_flagLean (DEFAULT ON): the menu flag's 360 RTPT
+ *                  through the lean projection, same SXY and Stores; A/B for
+ *                  mainframe_ui_ms
+ *   flagpar     -- toggle g_dbg_flagPar (DEFAULT ON, needs flaglean): the flag's
+ *                  stereo depth per quad straight to the walk, no capture
+ *                  Stores or lookups; A/B for mainframe_ui_ms / [PARSEPROF]
+ *   mdlgate     -- toggle g_dbg_modelGate (DEFAULT ON): native-model triangles
+ *                  pass the flag/NCLIP/screen gate without the software GTE
+ *                  (same triangles); A/B for [INSTPROF] proj
 	 *   drawmerge   -- toggle g_dbg_drawMerge: 0 falls back to immediate
 	 *                  per-run submission instead of the state-sorted bins
 	 *   flagstyle [N] -- menu/loading flag: 0 = retail grey checkers (default),
@@ -6131,6 +6140,39 @@ unsigned int N3DS_ReadButtons(void)
 					}
 					snprintf(msg, sizeof(msg), "[CTR-3DS] model render: %s", names[g_dbg_modelRender]);
 					N3DS_DebugLog(msg);
+				}
+				else if (strncmp(word, "mdlgate", 7) == 0)
+				{
+					extern int g_dbg_modelGate;
+
+					/* Native-model projection gate (platform/native_model_gate.c):
+					 * a replaced instance's triangles are accepted on the CPU
+					 * without the software GTE. Both legs accept the same
+					 * triangles; A/B for [INSTPROF] proj and
+					 * mainframe_execute_instances_ms. Latched per instance. */
+					g_dbg_modelGate ^= 1;
+					N3DS_DebugLog(g_dbg_modelGate ? "[CTR-3DS] model gate: ON (no software GTE for native-model triangles)"
+					                              : "[CTR-3DS] model gate: off (software GTE per triangle)");
+				}
+				else if (strncmp(word, "flagpar", 7) == 0)
+				{
+					extern int g_dbg_flagPar;
+
+					/* The flag's stereo depth through its own per-quad table
+					 * (no capture Stores, no walk-side lookups). Needs flaglean.
+					 * A/B for mainframe_ui_ms and [PARSEPROF] g4run. */
+					g_dbg_flagPar ^= 1;
+					N3DS_DebugLog(g_dbg_flagPar ? "[CTR-3DS] flag parallax table: ON" : "[CTR-3DS] flag parallax table: off (capture Stores + lookups)");
+				}
+				else if (strncmp(word, "flaglean", 8) == 0)
+				{
+					extern int g_dbg_flagLean;
+
+					/* Menu/loading flag projected through the lean projection
+					 * (same SXY, same capture Stores) instead of 360 software
+					 * RTPT ops. A/B for mainframe_ui_ms. */
+					g_dbg_flagLean ^= 1;
+					N3DS_DebugLog(g_dbg_flagLean ? "[CTR-3DS] flag lean projection: ON" : "[CTR-3DS] flag lean projection: off (software GTE)");
 				}
 				else if (strncmp(word, "hudui", 5) == 0)
 				{

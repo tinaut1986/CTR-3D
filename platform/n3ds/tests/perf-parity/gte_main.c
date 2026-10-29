@@ -22,6 +22,7 @@ extern void base_acc_mtc2(u32, int), test_acc_mtc2(u32, int), base_acc_ctc2(u32,
 extern u32 base_lzc(u32), test_lzc(u32);
 extern u32 test_acc_mfc2_c12(void), test_acc_mfc2_c17(void);
 extern void test_acc_mtc2_c15(u32), test_acc_mtc2_c28(u32), test_acc_ctc2_c31(u32);
+extern u32 test_lean_rtpt_store(void) __attribute__((weak));
 
 typedef struct { u32 shadow[8]; int valid; u32 changes; u32 log[4096]; int n; } Side;
 static Side S[2];
@@ -144,6 +145,36 @@ int main(int argc, char **argv)
 		if (a != b || memcmp(&base_gteRegs, &test_gteRegs, sizeof(r))) { printf("ACC-CONST MISMATCH\n"); fails++; }
 	}
 	printf("accessors done, fails=%ld\n", fails);
+
+	/* Lean RTPT (native_model_gate.c) vs the tested core's RTPT: SXY0-2, SZ0-3,
+	 * FLAG bit 18, and the same matrix notes and Store arguments. */
+	if (&test_lean_rtpt_store != 0)
+	{
+		long leanFails = 0;
+		for (long t = 0; t < trials / 4 && leanFails < 10; t++)
+		{
+			GTERegisters r, g;
+			int mode = rnd() % 3;
+			u32 fGte, fLean;
+			Side s0;
+			rand_regs(&r);
+			memset(S, 0, sizeof(S));
+			if (rnd() & 1) { S[1].valid = 1; if (rnd() & 1) memcpy(S[1].shadow, &r.CP2C.p[0], 32); else for (int i = 0; i < 8; i++) S[1].shadow[i] = rnd(); }
+			s0 = S[1];
+			test_g_dbg_gteCapture = mode;
+			test_gteRegs = r; test_run_const(1); fGte = test_gteRegs.CP2C.p[31].d; g = test_gteRegs;
+			{ Side gteSide = S[1]; S[1] = s0; test_gteRegs = r; fLean = test_lean_rtpt_store(); S[0] = gteSide; }
+			{
+				static const int fifo[] = {12, 13, 14, 16, 17, 18, 19};
+				int bad = ((fGte ^ fLean) & (1u << 18)) != 0;
+				for (unsigned k = 0; k < 7; k++) bad |= ((g.CP2D.p[fifo[k]].d & ((fifo[k] >= 16) ? 0xffffu : 0xffffffffu)) != test_gteRegs.CP2D.p[fifo[k]].d);
+				bad |= (S[0].n != S[1].n) || memcmp(S[0].log, S[1].log, S[0].n * 4) || (S[0].valid != S[1].valid) || memcmp(S[0].shadow, S[1].shadow, 32);
+				if (bad) { printf("LEAN MISMATCH t=%ld flag %08x/%08x log %d/%d\n", t, fGte, fLean, S[0].n, S[1].n); leanFails++; }
+			}
+		}
+		printf("lean rtpt: %ld trials, fails=%ld\n", trials / 4, leanFails);
+		fails += leanFails;
+	}
 	if (argc > 2)
 	{
 		u32 v = 0;
