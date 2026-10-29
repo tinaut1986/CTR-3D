@@ -2,6 +2,11 @@
 
 #include <platform/native_path.h>
 #include <platform/native_perf.h>
+#if defined(__3DS__) && defined(CTR_INTERNAL)
+unsigned long long N3DS_GetTickCount(void);
+unsigned long long N3DS_GetTickFrequency(void);
+void N3DS_DebugLog(const char *msg);
+#endif
 
 #include <limits.h>
 #if !defined(_WIN32)
@@ -411,7 +416,49 @@ internal int NativeDiscImage_ReadRawRun(u32 lba, u32 count, u8 *raw, int owner)
 		{
 			NativePerf_BeginScope(NATIVE_PERF_BUCKET_DISC_READ_MAIN);
 		}
+#if defined(CTR_INTERNAL)
+		{
+			extern int Platform_LoadStageForLog(void);
+			const unsigned long long readT0 = (owner == NATIVE_DISC_IMAGE_OWNER_MAIN) ? N3DS_GetTickCount() : 0ull;
+
+			readOk = NativeDiscImage_FdReadFull(fd, raw, bytes);
+			if (owner == NATIVE_DISC_IMAGE_OWNER_MAIN)
+			{
+				/* [DISCSLOW]: a main-thread read that held the game thread for
+				 * 15 ms or more -- the loading screen and the race cannot draw
+				 * while it runs. lba/sectors say WHAT was read, stage and lvl
+				 * say WHEN, so a 2 s stall can be matched to a file. Plus a
+				 * per-run total ([DISCSUM], one line per 256 main reads). */
+				static unsigned s_mainReads;
+				static unsigned long long s_mainTicks;
+				static unsigned long long s_mainSectors;
+				const unsigned long long dt = N3DS_GetTickCount() - readT0;
+				const unsigned long long freq = N3DS_GetTickFrequency();
+
+				s_mainReads++;
+				s_mainTicks += dt;
+				s_mainSectors += count;
+				if (freq != 0 && (dt * 1000ull) >= (15ull * freq))
+				{
+					char line[160];
+
+					snprintf(line, sizeof(line), "[DISCSLOW] lba=%u sectors=%u ms=%u stage=%d lvl=%d", (unsigned)lba, (unsigned)count,
+					         (unsigned)((dt * 1000ull) / freq), Platform_LoadStageForLog(), NativePerf_CurrentLevelID());
+					N3DS_DebugLog(line);
+				}
+				if ((s_mainReads & 255u) == 0u && freq != 0)
+				{
+					char line[160];
+
+					snprintf(line, sizeof(line), "[DISCSUM] reads=%u sectors=%u ms=%u", s_mainReads, (unsigned)s_mainSectors,
+					         (unsigned)((s_mainTicks * 1000ull) / freq));
+					N3DS_DebugLog(line);
+				}
+			}
+		}
+#else
 		readOk = NativeDiscImage_FdReadFull(fd, raw, bytes);
+#endif
 		if (owner == NATIVE_DISC_IMAGE_OWNER_MAIN)
 		{
 			NativePerf_EndScope(NATIVE_PERF_BUCKET_DISC_READ_MAIN);
