@@ -381,6 +381,8 @@ int N3DS_C3DAtlasCount(void);
 
 /* tiled256 buffer is RGBA5551 (2 bytes/texel), not RGBA8 -- see N3DS_TILE_BYTES. */
 void N3DS_C3DUploadDecodedCell(int atlasIndex, int cellX, int cellY, const void *tiled256);
+/* A tilesWide x tilesHigh block of 8x8 tiles at (tileCol, tileRow) inside the 32x32-tile cell. */
+void N3DS_C3DUploadDecodedTiles(int atlasIndex, int cellX, int cellY, int tileCol, int tileRow, int tilesWide, int tilesHigh, const void *tiled);
 /* Sub-page counterpart -- writes an
  * 8x8-tile (64x64 texel) sub-cell at physical cell (physCellX,physCellY)'s
  * (subX,subY) quadrant-of-16, instead of a whole 32x32-tile cell. tiled64 is

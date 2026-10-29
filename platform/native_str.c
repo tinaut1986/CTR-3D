@@ -7,8 +7,14 @@
 #include <psx/libgpu.h>
 
 #include <stdio.h>
-#include <sys/stat.h>
 #include <string.h>
+
+#ifdef __3DS__
+void NativeRenderer3DS_SetVideoRect(int x, int y, int w, int h);
+#define NATIVE_STR_SET_VIDEO_RECT(x, y, w, h) NativeRenderer3DS_SetVideoRect((x), (y), (w), (h))
+#else
+#define NATIVE_STR_SET_VIDEO_RECT(x, y, w, h) ((void)0)
+#endif
 
 #define NATIVE_STR_EXTRACTED_SECTOR_SIZE    0x800
 #define NATIVE_STR_CD_SECTOR_SIZE           0x920
@@ -70,12 +76,6 @@ struct NativeSTRState
 	s32 height;
 	u32 readAheadStart;
 	u32 readAheadCount;
-	s32 hasUpload;
-	u32 skipPhase;
-	FILE *cache;      /* converted preview: header + frames of RGB555, read sequentially */
-	s32 cacheFrames;
-	s32 cacheIdx;
-	s32 cacheTried;
 	/*
 	 * Caller-owned scratch, main-thread role: every STR reader (track preview,
 	 * scrapbook) runs on the main thread, and on 3DS the owner picks which
@@ -878,17 +878,8 @@ void NativeSTR_Stop(void)
 		s_str.file = NULL;
 	}
 
-	if (s_str.cache != NULL)
-	{
-		fclose(s_str.cache);
-		s_str.cache = NULL;
-	}
-	s_str.cacheTried = 0;
-	s_str.cacheFrames = 0;
-	s_str.cacheIdx = 0;
+	NATIVE_STR_SET_VIDEO_RECT(0, 0, 0, 0);
 	s_str.active = 0;
-	s_str.hasUpload = 0;
-	s_str.skipPhase = 0;
 	s_str.format = NATIVE_STR_FORMAT_EXTRACTED;
 	s_str.source = NATIVE_STR_SOURCE_NONE;
 	s_str.loop = 0;
@@ -905,211 +896,6 @@ void NativeSTR_Stop(void)
 	s_str.frameSize = 0;
 }
 
-/* Old 3DS / 2DS: the CPU decode of a preview frame (~50 ms) plus the VRAM page
- * re-decode it triggers (~20 ms) is most of the track select frame. The stream
- * still advances one frame per call (reading is ~1 ms) so playback keeps its
- * speed, but only every Nth frame is decoded and uploaded; the previous picture
- * stays in VRAM in between. Weak default: 1 (decode every frame) off the 3DS. */
-__attribute__((weak)) int N3DS_FramePaceOldClass(void)
-{
-	return 0;
-}
-
-#define NATIVE_STR_OLD_DECODE_EVERY 3
-
-/*
- * Old 3DS preview cache: the MDEC decode (~50 ms/frame) is too slow to play the
- * preview in real time, so the first time a track is shown its frames are
- * decoded once and stored as RGB555 in sdmc:/3ds/ctr_native/strcache/. Playing
- * it afterwards is one sequential read per frame. The cache holds only what the
- * user's own disc decodes to, can be deleted at any time, and is rebuilt when
- * missing, truncated or of a different frame count.
- */
-#define NATIVE_STR_CACHE_DIR "sdmc:/3ds/ctr_native/strcache"
-#define NATIVE_STR_CACHE_MAGIC 0x43525453u /* "STRC" */
-#define NATIVE_STR_CACHE_VERSION 1u
-/* Previews run ~40 s (600 frames, ~16 MB); keep the first 10 s and loop it. */
-#define NATIVE_STR_CACHE_MAX_FRAMES 150
-
-internal s32 NativeSTR_CacheFrameCount(void)
-{
-	return (s_str.frameLimit < NATIVE_STR_CACHE_MAX_FRAMES) ? s_str.frameLimit : NATIVE_STR_CACHE_MAX_FRAMES;
-}
-
-void N3DS_DebugLog(const char *msg);
-
-static char s_cacheIoBuf[64 * 1024];
-
-struct NativeSTRCacheHeader
-{
-	u32 magic;
-	u16 version;
-	u16 frames;
-	u16 width;
-	u16 height;
-};
-
-internal void NativeSTR_CachePath(char *path, size_t size)
-{
-	snprintf(path, size, NATIVE_STR_CACHE_DIR "/p%d_%d.rgb", (int)s_str.bigfileSector, (int)s_str.frameLimit);
-}
-
-internal s32 NativeSTR_CacheOpen(void)
-{
-	char path[128];
-	struct NativeSTRCacheHeader hdr;
-	FILE *f;
-
-	NativeSTR_CachePath(path, sizeof(path));
-	f = fopen(path, "rb");
-	if (f == NULL)
-	{
-		return 0;
-	}
-	/* Default stdio buffering reads in small chunks (~2 MB/s on the SD, 14 ms per
-	 * 26 KB frame on an Old 3DS); a big buffer lets each frame be a few large
-	 * reads. Only one cache file is open at a time. Must precede the first read. */
-	setvbuf(f, s_cacheIoBuf, _IOFBF, sizeof(s_cacheIoBuf));
-
-	if ((fread(&hdr, sizeof(hdr), 1, f) != 1) || (hdr.magic != NATIVE_STR_CACHE_MAGIC) || (hdr.version != NATIVE_STR_CACHE_VERSION) ||
-	    (hdr.frames != (u16)NativeSTR_CacheFrameCount()) || (hdr.width == 0) || (hdr.width > NATIVE_STR_MAX_WIDTH) || (hdr.height == 0) ||
-	    (hdr.height > NATIVE_STR_MAX_HEIGHT))
-	{
-		fclose(f);
-		return 0;
-	}
-
-	s_str.cache = f;
-	s_str.cacheFrames = hdr.frames;
-	s_str.cacheIdx = 0;
-	s_str.width = hdr.width;
-	s_str.height = hdr.height;
-	return 1;
-}
-
-/* Decodes every frame of the preview once into the cache file. Blocks for a few
- * seconds the first time a track is shown. */
-internal s32 NativeSTR_CacheBuild(void)
-{
-	char path[128];
-	char tmp[140];
-	struct NativeSTRCacheHeader hdr;
-	FILE *f;
-	s32 i;
-	s32 ok = 1;
-
-	const s32 frames = NativeSTR_CacheFrameCount();
-
-	if (frames <= 0)
-	{
-		return 0;
-	}
-
-	mkdir("sdmc:/3ds/ctr_native", 0777);
-	mkdir(NATIVE_STR_CACHE_DIR, 0777);
-	NativeSTR_CachePath(path, sizeof(path));
-	snprintf(tmp, sizeof(tmp), "%s.tmp", path);
-	f = fopen(tmp, "wb");
-	if (f == NULL)
-	{
-		return 0;
-	}
-
-	memset(&hdr, 0, sizeof(hdr));
-	fwrite(&hdr, sizeof(hdr), 1, f);
-	s_str.frameIndex = 0;
-	for (i = 0; i < frames; i++)
-	{
-		if ((NativeSTR_ReadNextFrame() == 0) || (NativeSTR_DecodeFrame() == 0))
-		{
-			ok = 0;
-			break;
-		}
-		if (i == 0)
-		{
-			hdr.width = (u16)s_str.width;
-			hdr.height = (u16)s_str.height;
-		}
-		if ((s_str.width != hdr.width) || (s_str.height != hdr.height) ||
-		    (fwrite(s_str.rgb555, 2, (size_t)s_str.width * (size_t)s_str.height, f) != (size_t)s_str.width * (size_t)s_str.height))
-		{
-			ok = 0;
-			break;
-		}
-	}
-
-	if (ok != 0)
-	{
-		hdr.magic = NATIVE_STR_CACHE_MAGIC;
-		hdr.version = NATIVE_STR_CACHE_VERSION;
-		hdr.frames = (u16)frames;
-		fseek(f, 0, SEEK_SET);
-		fwrite(&hdr, sizeof(hdr), 1, f);
-	}
-	fclose(f);
-
-	if (ok == 0)
-	{
-		remove(tmp);
-		return 0;
-	}
-
-	remove(path);
-	if (rename(tmp, path) != 0)
-	{
-		return 0;
-	}
-
-	{
-		char line[160];
-
-		snprintf(line, sizeof(line), "[STRCACHE] built %s frames=%d %dx%d bytes=%u", path, (int)hdr.frames, (int)hdr.width, (int)hdr.height,
-		         (unsigned)(sizeof(hdr) + (size_t)hdr.frames * hdr.width * hdr.height * 2u));
-		N3DS_DebugLog(line);
-	}
-	return 1;
-}
-
-/* Returns 1 when a frame was uploaded from the cache, 0 to fall back to decoding. */
-internal s32 NativeSTR_UploadFromCache(s32 dstX, s32 dstY)
-{
-	RECT16 rect;
-	size_t count;
-
-	if (s_str.cache == NULL)
-	{
-		return 0;
-	}
-
-	count = (size_t)s_str.width * (size_t)s_str.height;
-	if ((s_str.cacheIdx >= s_str.cacheFrames) && (fseek(s_str.cache, (long)sizeof(struct NativeSTRCacheHeader), SEEK_SET) == 0))
-	{
-		s_str.cacheIdx = 0;
-	}
-	/* Sequential: the file position already sits at the next frame. */
-	NativePerf_BeginScope(NATIVE_PERF_BUCKET_STR_READ);
-	size_t got = fread(s_str.rgb555, 2, count, s_str.cache);
-	NativePerf_EndScope(NATIVE_PERF_BUCKET_STR_READ);
-	if (got != count)
-	{
-		fclose(s_str.cache);
-		s_str.cache = NULL;
-		return 0;
-	}
-	s_str.cacheIdx++;
-
-	rect.x = dstX;
-	rect.y = dstY;
-	rect.w = s_str.width;
-	rect.h = s_str.height;
-	NativePerf_BeginScope(NATIVE_PERF_BUCKET_STR_UPLOAD);
-	LoadImage(&rect, s_str.rgb555);
-	NativeRenderer_UpdateVRAM();
-	NativePerf_EndScope(NATIVE_PERF_BUCKET_STR_UPLOAD);
-	s_str.hasUpload = 1;
-	return 1;
-}
-
 s32 NativeSTR_UploadNextFrame(s32 dstX, s32 dstY)
 {
 	RECT16 rect;
@@ -1119,31 +905,12 @@ s32 NativeSTR_UploadNextFrame(s32 dstX, s32 dstY)
 		return 0;
 	}
 
-	if ((s_str.cacheTried == 0) && (s_str.bigfileSector >= 0) && N3DS_FramePaceOldClass())
-	{
-		s_str.cacheTried = 1;
-		if ((NativeSTR_CacheOpen() == 0) && (NativeSTR_CacheBuild() != 0))
-		{
-			NativeSTR_CacheOpen();
-		}
-		NativeSTR_RewindFrameSource();
-		s_str.frameIndex = 0;
-	}
-	if (NativeSTR_UploadFromCache(dstX, dstY) != 0)
-	{
-		return 1;
-	}
-
 	NativePerf_BeginScope(NATIVE_PERF_BUCKET_STR_READ);
 	s32 readOk = NativeSTR_ReadNextFrame();
 	NativePerf_EndScope(NATIVE_PERF_BUCKET_STR_READ);
 	if (readOk == 0)
 	{
 		return 0;
-	}
-	if ((s_str.hasUpload != 0) && N3DS_FramePaceOldClass() && ((++s_str.skipPhase % NATIVE_STR_OLD_DECODE_EVERY) != 0))
-	{
-		return 1;
 	}
 	NativePerf_BeginScope(NATIVE_PERF_BUCKET_STR_DECODE);
 	s32 decOk = NativeSTR_DecodeFrame();
@@ -1158,12 +925,12 @@ s32 NativeSTR_UploadNextFrame(s32 dstX, s32 dstY)
 	rect.w = s_str.width;
 	rect.h = s_str.height;
 	NativePerf_BeginScope(NATIVE_PERF_BUCKET_STR_UPLOAD);
+	NATIVE_STR_SET_VIDEO_RECT(rect.x, rect.y, rect.w, rect.h);
 	LoadImage(&rect, s_str.rgb555);
 	// NOTE(aalhendi): Track-preview STR draws these uploaded pixels as same-pass
 	// textured primitives. Retail LoadImage is GPU-visible immediately; refresh
 	// the host VRAM texture at that boundary.
 	NativeRenderer_UpdateVRAM();
 	NativePerf_EndScope(NATIVE_PERF_BUCKET_STR_UPLOAD);
-	s_str.hasUpload = 1;
 	return 1;
 }

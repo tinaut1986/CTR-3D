@@ -3196,6 +3196,15 @@ void N3DS_C3DUploadDecodedCell(int atlasIndex, int cellX, int cellY, const void 
 	N3DS_C3DUploadTileBlock(&s_atlasTextures[atlasIndex], N3DS_ATLAS_DIM / 8, cellX * 32, cellY * 32, 32, 32, tiled256); /* unchanged behavior */
 }
 
+void N3DS_C3DUploadDecodedTiles(int atlasIndex, int cellX, int cellY, int tileCol, int tileRow, int tilesWide, int tilesHigh, const void *tiled)
+{
+	if ((atlasIndex < 0) || (atlasIndex >= s_atlasCount))
+	{
+		return;
+	}
+	N3DS_C3DUploadTileBlock(&s_atlasTextures[atlasIndex], N3DS_ATLAS_DIM / 8, (cellX * 32) + tileCol, (cellY * 32) + tileRow, tilesWide, tilesHigh, tiled);
+}
+
 void N3DS_C3DUploadDecodedSubCell(int atlasIndex, int physCellX, int physCellY, int subX, int subY, const void *tiled64)
 {
 	if ((atlasIndex < 0) || (atlasIndex >= s_atlasCount))

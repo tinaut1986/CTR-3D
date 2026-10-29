@@ -872,6 +872,27 @@ global_variable u32 s_vramCellGen[N3DS_VRAM_CELL_ROWS * N3DS_VRAM_CELL_COLS];
  * impossible by construction, and any thrashing is purely a capacity problem.
  */
 global_variable u32 s_vramDirtyBumps = 0;
+/*
+ * Track-preview video rectangle (set by the STR player, 16bpp, fixed for the
+ * life of a preview) and the count of VRAM writes that were NOT that rectangle.
+ * A decode-cache entry records s_vramOtherBumps when it decodes; if it is stale
+ * and the counter has not moved, the only thing that changed in VRAM since is
+ * the video rectangle, so re-decoding just its tiles reproduces a full re-decode
+ * exactly (the video page was ~25 ms/frame, twice, on an Old 3DS).
+ */
+global_variable int s_vidHintValid = 0;
+global_variable int s_vidX = 0, s_vidY = 0, s_vidW = 0, s_vidH = 0;
+global_variable u32 s_vramOtherBumps = 0;
+global_variable u32 s_texdecFramePart = 0;
+
+void NativeRenderer3DS_SetVideoRect(int x, int y, int w, int h)
+{
+	s_vidX = x;
+	s_vidY = y;
+	s_vidW = w;
+	s_vidH = h;
+	s_vidHintValid = (w > 0) && (h > 0);
+}
 
 internal int N3DS_VRAMCellIndex(int x, int y)
 {
@@ -899,6 +920,11 @@ internal void N3DS_DirtyVRAMRect(int x, int y, int w, int h)
 	if ((w <= 0) || (h <= 0))
 	{
 		return;
+	}
+
+	if (!(s_vidHintValid && (x == s_vidX) && (y == s_vidY) && (w == s_vidW) && (h == s_vidH)))
+	{
+		s_vramOtherBumps++;
 	}
 
 	x1 = x + w - 1;
@@ -1043,6 +1069,7 @@ internal void N3DS_RefreshFramebufferMirrorSlot(N3DS_FBStoreSlot *slot)
 				{
 					s_vramCellGen[(cellRow * N3DS_VRAM_CELL_COLS) + cellCol]++;
 					s_vramDirtyBumps++;
+					s_vramOtherBumps++;
 				}
 			}
 		}
@@ -1121,6 +1148,7 @@ typedef struct
 	                    * CLUT-less formats) -- the variant-retarget key, see
 	                    * N3DS_HashClutContent */
 	u32 lastUsedFrame;
+	u32 otherBumps;    /* s_vramOtherBumps when this cell was decoded (partial re-decode guard) */
 } N3DS_DecodeCacheEntry;
 
 /*
@@ -2244,13 +2272,48 @@ decodeIntoSlot:
 		 * GL_REPEAT). destStrideTiles stays N3DS_DECODE_TEXTURE_DIM/8, the
 		 * destination scratch's own width in tiles.
 		 */
+		/* Partial re-decode of the track-preview video rectangle: only when this
+		 * slot already holds exactly this (page, clut, format, view) and no VRAM
+		 * write other than the video rectangle has happened since it was decoded
+		 * (see s_vramOtherBumps). 16bpp only: a texel is one VRAM word. */
+		int partTx0 = 0, partTy0 = 0, partTw = 0, partTh = 0;
+		int partial = 0;
+
+		if ((oldestSlot == staleMatchSlot) && s_vidHintValid && (format == TF_16_BIT) && s_decodeCache[oldestSlot].used &&
+		    (s_decodeCache[oldestSlot].otherBumps == s_vramOtherBumps))
+		{
+			const int pageOriginX = (texPage & 0xF) * 64;
+			const int pageOriginY = (texPage & 0x10) ? 256 : 0;
+			int pu = s_vidX - pageOriginX;
+			const int pv = s_vidY - pageOriginY;
+
+			if (pu < 0)
+			{
+				pu += VRAM_WIDTH;
+			}
+			if ((pu >= 0) && ((pu + s_vidW) <= N3DS_DECODE_TEXTURE_DIM) && (pv >= 0) && ((pv + s_vidH) <= N3DS_DECODE_TEXTURE_DIM))
+			{
+				partTx0 = pu >> 3;
+				partTy0 = pv >> 3;
+				partTw = ((pu + s_vidW + 7) >> 3) - partTx0;
+				partTh = ((pv + s_vidH + 7) >> 3) - partTy0;
+				partial = 1;
+			}
+		}
 		{
 			const int decodeWidth = N3DS_DECODE_TEXTURE_DIM;
 			const unsigned long long texdecT0 = N3DS_GetTickCount();
 
 			texdecEventT0 = texdecT0;
-			N3DS_DecodeAndTilePage(texPage, clut, format, view, 0, 0, decodeWidth, N3DS_DECODE_TEXTURE_DIM,
-			                        N3DS_DECODE_TEXTURE_DIM / 8, s_decodeScratch);
+			if (partial)
+			{
+				N3DS_DecodeAndTilePage(texPage, clut, format, view, partTx0 * 8, partTy0 * 8, partTw * 8, partTh * 8, partTw, s_decodeScratch);
+			}
+			else
+			{
+				N3DS_DecodeAndTilePage(texPage, clut, format, view, 0, 0, decodeWidth, N3DS_DECODE_TEXTURE_DIM,
+				                        N3DS_DECODE_TEXTURE_DIM / 8, s_decodeScratch);
+			}
 			s_texdecFrameDecTicks += N3DS_GetTickCount() - texdecT0;
 		}
 		{
@@ -2259,7 +2322,15 @@ decodeIntoSlot:
 			unsigned long long texdecT2;
 
 			N3DS_CellIndexToAtlasCoord(oldestSlot, &atlasIdx, &cellX, &cellY);
-			N3DS_C3DUploadDecodedCell(atlasIdx, cellX, cellY, s_decodeScratch);
+			if (partial)
+			{
+				N3DS_C3DUploadDecodedTiles(atlasIdx, cellX, cellY, partTx0, partTy0, partTw, partTh, s_decodeScratch);
+				s_texdecFramePart++;
+			}
+			else
+			{
+				N3DS_C3DUploadDecodedCell(atlasIdx, cellX, cellY, s_decodeScratch);
+			}
 			texdecT2 = N3DS_GetTickCount();
 			s_texdecFrameUpTicks += texdecT2 - texdecT1;
 			s_texdecFrameFull++;
@@ -2289,6 +2360,7 @@ decodeIntoSlot:
 	}
 	s_decodeCache[oldestSlot].clutHash = curClutHash;
 	s_decodeCache[oldestSlot].lastUsedFrame = s_frameCounter;
+	s_decodeCache[oldestSlot].otherBumps = s_vramOtherBumps;
 	s_fullPageHashIdx[hashBucket] = (s16)oldestSlot;
 
 	return oldestSlot;
@@ -4879,9 +4951,9 @@ void NativeRenderer_SwapWindow(void)
 			char texdecLine[224];
 			int len;
 
-			len = snprintf(texdecLine, sizeof(texdecLine), "[TEXDEC] frame=%lu sub=%lu full=%lu decUs=%lu upUs=%lu mdlUs=%lu",
+			len = snprintf(texdecLine, sizeof(texdecLine), "[TEXDEC] frame=%lu sub=%lu full=%lu part=%lu decUs=%lu upUs=%lu mdlUs=%lu",
 			               (unsigned long)s_frameCounter, (unsigned long)s_texdecFrameSub, (unsigned long)s_texdecFrameFull,
-			               decUs, upUs, mdlUs);
+			               (unsigned long)s_texdecFramePart, decUs, upUs, mdlUs);
 			if ((len > 0) && ((size_t)len < sizeof(texdecLine)) && (s_texdecFrameWorstTicks > 0))
 			{
 				const unsigned long worstUs = (unsigned long)((s_texdecFrameWorstTicks * 1000000ULL) / texdecFreq);
@@ -4901,6 +4973,7 @@ void NativeRenderer_SwapWindow(void)
 		}
 		s_texdecFrameSub = 0;
 		s_texdecFrameFull = 0;
+		s_texdecFramePart = 0;
 		s_texdecFrameDecTicks = 0;
 		s_texdecFrameUpTicks = 0;
 		s_texdecFrameMdlTicks = 0;
