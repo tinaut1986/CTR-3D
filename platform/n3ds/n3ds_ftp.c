@@ -1,6 +1,9 @@
 /*
- * In-game FTP server for the New 3DS build. See n3ds_ftp.h for the commands,
- * the enabling flag file and the CIA install convention.
+ * In-game FTP server for the 3DS build. See n3ds_ftp.h for the commands, the
+ * two modes (full on debug builds, install-only on production ones) and the CIA
+ * install convention. Same behaviour as the author's zelda-tmc-3ds
+ * ftp_server_3ds.c / cia_install_3ds.c: port 5000, progress, a 10 s restart
+ * countdown, the running title's ID checked.
  *
  * Threading, the part that matters for the game:
  *   - A worker thread of its own, at the LOWEST priority (0x3F), on core 3.
@@ -9,14 +12,17 @@
  *     delay audio. Core 2 (the render worker, main priority) is the fallback if
  *     core 3 is refused. Core 0 is the game's and core 1 belongs to the system
  *     (a thread there hangs the console when the Rosalina overlay opens), so
- *     neither is ever used. Old 3DS has no spare core: the server is not started.
+ *     neither is ever used. Old 3DS has no spare core: the server is not started
+ *     (the one thing here that blocks the Old 3DS; see docs/3DS_PORT.md).
  *   - Polling from the main loop was rejected: an SD read or a CIA install of
  *     tens of milliseconds would land inside a frame.
  *   - libctru funnels every socket call of the process through one SOC session,
  *     and a blocking poll() would hold up other threads' socket calls (the
  *     3dslink stream). So the server never blocks in the kernel on a socket:
  *     it polls with a zero timeout and naps in between (WaitFd).
- *   - Nothing exists unless the flag file does: no socket buffer, no thread.
+ *   - Waiting for Wi-Fi retries every second (bind failures every 2 s) until
+ *     the network is up, so starting the game before joining Wi-Fi is fine.
+ *   - With the server off nothing exists: no socket buffer, no thread.
  */
 #include <3ds.h>
 
@@ -38,8 +44,9 @@
 #include "n3ds_backend.h"
 #include "n3ds_ftp.h"
 
-#define N3DS_FTP_FLAG_PATH "sdmc:/3ds/ctr_native/ftp.on"
-#define N3DS_FTP_PORT 5021
+#define N3DS_FTP_DEV_FLAG N3DS_APP_DIR "/dev-ftp.txt"
+#define N3DS_FTP_UPDATE_DIR "/3ds/ctr_native/update" /* SD path, the only one install-only mode reaches */
+#define N3DS_FTP_PORT 5000
 #define N3DS_FTP_PASV_FIRST (N3DS_FTP_PORT + 1)
 #define N3DS_FTP_PASV_COUNT 64
 #define N3DS_FTP_PATH_MAX 512
@@ -53,7 +60,7 @@
 #define N3DS_FTP_STACK_SIZE (64 * 1024)
 #define N3DS_FTP_PRIORITY 0x3F
 #define N3DS_FTP_CIA_IO_SIZE (128 * 1024)
-#define N3DS_FTP_RELAUNCH_DELAY_MS 3000
+#define N3DS_FTP_RELAUNCH_DELAY_MS 10000 /* the same wait the author measured safe on the loader */
 
 static Thread s_ftpThread = NULL;
 static volatile int s_ftpRun = 0;
@@ -66,6 +73,19 @@ static int s_ftpAtExitSet = 0;
 
 /* Set by a successful SITE INSTALL: osGetTime() after which the main loop quits. */
 static volatile unsigned long long s_ftpRelaunchAt = 0;
+static int s_ftpRelaunchArmed = 0;
+/* Install-only mode (production): only the update dir is reachable, SITE INSTALL
+ * is the only SITE command. After a CANCEL the server never starts again until
+ * the game is relaunched. */
+static volatile int s_ftpInstallOnly = 0;
+static int s_ftpCancelled = 0;
+/* For the UI: 0 idle, 1 a .cia is arriving, 2 installing, 3 restart countdown;
+ * done/total are bytes (ms for 3). Total is 0 when the client did not announce
+ * the size with ALLO. */
+static volatile int s_ftpPhase = 0;
+static const char *volatile s_ftpNotice = NULL;
+static volatile unsigned long long s_ftpDone = 0, s_ftpTotal = 0;
+static unsigned long long s_ftpAllo = 0;
 
 typedef struct N3DS_FtpSession
 {
@@ -285,6 +305,31 @@ static void N3DS_FtpRealPath(const char *virtualPath, char *out, unsigned cap)
 	out[5 + n] = 0;
 }
 
+/* Install-only mode: may the client touch this path? `within`: 1 = inside the
+ * update dir (files), 0 = also a parent of it (to walk down through). Full mode
+ * allows everything. */
+static int N3DS_FtpAllowed(const char *vpath, int within)
+{
+	const size_t n = strlen(N3DS_FTP_UPDATE_DIR);
+
+	if (!s_ftpInstallOnly)
+	{
+		return 1;
+	}
+	if ((strncasecmp(vpath, N3DS_FTP_UPDATE_DIR, n) == 0) && ((vpath[n] == 0) || (vpath[n] == '/')))
+	{
+		return 1;
+	}
+	if (!within)
+	{
+		const size_t m = strlen(vpath);
+
+		/* a parent: "/" or "/3ds" or "/3ds/ctr_native" */
+		return (m == 1) || ((strncasecmp(vpath, N3DS_FTP_UPDATE_DIR, m) == 0) && (N3DS_FTP_UPDATE_DIR[m] == '/'));
+	}
+	return 0;
+}
+
 /* ---- data connection ---- */
 
 static void N3DS_FtpClosePasv(N3DS_FtpSession *s)
@@ -485,6 +530,7 @@ static void N3DS_FtpCmdStor(N3DS_FtpSession *s, const char *arg, int append)
 	int data;
 	int ok = 1;
 	const int resume = (!append) && (s->rest > 0);
+	int showCia = 0;
 
 	N3DS_FtpResolvePath(s, arg, vpath, sizeof(vpath));
 	N3DS_FtpRealPath(vpath, rpath, sizeof(rpath));
@@ -507,6 +553,16 @@ static void N3DS_FtpCmdStor(N3DS_FtpSession *s, const char *arg, int append)
 		N3DS_FtpReply(s, "425 No data connection.");
 		return;
 	}
+	/* A .cia on its way in is announced on the bottom screen (and its progress
+	 * shown); any other file is not worth a banner. */
+	if ((strlen(vpath) > 4) && (strcasecmp(vpath + strlen(vpath) - 4, ".cia") == 0) && (s_ftpPhase == 0))
+	{
+		s_ftpDone = s->rest;
+		s_ftpTotal = s_ftpAllo;
+		s_ftpNotice = "RECEIVING NEW BUILD";
+		s_ftpPhase = 1;
+		showCia = 1;
+	}
 	for (;;)
 	{
 		ssize_t r;
@@ -526,7 +582,17 @@ static void N3DS_FtpCmdStor(N3DS_FtpSession *s, const char *arg, int append)
 			ok = 0;
 			break;
 		}
+		if (showCia)
+		{
+			s_ftpDone += (unsigned long long)r;
+		}
 	}
+	if (showCia)
+	{
+		s_ftpPhase = 0;
+		s_ftpNotice = NULL;
+	}
+	s_ftpAllo = 0;
 	/* The partial file stays on the card and is closed cleanly, so the client's
 	 * SIZE says exactly where to resume from. */
 	if (fclose(f) != 0)
@@ -599,6 +665,8 @@ static int N3DS_FtpInstallCia(const char *sdPath, char *error, unsigned errorCap
 	{
 		goto done;
 	}
+	s_ftpDone = 0;
+	s_ftpTotal = size;
 	/* Overwrite through AM; the installed title is never deleted first. */
 	rc = AM_StartCiaInstallOverwrite(&output, media);
 	snprintf(error, errorCap, "install start failed (%08lx)", (unsigned long)rc);
@@ -625,6 +693,7 @@ static int N3DS_FtpInstallCia(const char *sdPath, char *error, unsigned errorCap
 			goto done;
 		}
 		offset += read;
+		s_ftpDone = offset;
 	}
 	rc = AM_FinishCiaInstall(output);
 	started = 0;
@@ -667,18 +736,24 @@ static void N3DS_FtpCmdSite(N3DS_FtpSession *s, char *arg)
 		char error[N3DS_FTP_PATH_MAX + 64];
 
 		N3DS_FtpResolvePath(s, path, vpath, sizeof(vpath));
+		if (!N3DS_FtpAllowed(vpath, 1))
+		{
+			N3DS_FtpReply(s, "550 Not allowed.");
+			return;
+		}
+		s_ftpNotice = "INSTALLING NEW BUILD";
+		s_ftpPhase = 2;
 		if (N3DS_FtpInstallCia(vpath, error, sizeof(error)))
 		{
 			char msg[N3DS_FTP_PATH_MAX + 48];
 
-			snprintf(msg, sizeof(msg), "[CTR-3DS] ftp: installed %s, restarting", vpath);
+			snprintf(msg, sizeof(msg), "[CTR-3DS] ftp: installed %s, restarting in 10 s", vpath);
 			N3DS_DebugLog(msg);
 			N3DS_LogFlushNow();
-			/* libctru's aptExit() starts this title again after the normal exit
-			 * path; jumping at once made the loader load the title twice
-			 * (see mzm's cia_install_3ds.c). The main loop quits when due. */
-			aptSetChainloaderToSelf();
-			N3DS_FtpReply(s, "200 Installed %s; the game restarts in a few seconds.", vpath);
+			N3DS_FtpReply(s, "200 Installed %s; the game restarts in 10 s.", vpath);
+			s_ftpNotice = "RESTARTING IN";
+			s_ftpPhase = 3;
+			s_ftpTotal = N3DS_FTP_RELAUNCH_DELAY_MS;
 			s_ftpRelaunchAt = osGetTime() + N3DS_FTP_RELAUNCH_DELAY_MS;
 		}
 		else
@@ -687,6 +762,8 @@ static void N3DS_FtpCmdSite(N3DS_FtpSession *s, char *arg)
 
 			snprintf(msg, sizeof(msg), "[CTR-3DS] ftp: install failed: %s", error);
 			N3DS_DebugLog(msg);
+			s_ftpPhase = 0;
+			s_ftpNotice = NULL;
 			N3DS_FtpReply(s, "550 Install failed: %s", error);
 		}
 	}
@@ -710,7 +787,14 @@ static void N3DS_FtpHandleSession(int ctrl)
 	s->pasv = -1;
 	/* Log in at the SD card's root, like any FTP server. */
 	snprintf(s->cwd, sizeof(s->cwd), "/");
-	N3DS_FtpReply(s, "220 CTR 3D FTP. SD card root; the log is /ctr3ds.log.");
+	if (s_ftpInstallOnly)
+	{
+		N3DS_FtpReply(s, "220 CTR 3D FTP (install only: " N3DS_FTP_UPDATE_DIR ").");
+	}
+	else
+	{
+		N3DS_FtpReply(s, "220 CTR 3D FTP. SD card root; the log is /ctr3ds.log.");
+	}
 
 	for (;;)
 	{
@@ -741,6 +825,31 @@ static void N3DS_FtpHandleSession(int ctrl)
 			}
 		}
 
+		/* Install-only: every path-taking command is checked up front. */
+		if (s_ftpInstallOnly)
+		{
+			static const char *const pathCmds[] = {"LIST", "NLST", "MLSD", "RETR", "STOR", "APPE", "SIZE", "MDTM", "DELE", "RMD",
+			                                       "XRMD", "MKD", "XMKD", "RNFR", "RNTO", "CWD", "CDUP"};
+			unsigned k;
+
+			for (k = 0; k < sizeof(pathCmds) / sizeof(pathCmds[0]); k++)
+			{
+				if (strcmp(line, pathCmds[k]) == 0)
+				{
+					const int isCd = (k >= 15);
+					const char *a = (isCd && (line[1] == 'D')) ? ".." : arg;
+
+					N3DS_FtpResolvePath(s, a, vpath, sizeof(vpath));
+					if (!N3DS_FtpAllowed(vpath, isCd ? 0 : 1))
+					{
+						N3DS_FtpReply(s, "550 Not allowed (install-only mode).");
+						goto next;
+					}
+					break;
+				}
+			}
+		}
+
 		if ((strcmp(line, "USER") == 0))
 		{
 			N3DS_FtpReply(s, "331 Any password will do.");
@@ -758,8 +867,15 @@ static void N3DS_FtpHandleSession(int ctrl)
 			N3DS_FtpReply(s, "211-Features:\r\n SIZE\r\n MDTM\r\n MLSD\r\n REST STREAM\r\n EPSV\r\n PASV\r\n UTF8\r\n211 End");
 		}
 		else if ((strcmp(line, "OPTS") == 0) || (strcmp(line, "TYPE") == 0) || (strcmp(line, "MODE") == 0) ||
-		         (strcmp(line, "STRU") == 0) || (strcmp(line, "NOOP") == 0) || (strcmp(line, "ALLO") == 0))
+		         (strcmp(line, "STRU") == 0) || (strcmp(line, "NOOP") == 0))
 		{
+			N3DS_FtpReply(s, "200 OK.");
+		}
+		else if (strcmp(line, "ALLO") == 0)
+		{
+			/* The size of the next STOR (build3ds.sh --install sends it): the
+			 * upload progress bar's total. */
+			s_ftpAllo = strtoull(arg, NULL, 10);
 			N3DS_FtpReply(s, "200 OK.");
 		}
 		else if (strcmp(line, "REST") == 0)
@@ -929,6 +1045,7 @@ static void N3DS_FtpHandleSession(int ctrl)
 		{
 			s->rest = 0;
 		}
+	next:;
 	}
 	N3DS_FtpClosePasv(s);
 }
@@ -1043,9 +1160,9 @@ static int N3DS_FtpStartThread(void)
 {
 	bool isNew3DS = false;
 
-	if ((s_ftpThread != NULL) || s_ftpStuck)
+	if ((s_ftpThread != NULL) || s_ftpStuck || (s_ftpInstallOnly && s_ftpCancelled))
 	{
-		return 0; /* already up, still stopping, or wedged */
+		return 0; /* already up, still stopping, wedged, or cancelled for this run */
 	}
 	/* Cores 2 and 3 only exist on the New 3DS; core 1 is forbidden. */
 	APT_CheckNew3DS(&isNew3DS);
@@ -1090,15 +1207,74 @@ static int N3DS_FtpStartThread(void)
 	return 1;
 }
 
-void N3DS_FtpStartIfEnabled(void)
+/*
+ * Boot decision (N3DS_EarlyInit, after the settings file is read):
+ *   CTR_INTERNAL builds: the full server (the whole SD card as "/", every
+ *     command, SITE INSTALL) is ON unless the bottom UI's Debug > FTP toggle
+ *     turned it off (persisted as ftp=0 in ctr3d.cfg).
+ *   Production builds: nothing, unless dev-ftp.txt is in the app dir; then the
+ *     install-only server (only the update dir, SITE INSTALL only, CANCEL on
+ *     the bottom screen, never started again after a cancel).
+ */
+void N3DS_FtpBoot(void)
 {
+#ifdef CTR_INTERNAL
+	if (N3DS_ConfigGet("ftp", 1))
+	{
+		mkdir(N3DS_APP_DIR "/update", 0777);
+		(void)N3DS_FtpStartThread();
+	}
+#else
 	struct stat st;
 
-	if (stat(N3DS_FTP_FLAG_PATH, &st) != 0)
+	if (stat(N3DS_FTP_DEV_FLAG, &st) == 0)
 	{
-		return;
+		mkdir(N3DS_APP_DIR "/update", 0777);
+		s_ftpInstallOnly = 1;
+		(void)N3DS_FtpStartThread();
 	}
-	(void)N3DS_FtpStartThread();
+#endif
+}
+
+int N3DS_FtpInstallOnly(void)
+{
+	return s_ftpInstallOnly && (s_ftpThread != NULL) && s_ftpRun;
+}
+
+/* The CANCEL button (install-only): ends the server for the rest of the run. */
+void N3DS_FtpCancel(void)
+{
+	s_ftpCancelled = 1;
+	if ((s_ftpThread != NULL) && s_ftpRun)
+	{
+		s_ftpRun = 0;
+		N3DS_DebugLog("[CTR-3DS] ftp: install server cancelled from the bottom screen");
+	}
+}
+
+const char *N3DS_FtpNotice(void)
+{
+	return s_ftpNotice;
+}
+
+int N3DS_FtpProgress(unsigned long long *done, unsigned long long *total)
+{
+	const int phase = s_ftpPhase;
+
+	*done = *total = 0;
+	if (phase == 3)
+	{
+		const unsigned long long now = osGetTime(), at = s_ftpRelaunchAt;
+
+		*done = (now >= at) ? N3DS_FTP_RELAUNCH_DELAY_MS : (N3DS_FTP_RELAUNCH_DELAY_MS - (at - now));
+		*total = N3DS_FTP_RELAUNCH_DELAY_MS;
+	}
+	else if (phase != 0)
+	{
+		*done = s_ftpDone;
+		*total = s_ftpTotal;
+	}
+	return phase;
 }
 
 /* ---- runtime control (debug UI, main thread only) ---- */
@@ -1167,5 +1343,21 @@ void N3DS_FtpPoll(void)
 
 int N3DS_FtpRelaunchDue(void)
 {
-	return (s_ftpRelaunchAt != 0) && (osGetTime() >= s_ftpRelaunchAt);
+	if ((s_ftpRelaunchAt == 0) || (osGetTime() < s_ftpRelaunchAt))
+	{
+		return 0;
+	}
+	if (!s_ftpRelaunchArmed)
+	{
+		s_ftpRelaunchArmed = 1;
+		/* libctru's aptExit() starts this title again once the process has exited
+		 * through the normal path, as HOME -> close does; jumping at once made the
+		 * loader load the title twice and fault out of memory on the author's
+		 * other ports (hence the 10 s above). The installed CIA IS this title, so
+		 * "self" is the new build -- no .3dsx path is involved. */
+		aptSetChainloaderToSelf();
+		N3DS_DebugLog("[CTR-3DS] ftp: relaunching into the installed build");
+		N3DS_LogFlushNow();
+	}
+	return 1;
 }

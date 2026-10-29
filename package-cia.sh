@@ -1,7 +1,9 @@
 #!/usr/bin/env bash
 # Build an installable CIA (FBI) from the 3DS build tree.
 # Usage: ./package-cia.sh [build-dir]   (default: build-3ds)
-# Needs makerom + bannertool on PATH, in $DEVKITPRO/tools/bin, or via MAKEROM / BANNERTOOL.
+# Needs makerom + bannertool: via MAKEROM / BANNERTOOL, on PATH, in $DEVKITPRO/tools/bin,
+# in ./tools/bin, or in the sibling zelda-tmc-3ds checkout (platform/3ds/tools/bin).
+# Normally run by ./build3ds.sh (which builds the .3dsx too).
 # APP_SYSTEM_MODE_EXT=124MB|178MB picks the New 3DS app memory mode (default 178MB).
 set -euo pipefail
 cd "$(dirname "$(readlink -f "$0")")"
@@ -17,7 +19,10 @@ find_tool() {
     local name="$1" var="${2:-}"
     if [[ -n "${var}" && -x "${var}" ]]; then echo "${var}"; return; fi
     command -v "${name}" 2>/dev/null && return
-    [[ -x "${DEVKITPRO}/tools/bin/${name}" ]] && echo "${DEVKITPRO}/tools/bin/${name}"
+    local dir
+    for dir in "${DEVKITPRO}/tools/bin" "tools/bin" "../zelda-tmc-3ds/platform/3ds/tools/bin"; do
+        if [[ -x "${dir}/${name}" ]]; then echo "${dir}/${name}"; return; fi
+    done
 }
 MAKEROM="$(find_tool makerom "${MAKEROM:-}")"
 BANNERTOOL="$(find_tool bannertool "${BANNERTOOL:-}")"

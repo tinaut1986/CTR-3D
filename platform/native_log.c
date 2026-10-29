@@ -22,14 +22,12 @@ internal void Platform_LogWrite(FILE *consoleStream, const char *text)
 #endif
 
 #ifdef __3DS__
-	/* stdout is the bottom-screen debug console, and glyphs land in its
-	 * shared framebuffer at print time -- an ungated fputs scribbles over the
-	 * bottom-screen minimap and keeps the panel chattering in a release build
-	 * ([TRKFRAME]'s periodic census was the line caught doing both). The
-	 * console-visibility policy lives in one place, N3DS_ConsolePaintAllowed
-	 * (map ownership / dumpreq 'stats' / boot grace); the netload stderr
-	 * mirror below and the SD sink still carry every line regardless. */
-	if ((stream != stdout) || N3DS_ConsolePaintAllowed())
+	/* There is no text console on the 3DS bottom screen any more (it is the
+	 * graphical UI's, n3ds_bottomui.c): stdout-bound lines go to the UI's log
+	 * view instead of a framebuffer, and from here on to the netload mirror
+	 * and the SD sink below like every other line. */
+	N3DS_BottomUi_LogLine(text);
+	if (stream != stdout)
 	{
 		fputs(text, stream);
 	}

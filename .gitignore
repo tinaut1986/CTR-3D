@@ -24,3 +24,4 @@ compile_commands.json
 *.log
 memcards/
 __pycache__/
+.3ds_ftp_ip

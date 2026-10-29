@@ -228,7 +228,8 @@ int main(int argc, char *argv[])
 	/*
 	 * SD logging is off by default because the flush costs a stalled frame per
 	 * window. A release build has no chord and no dumpreq to turn it back on,
-	 * so an empty enable-log.txt dropped beside the .3dsx is the switch: the
+	 * so an empty enable-log.txt in the app dir (sdmc:/3ds/ctr_native/, same for a
+	 * .3dsx and an installed CIA) is the switch: the
 	 * check runs before the first header line, so an enabled log is complete
 	 * from boot.
 	 */

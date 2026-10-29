@@ -48,14 +48,16 @@ void SDL_free(void *mem)
  * The working directory a .3dsx starts in is not dependable: it differs
  * between the Homebrew Launcher, 3dslink and an emulator. Rather than guess,
  * probe the plausible roots and use whichever one actually holds the install.
- * Order matters only in that the working directory is tried first, so a
- * self-contained install wins. Every consumer that looks for a file "next to
+ * The fixed app dir (N3DS_APP_DIR) is tried first: an installed CIA has no
+ * launcher working directory to lean on, and the README tells everyone to put
+ * the data there; the working directory still works for a self-contained
+ * .3dsx folder. Every consumer that looks for a file "next to
  * the .3dsx" must walk this same list, or two of them will disagree about
  * where the app lives.
  */
 static const char *const s_n3dsAppDirCandidates[] = {
+	"sdmc:/3ds/ctr_native", /* the fixed data dir: first, so a CIA (no launcher cwd) and a .3dsx agree */
 	".",
-	"sdmc:/3ds/ctr_native",
 	"sdmc:/3ds/ctr-native",
 	"sdmc:/ctr-native",
 	"sdmc:/",
