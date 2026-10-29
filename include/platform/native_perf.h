@@ -163,6 +163,14 @@ enum NativePerfBucket
 	 * this enum.
 	 */
 	NATIVE_PERF_BUCKET_DISC_READ_MAIN,
+	/*
+	 * 3DS background voice-cache fill (NativeAudio_VoiceCacheBackgroundStep),
+	 * run by the frame pacer in time it would otherwise sleep -- carved out of
+	 * vsync_wait_ms so idle time is not reported as work or vice versa. Its
+	 * SD reads also land in disc_read_main_ms, which nests inside it.
+	 * Appended, never inserted: s_bucketInfo is indexed by this enum.
+	 */
+	NATIVE_PERF_BUCKET_VOICE_CACHE_FILL,
 	NATIVE_PERF_BUCKET_COUNT
 };
 

@@ -107,8 +107,11 @@ Rules the hardware enforces and emulators do not:
   the whole software mix when the hardware voices are unavailable. Software
   mixing on the ARM11 is not fast enough to be the primary path.
 - XA music streams from the disc image on the SD card. The XA voice lines are
-  cached while the Sony logo is on screen (`Loading audio`), so a race never
-  waits on the card for speech.
+  cached in RAM after boot, in the idle part of each frame (the frame pacer's
+  wait, never during a level load), 8 sectors per step; a line played before
+  its track has landed streams from the card. The cache used to fill while
+  the Sony logo was held on screen, which made the boot ~16 s. No cache on
+  an Old 3DS (the heap has no room for it).
 - Output gain is twice retail's master level, because the PS1's master volume
   of 0x3fff is half of digital full scale.
 

@@ -984,10 +984,34 @@ internal void Native_EnsureVBlankTarget(void)
 	}
 }
 
+#if defined(__3DS__)
+/*
+ * Background voice-cache fill (NativeAudio_VoiceCacheBackgroundStep): the boot
+ * hold no longer reads the ~20k sectors of voice lines, so they load here, in
+ * the part of a wait the frame would have slept through, one bounded step at
+ * a time. A step is at most NATIVE_VOICE_FILL_STEP_SECTORS of SD reads (or one
+ * track's de-interleave), and one only starts with at least
+ * NATIVE_VOICE_FILL_MIN_US left before the vblank target, so a slow card read
+ * eats margin, not the frame. Never during a level load (the reads would
+ * queue behind or ahead of the load's own on the same card), and a no-op on
+ * an Old 3DS, where the heap leaves no room for the cache at all.
+ */
+#define NATIVE_VOICE_FILL_STEP_SECTORS 8
+#define NATIVE_VOICE_FILL_MIN_US       9000
+
+internal int Native_VoiceFillAllowed(void)
+{
+	return NativeAudio_VoiceCacheBackgroundPending() && (sdata != NULL) && (sdata->Loading.stage == LOAD_IDLE);
+}
+#endif
+
 internal void Native_WaitUntilVBlankTarget(void)
 {
 	const u64 freq = SDL_GetPerformanceFrequency();
 	const u64 spinWindow = Native_CounterFromMicroseconds(freq, NATIVE_VSYNC_SPIN_US);
+#if defined(__3DS__)
+	const u64 voiceFillWindow = Native_CounterFromMicroseconds(freq, NATIVE_VOICE_FILL_MIN_US);
+#endif
 
 	NativePerf_BeginScope(NATIVE_PERF_BUCKET_VSYNC_WAIT);
 	while (1)
@@ -1003,6 +1027,17 @@ internal void Native_WaitUntilVBlankTarget(void)
 		}
 
 		remaining = s_nextVBlankCounter - now;
+#if defined(__3DS__)
+		if ((remaining > voiceFillWindow) && Native_VoiceFillAllowed())
+		{
+			NativePerf_EndScope(NATIVE_PERF_BUCKET_VSYNC_WAIT);
+			NativePerf_BeginScope(NATIVE_PERF_BUCKET_VOICE_CACHE_FILL);
+			NativeAudio_VoiceCacheBackgroundStep(NATIVE_VOICE_FILL_STEP_SECTORS);
+			NativePerf_EndScope(NATIVE_PERF_BUCKET_VOICE_CACHE_FILL);
+			NativePerf_BeginScope(NATIVE_PERF_BUCKET_VSYNC_WAIT);
+			continue;
+		}
+#endif
 		if (remaining <= spinWindow)
 		{
 			// NOTE(aalhendi): SDL_Delay can wake late. Sleep while safely far

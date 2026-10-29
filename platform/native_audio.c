@@ -3820,7 +3820,12 @@ internal int NativeAudio_XAVoiceCacheOpen(struct NativeAudioXaSource *source, co
 {
 	const struct NativeAudioXaVoiceCacheTrack *track;
 
-	if (!s_xaVoiceCache.built || (s_xaVoiceCache.blob == NULL) || (info->entryIndex < 0) || (info->entryIndex >= NATIVE_AUDIO_XA_TRACK_INDEX_MAX))
+	/* No `built` test: the cache fills in the background after boot
+	 * (NativeAudio_VoiceCacheBackgroundStep), and a track is complete -- and
+	 * never touched again -- the moment its sectorCount is set, so it can be
+	 * served while later tracks are still loading. Until then the open takes
+	 * the SD path. */
+	if ((s_xaVoiceCache.blob == NULL) || (info->entryIndex < 0) || (info->entryIndex >= NATIVE_AUDIO_XA_TRACK_INDEX_MAX))
 	{
 		return 0;
 	}
@@ -3850,6 +3855,14 @@ internal struct
 	int sectors;
 	u32 readSectors;    /* disc/SD sectors this warm has actually read */
 	u32 plannedSectors; /* what it set out to read; 0 until the plan is known */
+	/* Voice-cache stages (1..3) run after boot, in idle frame time, instead
+	 * of in the SCEA hold: the hold then waits only for the MUSIC count memo
+	 * (stage 0, table-fed, normally zero reads). plannedSectors is the hold's
+	 * plan (stage 0 only); voicePlannedSectors is the background's. */
+	b32 background;
+	u32 voicePlannedSectors;
+	u32 backgroundSteps;
+	u64 backgroundStartTick;
 } s_vce;
 
 /* Resumable state for one category's build pass (GAME then EXTRA). A step
@@ -3869,6 +3882,7 @@ internal struct
 	u8 *fileBuf;
 	int span;
 	int pos;
+	int deinterleaveNext; /* next s_xaVoiceCacheScratch index to copy out of fileBuf */
 } s_xacb;
 
 /* Disc sectors one category's build pass sets out to read: each wanted file is
@@ -4035,11 +4049,15 @@ internal int NativeAudio_XAVoiceCacheBuildCategoryStep(int budgetSectors)
 		}
 	}
 
-	/* Span fully read (or zero-length): de-interleave wanted tracks. */
+	/* Span fully read (or zero-length): de-interleave wanted tracks -- ONE per
+	 * call, resuming at deinterleaveNext. A file holds up to a few hundred
+	 * voice lines and each scans the whole span, which made a single call tens
+	 * of milliseconds of CPU: harmless behind a hold screen, a dropped frame in
+	 * the background. */
 	{
 		int i;
 
-		for (i = 0; i < s_xacb.numWanted; i++)
+		for (i = s_xacb.deinterleaveNext; i < s_xacb.numWanted; i++)
 		{
 			const struct NativeAudioXaTrackInfo *info = &s_xaVoiceCacheScratch[i].info;
 			struct NativeAudioXaVoiceCacheTrack *track;
@@ -4091,9 +4109,15 @@ internal int NativeAudio_XAVoiceCacheBuildCategoryStep(int budgetSectors)
 			track->sectorCount = matched;
 			s_vce.tracks += 1;
 			s_vce.sectors += matched;
+			if (s_vce.background)
+			{
+				s_xacb.deinterleaveNext = i + 1;
+				return 0;
+			}
 		}
 	}
 
+	s_xacb.deinterleaveNext = 0;
 	free(s_xacb.fileBuf);
 	s_xacb.fileBuf = NULL;
 	NativeAudio_XASourceClose(&s_xacb.src);
@@ -4429,10 +4453,15 @@ void NativeAudio_VoiceCacheEnsureBegin(void)
 	/* Read plan for the whole warm, so a caller holding the screen can show
 	 * honest progress. The memo half costs nothing while its table matches
 	 * the disc; only the fallback scan reads. */
+	s_vce.background = 1;
 	if (s_xaVoiceCache.blob != NULL)
 	{
-		s_vce.plannedSectors = NativeAudio_XAVoiceCachePlannedSectors(NATIVE_AUDIO_XA_CATEGORY_GAME) +
-		                       NativeAudio_XAVoiceCachePlannedSectors(NATIVE_AUDIO_XA_CATEGORY_EXTRA);
+		s_vce.voicePlannedSectors = NativeAudio_XAVoiceCachePlannedSectors(NATIVE_AUDIO_XA_CATEGORY_GAME) +
+		                            NativeAudio_XAVoiceCachePlannedSectors(NATIVE_AUDIO_XA_CATEGORY_EXTRA);
+		if (!s_vce.background)
+		{
+			s_vce.plannedSectors = s_vce.voicePlannedSectors;
+		}
 	}
 	if (s_mcw.active)
 	{
@@ -4511,6 +4540,15 @@ int NativeAudio_VoiceCacheEnsureStep(int budgetSectors)
 		if (s_vce.stage == 1)
 		{
 			NativeAudio_XAVoiceCacheBuildCategoryBegin(NATIVE_AUDIO_XA_CATEGORY_GAME);
+			if (s_vce.background)
+			{
+				/* The hold is over; the voice lines load in idle frame time
+				 * from here (NativeAudio_VoiceCacheBackgroundStep). */
+				s_vce.backgroundStartTick = N3DS_GetTickCount();
+				NativeAudio_XAVoiceCacheLog("[XAPRELOAD] voice cache: filling in the background (%u sectors planned, %u KiB budget)",
+				                            (unsigned)s_vce.voicePlannedSectors, (unsigned)(s_xaVoiceCacheBudget >> 10));
+				return 1;
+			}
 		}
 		return 0;
 	case 1:
@@ -4548,12 +4586,44 @@ int NativeAudio_VoiceCacheEnsureStep(int budgetSectors)
 	else
 	{
 		s_xaVoiceCache.built = 1;
-		NativeAudio_XAVoiceCacheLog("[XAPRELOAD] voice cache built: %d tracks, %d sectors, %u KiB of %u KiB budget", s_vce.tracks, s_vce.sectors,
-		                            (unsigned)(s_xaVoiceCache.blobUsed >> 10), (unsigned)(s_xaVoiceCacheBudget >> 10));
+		NativeAudio_XAVoiceCacheLog("[XAPRELOAD] voice cache built: %d tracks, %d sectors, %u KiB of %u KiB budget (background: %lu steps, %lu ms)", s_vce.tracks,
+		                            s_vce.sectors, (unsigned)(s_xaVoiceCache.blobUsed >> 10), (unsigned)(s_xaVoiceCacheBudget >> 10),
+		                            (unsigned long)s_vce.backgroundSteps,
+		                            s_vce.backgroundStartTick ? (unsigned long)(((N3DS_GetTickCount() - s_vce.backgroundStartTick) * 1000ull) / N3DS_GetTickFrequency()) : 0ul);
 		N3DS_MemLog("voicecache-built");
 	}
 	s_vce.active = 0;
 	return 1;
+#else
+	(void)budgetSectors;
+	return 1;
+#endif
+}
+
+/* Whether the background voice-cache fill still has work. Cheap: the idle
+ * hook polls it every wait. Always 0 off the 3DS. */
+int NativeAudio_VoiceCacheBackgroundPending(void)
+{
+#if defined(__3DS__)
+	return s_vce.active && s_vce.background && (s_vce.stage >= 1);
+#else
+	return 0;
+#endif
+}
+
+/* One bounded step of the background fill: at most budgetSectors of SD reads,
+ * or one track's de-interleave (CPU only), or a stage change. Main thread
+ * only -- it shares the main reader's fd and scratch and the disc path cache.
+ * Returns nonzero once the fill is complete (or there was none). */
+int NativeAudio_VoiceCacheBackgroundStep(int budgetSectors)
+{
+#if defined(__3DS__)
+	if (!NativeAudio_VoiceCacheBackgroundPending())
+	{
+		return 1;
+	}
+	s_vce.backgroundSteps++;
+	return NativeAudio_VoiceCacheEnsureStep(budgetSectors);
 #else
 	(void)budgetSectors;
 	return 1;

@@ -697,7 +697,11 @@ void StateZero()
 	// interactive). Must stay above Music_SetIntro for that reason.
 	//
 	// The MUSIC sector-count memo is table-fed and reads nothing, so what this
-	// holds for is the GAME and EXTRA voice-line cache and the crate extents.
+	// holds for is the crate extents. On 3DS the GAME and EXTRA voice-line
+	// cache is no longer read here: ~20k sectors held the logo for most of a
+	// 16 s boot, so the cache fills after boot in idle frame time instead
+	// (NativeAudio_VoiceCacheBackgroundStep, run by the frame pacer), and a
+	// line asked for before its track lands streams from the card.
 	{
 		enum
 		{
