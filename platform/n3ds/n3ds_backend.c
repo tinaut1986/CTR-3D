@@ -1548,6 +1548,99 @@ void N3DS_StereoRecordVram(int slot, int baseVertex)
 	}
 }
 
+/* ------------------------------------------------ end-of-scene profile --- */
+/* See n3ds_backend.h. Window accumulators in system ticks, folded and reset by
+ * N3DS_EndProfFormat from the [PERF] window report (same thread as every
+ * mark: the no-worker path is the one this exists for; with the render worker
+ * the EndScene marks land on core 2 and a torn read costs one frame of 64). */
+static unsigned long long s_rightEyeLastTicks; /* every build: the stereo policy reads it */
+
+unsigned long long N3DS_StereoLastRightEyeTicks(void)
+{
+	return s_rightEyeLastTicks;
+}
+
+#ifdef CTR_INTERNAL
+static unsigned long long s_endProfTicks[N3DS_ENDPROF_PHASES];
+static unsigned s_endProfFrames;
+static unsigned s_endProfStereoFrames;
+/* Journal shape, summed over the window's stereo frames: what the right eye
+ * replays per frame, by op kind (index = N3DS_STEREO_OP_*). */
+static unsigned s_endProfOps[N3DS_STEREO_OP_MODEL_END + 1];
+static unsigned s_endProfOverflows;
+#endif
+
+unsigned long long N3DS_EndProfNow(void)
+{
+#ifdef CTR_INTERNAL
+	return (unsigned long long)svcGetSystemTick();
+#else
+	return 0;
+#endif
+}
+
+unsigned long long N3DS_EndProfMark(int phase, unsigned long long since)
+{
+#ifdef CTR_INTERNAL
+	const unsigned long long now = (unsigned long long)svcGetSystemTick();
+
+	if ((phase >= 0) && (phase < N3DS_ENDPROF_PHASES))
+	{
+		s_endProfTicks[phase] += now - since;
+	}
+	if (phase == N3DS_ENDPROF_FRAMEEND)
+	{
+		s_endProfFrames++; /* the chain's last mark: one per EndScene */
+	}
+	return now;
+#else
+	(void)phase;
+	(void)since;
+	return 0;
+#endif
+}
+
+void N3DS_EndProfFormat(char *out, int outSize)
+{
+#ifdef CTR_INTERNAL
+	const unsigned n = (s_endProfFrames != 0) ? s_endProfFrames : 1;
+	const unsigned st = (s_endProfStereoFrames != 0) ? s_endProfStereoFrames : 1;
+	unsigned us[N3DS_ENDPROF_PHASES];
+	unsigned sum = 0;
+	int i;
+
+	for (i = 0; i < N3DS_ENDPROF_PHASES; i++)
+	{
+		us[i] = (unsigned)((s_endProfTicks[i] * 1000000ull) / ((unsigned long long)SYSCLOCK_ARM11 * n));
+		if ((i != N3DS_ENDPROF_BEGIN) && (i != N3DS_ENDPROF_FLUSH))
+		{
+			sum += us[i];
+		}
+	}
+	/* avg us per frame; rEyeSt = per STEREO frame; ops per stereo frame. */
+	snprintf(out, (size_t)outSize,
+	         "[ENDPROF] frames=%u st=%u sum=%u sky=%u trk=%u mrg=%u ui=%u mdl=%u smk=%u oth=%u rEye=%u btm=%u fend=%u flush=%u | begin=%u | "
+	         "rEyeSt=%u ops/f pkt=%u vram=%u leaf=%u run=%u inst=%u brk=%u ovf=%u",
+	         s_endProfFrames, s_endProfStereoFrames, sum, us[N3DS_ENDPROF_SKY], us[N3DS_ENDPROF_TRACK], us[N3DS_ENDPROF_MERGE], us[N3DS_ENDPROF_UI],
+	         us[N3DS_ENDPROF_MODEL], us[N3DS_ENDPROF_SMOKE], us[N3DS_ENDPROF_OTHER], us[N3DS_ENDPROF_RIGHT], us[N3DS_ENDPROF_BOTTOM],
+	         us[N3DS_ENDPROF_FRAMEEND], us[N3DS_ENDPROF_FLUSH], us[N3DS_ENDPROF_BEGIN],
+	         (unsigned)((s_endProfTicks[N3DS_ENDPROF_RIGHT] * 1000000ull) / ((unsigned long long)SYSCLOCK_ARM11 * st)),
+	         s_endProfOps[N3DS_STEREO_OP_PKT] / st, s_endProfOps[N3DS_STEREO_OP_VRAM] / st, s_endProfOps[N3DS_STEREO_OP_TRACK_LEAF] / st,
+	         s_endProfOps[N3DS_STEREO_OP_MODEL_RUN] / st, s_endProfOps[N3DS_STEREO_OP_MODEL_INSTANCE] / st,
+	         (s_endProfOps[N3DS_STEREO_OP_TRACK_BEGIN] + s_endProfOps[N3DS_STEREO_OP_MODEL_BEGIN]) / st, s_endProfOverflows);
+	memset(s_endProfTicks, 0, sizeof(s_endProfTicks));
+	memset(s_endProfOps, 0, sizeof(s_endProfOps));
+	s_endProfFrames = 0;
+	s_endProfStereoFrames = 0;
+	s_endProfOverflows = 0;
+#else
+	if (outSize > 0)
+	{
+		out[0] = '\0';
+	}
+#endif
+}
+
 /* Top-screen widescreen mode. 0 = off (4:3 pillarbox crop).
  * 1 = STRETCH: lift the viewport crop only -- the ortho still maps the same
  *     window, so the same picture shows at wider pixels (anamorphic; kept as
@@ -2546,6 +2639,8 @@ void N3DS_C3DBeginFrame(void)
 	 * cleared, which parallax the left eye's own uniforms carry, and whether
 	 * the draw journal records. Pure CPU, so it sits ahead of the SYNCDRAW
 	 * wait rather than inside the frame bracket. */
+	const unsigned long long endProfT = N3DS_EndProfNow();
+
 	N3DS_StereoLatchFrame();
 
 	N3DS_FrameTrace("[CTR-3DS] FrameBegin: enter (SYNCDRAW wait)");
@@ -2639,6 +2734,7 @@ void N3DS_C3DBeginFrame(void)
 	 * fresh offset (see the header comment on N3DS_C3DAppendVertices) --
 	 * reset the write cursor once per frame, not per draw. */
 	s_vertexCursor = 0;
+	(void)N3DS_EndProfMark(N3DS_ENDPROF_BEGIN, endProfT);
 }
 
 /* GPU-time window accumulator (see n3ds_backend.h). Written on whichever
@@ -4319,10 +4415,14 @@ void N3DS_StereoRenderRightEye(void)
 	int lastDoubling = -1;
 	int lastDepthWrite = 1;
 
+	unsigned long long rightT0;
+
+	s_rightEyeLastTicks = 0;
 	if (!s_stereoFrameActive || (s_renderTargetRight == NULL) || !s_frameOpen)
 	{
 		return;
 	}
+	rightT0 = (unsigned long long)svcGetSystemTick();
 
 	s_stereoRecording = 0;
 	s_stereoEye = 1;
@@ -4357,10 +4457,20 @@ void N3DS_StereoRenderRightEye(void)
 		}
 	}
 
+#ifdef CTR_INTERNAL
+	s_endProfStereoFrames++;
+	s_endProfOverflows += (unsigned)s_stereoOverflow;
+#endif
 	for (i = 0; i < s_stereoOpCount; i++)
 	{
 		const N3DS_StereoOp *op = &s_stereoOps[i];
 
+#ifdef CTR_INTERNAL
+		if (op->kind <= N3DS_STEREO_OP_MODEL_END)
+		{
+			s_endProfOps[op->kind]++;
+		}
+#endif
 		switch (op->kind)
 		{
 		case N3DS_STEREO_OP_PKT:
@@ -4458,6 +4568,7 @@ void N3DS_StereoRenderRightEye(void)
 
 	/* s_stereoEye stays 1 until the next frame's latch resets it -- nothing
 	 * else draws between here and N3DS_C3DEndFrame. */
+	s_rightEyeLastTicks = (unsigned long long)svcGetSystemTick() - rightT0;
 }
 
 /* Depth-WRITE only; the test itself stays LEQUAL so translucent content is

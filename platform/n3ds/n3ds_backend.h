@@ -205,6 +205,39 @@ void N3DS_StereoRenderRightEye(void);
  * overscans X by this so a per-eye shift cannot expose the window edge.
  * Constant per stereosep, not slider-tracking. */
 int N3DS_StereoSkyPadX(void);
+/* System ticks the last N3DS_StereoRenderRightEye spent on the CPU (0 on a
+ * mono frame). Measured in every build: the Old-3DS stereo policy
+ * (N3DS_FramePace_*) prices the right eye with it. */
+unsigned long long N3DS_StereoLastRightEyeTicks(void);
+
+/* -------------------------------------------------- end-of-scene profile --- */
+/*
+ * [ENDPROF] (CTR_INTERNAL): where platform_end_scene_ms goes, phase by phase,
+ * plus the frame-begin wait and the right eye's journal shape. The phases of
+ * NativeRenderer_EndScene are contiguous (each mark closes one and opens the
+ * next), so their sum is the whole EndScene; platform_end_scene_ms minus that
+ * sum is the VRAM-present / pinned-display wrapper around it. Plain int phase
+ * ids, not an enum: this header crosses the -fshort-enums split.
+ * N3DS_EndProfMark adds (now - since) to the phase and returns now; both are
+ * no-ops returning 0 in a production build.
+ */
+#define N3DS_ENDPROF_SKY      0 /* backdrop + sky passes (skyfirst) */
+#define N3DS_ENDPROF_TRACK    1 /* resident track issue (either slot) */
+#define N3DS_ENDPROF_MERGE    2 /* the frame's main N3DS_MergeFlush */
+#define N3DS_ENDPROF_UI       3 /* UI pass (either slot) */
+#define N3DS_ENDPROF_MODEL    4 /* model issue (CPU vertex build + draws) */
+#define N3DS_ENDPROF_SMOKE    5 /* deferred smoke + its flush */
+#define N3DS_ENDPROF_RIGHT    6 /* right-eye journal replay */
+#define N3DS_ENDPROF_BOTTOM   7 /* bottom-screen pass */
+#define N3DS_ENDPROF_FRAMEEND 8 /* C3D_FrameEnd: cache flush + submit */
+#define N3DS_ENDPROF_OTHER    9 /* debug overlays and the rest of EndScene */
+#define N3DS_ENDPROF_BEGIN    10 /* N3DS_C3DBeginFrame: wait for the previous frame + clears */
+#define N3DS_ENDPROF_FLUSH    11 /* inside FRAMEEND: the cache flush alone (c3dflush 1) */
+#define N3DS_ENDPROF_PHASES   12
+unsigned long long N3DS_EndProfNow(void);
+unsigned long long N3DS_EndProfMark(int phase, unsigned long long since);
+/* Formats the window line into out and resets the window. */
+void N3DS_EndProfFormat(char *out, int outSize);
 
 /*
  * One real vertex buffer per FRAME, not per draw. C3D_DrawArrays only

@@ -658,6 +658,11 @@ internal void NativePerf_Report3DSWindow(void)
 		N3DS_DebugLog(out);
 	}
 
+	/* platform_end_scene_ms phase by phase, the frame-begin wait and the
+	 * right eye's journal shape (n3ds_backend.h's end-of-scene profile). */
+	N3DS_EndProfFormat(out, (int)sizeof(out));
+	N3DS_DebugLog(out);
+
 	/* Only when the effect was live: quiet windows would otherwise pay an SD
 	 * log line each to report zeros, and the absence of the line IS the null
 	 * reading. avgUs is torch_main_ms (the CPU emit walk only); the effect's
