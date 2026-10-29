@@ -183,6 +183,12 @@ heap/linear use, grep them for the real peak per level):
   workers unavailable as on a real Old 3DS, and parks ballast so heap and linear
   match a legacy region of `mem` MiB. The button applies the clock at once; memory
   and workers need a restart.
+- With no workers, audio runs the worker's own per-vblank job on the main
+  thread (`N3DS_AudioRunVBlankOnCaller`: event-batched voice lifecycle, the
+  hardware-voice mirror, XA parcels at the source rate); the `audioprof` line
+  reports its split (`vbl` counts vblanks, `wakes` stays 0). The OT walk's
+  cost per node class is the `[PARSEPROF]` line (268 MHz ticks, i.e. Old-3DS
+  cycles); dumpreq `g4run` A/Bs the menu flag's fast path.
 - `./build3ds.sh --o3ds-sim` also builds `build-3ds/cia/ctr3d-o3dssim.cia` (own
   title ID 0x0004000005A2C400, SystemModeExt Legacy, SystemMode `O3DS_MEM`
   default 80MB, 268MHz, no L2). It installs next to the normal CIA and shares the
