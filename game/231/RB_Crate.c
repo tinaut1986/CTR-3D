@@ -284,7 +284,9 @@ int RB_CrateWeapon_ThCollide(struct Thread *crateThread, struct Thread *collidin
 
 			driver->heldItemID = HELD_ITEM_ROULETTE;
 			driver->numTimesHitWeaponBox++;
-			driver->itemRollTimer = 90;
+			// 60fps: counted down by the driver (VehPhysProc, 60 Hz world),
+			// ModSDK 231_061_068_RB_Crate.c FPS_DOUBLE(90)
+			driver->itemRollTimer = FPS_DOUBLE(90);
 
 			if ((sdata->gGT->gameMode1 & ROLLING_ITEM) == 0)
 			{
@@ -292,12 +294,15 @@ int RB_CrateWeapon_ThCollide(struct Thread *crateThread, struct Thread *collidin
 				sdata->gGT->gameMode1 |= ROLLING_ITEM;
 			}
 
-			driver->PickupTimeboxHUD.cooldown = 5;
+			// 60fps: HUD lerp frames, counted down by UI_Weapon_DrawSelf
+			// (RenderFrame, 60 Hz world), ModSDK 231_061_068_RB_Crate.c FPS_DOUBLE(5)
+			driver->PickupTimeboxHUD.cooldown = FPS_DOUBLE(5);
 			driver->noItemTimer = 0;
 
 			if (driver->numWumpas == DRIVER_WUMPA_JUICED_COUNT)
 			{
-				driver->BattleHUD.juicedUpCooldown = DRIVER_WUMPA_JUICED_HUD_COOLDOWN_FRAMES;
+				// 60fps: counted down by UI_Weapon_DrawBG (60 Hz world)
+				driver->BattleHUD.juicedUpCooldown = FPS_DOUBLE(DRIVER_WUMPA_JUICED_HUD_COOLDOWN_FRAMES);
 			}
 
 			pb = &sdata->gGT->pushBuffer[driver->driverID];
@@ -390,7 +395,9 @@ int RB_CrateFruit_ThCollide(struct Thread *crateThread, struct Thread *colliding
 			}
 			newWumpa = random + (newWumpa >> 2) * -4 + 5;
 
-			driver->PickupWumpaHUD.cooldown = 5;
+			// 60fps: HUD lerp frames, counted down by UI_RenderFrame (60 Hz world),
+			// ModSDK 231_061_068_RB_Crate.c FPS_DOUBLE(5)
+			driver->PickupWumpaHUD.cooldown = FPS_DOUBLE(5);
 			driver->PickupWumpaHUD.numCollected = newWumpa;
 
 			pb = &sdata->gGT->pushBuffer[driver->driverID];
@@ -505,7 +512,9 @@ int RB_CrateTime_ThCollide(struct Thread *crateThread, struct Thread *driverTh, 
 				Voiceline_RequestPlay(0x13, data.characterIDs[driver->driverID], 0x10);
 			}
 
-			driver->PickupTimeboxHUD.cooldown = 10;
+			// 60fps: HUD lerp frames, counted down by UI_RenderFrame (60 Hz world),
+			// ModSDK 231_061_068_RB_Crate.c FPS_DOUBLE(10)
+			driver->PickupTimeboxHUD.cooldown = FPS_DOUBLE(10);
 
 			pb = &gGT->pushBuffer[driver->driverID];
 			RB_Fruit_GetScreenCoords(pb, crateInst, &posScreen[0]);

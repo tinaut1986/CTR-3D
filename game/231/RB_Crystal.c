@@ -46,7 +46,9 @@ int RB_Crystal_ThCollide(struct Thread *crystalTh, struct Thread *driverTh, void
 		// lasts 5 frames, give start position, count numCollected
 		driver->PickupWumpaHUD.startX = pb->rect.x + posScreen[0];
 		driver->PickupWumpaHUD.startY = pb->rect.y + posScreen[1] - 0x14;
-		driver->PickupWumpaHUD.cooldown = 5;
+		// 60fps: HUD lerp frames, counted down by UI_RenderFrame_CrystChall
+		// (60 Hz world), ModSDK 231_069_072_RB_Crystal.c FPS_DOUBLE(5)
+		driver->PickupWumpaHUD.cooldown = FPS_DOUBLE(5);
 		driver->PickupWumpaHUD.numCollected++;
 	}
 
