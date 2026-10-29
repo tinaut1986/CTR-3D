@@ -103,6 +103,14 @@ enum
  * walker specialised for that one prim type (DirectEmit_WalkNodeG4). Same
  * source, so the same bytes by construction.
  */
+#ifdef __3DS__
+/* What the last emitted prim's depth resolve returned (set in the emit below,
+ * read by NativeDirectEmit_G4Run to seed the flag run's cached depth). */
+global_variable int s_g4LastResolved;
+global_variable u16 s_g4LastStamp;
+global_variable u16 s_g4LastPerV[4];
+#endif
+
 force_inline int DirectEmit_WalkNodeImpl(const u32 *words, u32 len, int emit, int knownCode)
 {
 	u32 w = 0;
@@ -230,6 +238,7 @@ force_inline int DirectEmit_WalkNodeImpl(const u32 *words, u32 len, int emit, in
 				 * keeps the flat z above -- unless the resolver below fills it,
 				 * so the feature-off and fallback paths are byte-unchanged. */
 				zPerVertValid = 0;
+				s_g4LastResolved = 0;
 
 #if defined(CTR_NATIVE) && CTR_NATIVE_GTE_CAPTURE
 				/* Depth model. This path
@@ -245,10 +254,14 @@ force_inline int DirectEmit_WalkNodeImpl(const u32 *words, u32 len, int emit, in
 					u16 depthPerVertPar[4];
 
 #if defined(CTR_INTERNAL)
-					const u64 profResolveStart = s_parseProfSampleNode ? PARSEPROF_TICK() : 0;
+					const u64 profResolveStart = (s_parseProfSampleNode || s_parseProfG4Sample) ? PARSEPROF_TICK() : 0;
 					const int resolved = PacketDepth_ResolvePacked(xy, numVerts, &depthStamp, depthPerVert, depthPerVertPar);
 
-					if (s_parseProfSampleNode)
+					if (s_parseProfG4Sample)
+					{
+						s_parseProf.g4ResolveTicks += PARSEPROF_TICK() - profResolveStart;
+					}
+					else if (s_parseProfSampleNode)
 					{
 						s_parseProf.demitResolveTicks += PARSEPROF_TICK() - profResolveStart;
 					}
@@ -259,6 +272,12 @@ force_inline int DirectEmit_WalkNodeImpl(const u32 *words, u32 len, int emit, in
 					{
 						int v;
 
+						s_g4LastResolved = 1;
+						s_g4LastStamp = depthStamp;
+						s_g4LastPerV[0] = depthPerVert[0];
+						s_g4LastPerV[1] = depthPerVert[1];
+						s_g4LastPerV[2] = depthPerVert[2];
+						s_g4LastPerV[3] = depthPerVert[3];
 						z = (s16)((int)depthStamp - 32768);
 						/* Per-vertex depth: keep each corner's own depth so
 						 * the GPU interpolates across the polygon, instead of
@@ -642,6 +661,207 @@ internal int NativeDirectEmit_TryNode(const u8 *packet, u32 tagLength)
 
 #ifdef __3DS__
 /*
+ * Flag-quad fast path inside the G4 run (dumpreq 'g4fast' A/Bs it, 'g4check'
+ * verifies it on the console).
+ *
+ * Every quad of the menu/loading flag is a POLY_G4 of the same exempt range, in
+ * one OT bucket, one UI-latch state, one draw env: the depth resolve gives all
+ * of them the SAME occlusion stamp (the sheet's UI stamp, or the bucket-derived
+ * one), flat across the quad, and only the parallax channel differs, read from
+ * the quad's own table slot. So the first node of a run (emitted by the generic
+ * walker) seeds a context, and the rest skip the resolve, the float vertex
+ * conversion and the per-prim decode, producing the same N3DS_Vertex bytes. A
+ * quad whose state differs from the seed goes through the generic walker.
+ */
+int g_dbg_g4Fast = 1;
+int g_dbg_g4Check = 0;
+
+typedef struct G4FastCtx
+{
+	int valid;
+	int suppressed;
+	int slotIdx;
+	int ofsX, ofsY;
+	int uiShift;
+	u16 stamp;
+	s16 z;
+	s16 u, v;
+} G4FastCtx;
+
+global_variable u32 s_g4CheckQuads;
+global_variable u32 s_g4CheckBad;
+
+internal void DirectEmit_G4FastSeed(G4FastCtx *c)
+{
+	float ofsX = 0.0f, ofsY = 0.0f;
+
+	c->valid = 0;
+	if (!g_dbg_g4Fast || !s_g4LastResolved || !GTECapture_NodeExempt() || (GTECapture_NodeFlagSlot() == NULL) || GTECapture_NodePaintNear() ||
+	    s_skyNodeActive || s_glowNodeActive || s_menubdNodeActive || s_hudshineNodeActive || s_uimapNodeActive || s_uifpsNodeActive || s_uipicNodeActive ||
+	    (s_g4LastPerV[0] != s_g4LastStamp) || (s_g4LastPerV[1] != s_g4LastStamp) || (s_g4LastPerV[2] != s_g4LastStamp) ||
+	    (s_g4LastPerV[3] != s_g4LastStamp))
+	{
+		return;
+	}
+	DrawEnvOffset(&ofsX, &ofsY);
+	/* The generic path adds the float offset to the s16 coordinate; with a
+	 * whole-number offset an integer add is the same value. */
+	if ((ofsX != (float)(int)ofsX) || (ofsY != (float)(int)ofsY))
+	{
+		return;
+	}
+	c->ofsX = (int)ofsX;
+	c->ofsY = (int)ofsY;
+	c->suppressed = GTECapture_LookupSuppressed();
+	c->slotIdx = s_gpu.otCurrentSlotIdx;
+	c->stamp = s_g4LastStamp;
+	c->z = (s16)((int)s_g4LastStamp - 32768);
+	c->uiShift = (c->z >= 32704);
+	c->u = (s16)(((N3DS_WHITE_CELL_X * N3DS_DECODE_TEXTURE_DIM + (N3DS_DECODE_TEXTURE_DIM / 2)) << 1) + 1);
+	c->v = (s16)(2047 - ((N3DS_WHITE_CELL_Y * N3DS_DECODE_TEXTURE_DIM + (N3DS_DECODE_TEXTURE_DIM / 2)) << 1));
+	c->valid = 1;
+}
+
+/* Whether the node the walk just marked is still in the seed's state. */
+internal int DirectEmit_G4FastOk(const G4FastCtx *c)
+{
+	return c->valid && GTECapture_NodeExempt() && (GTECapture_NodeFlagSlot() != NULL) && (GTECapture_LookupSuppressed() == c->suppressed) &&
+	       !GTECapture_NodePaintNear() && (s_gpu.otCurrentSlotIdx == c->slotIdx);
+}
+
+/* One flag quad: the generic walker's emit for a POLY_G4 with this context's
+ * resolved depth. Same counters, ordinal advance and bytes. */
+internal void DirectEmit_G4FastQuad(const u32 *words, const G4FastCtx *c)
+{
+	const u16 *slot = GTECapture_NodeFlagSlot();
+	u32 xy[4], rgb[4];
+	u16 par[4];
+	N3DS_Vertex sv[4];
+	int v, t;
+
+	rgb[0] = words[0] & 0x00FFFFFFu;
+	xy[0] = words[1];
+	rgb[1] = words[2] & 0x00FFFFFFu;
+	xy[1] = words[3];
+	rgb[2] = words[4] & 0x00FFFFFFu;
+	xy[2] = words[5];
+	rgb[3] = words[6] & 0x00FFFFFFu;
+	xy[3] = words[7];
+
+	s_demit.framePrims++;
+	s_demit.frameTris += 2u;
+	(void)NativeGpu_NextDepthStamp();
+	s_gpu.emitOrdinal++;
+	NativeGpu_RecordContentAdvance();
+
+	/* Parallax: the quad's own table depth for each vertex, matched by
+	 * coordinate like GTECapture_NodeFlagDepth (first match wins); a vertex
+	 * with none keeps the occlusion stamp. */
+	for (v = 0; v < 4; v++)
+	{
+		int j;
+
+		par[v] = c->stamp;
+		for (j = 0; j < 4; j++)
+		{
+			if (xy[v] == xy[j])
+			{
+				par[v] = PacketDepth_ClampWorld(0xFFFFu - slot[j]);
+				break;
+			}
+		}
+	}
+
+	for (v = 0; v < 4; v++)
+	{
+		s16 dx = (s16)((int)(s16)(xy[v] & 0xFFFFu) + c->ofsX);
+
+		if (c->uiShift)
+		{
+			extern int NativeWide_UiShiftX(int x);
+
+			dx = (s16)NativeWide_UiShiftX((int)dx);
+		}
+		sv[v].x = dx;
+		sv[v].y = (s16)((int)(s16)(xy[v] >> 16) + c->ofsY);
+		sv[v].z = c->z;
+		sv[v].w = (s16)((int)par[v] - 32768);
+		sv[v].u = c->u;
+		sv[v].v = c->v;
+		sv[v].r = (u8)(rgb[v] & 0xFFu);
+		sv[v].g = (u8)((rgb[v] >> 8) & 0xFFu);
+		sv[v].b = (u8)((rgb[v] >> 16) & 0xFFu);
+		sv[v]._pad = 0;
+	}
+
+	for (t = 0; t < 2; t++)
+	{
+		N3DS_Vertex *dst;
+
+		if ((s_mergeBinUsed[N3DS_MERGE_UNTEX_BIN] + 3) > N3DS_MERGE_BIN_CAP_VERTS)
+		{
+			N3DS_MergeSpillBin(N3DS_MERGE_UNTEX_BIN);
+		}
+		dst = &s_mergeBinVerts[N3DS_MERGE_UNTEX_BIN][s_mergeBinUsed[N3DS_MERGE_UNTEX_BIN]];
+		dst[0] = sv[t];
+		dst[1] = sv[t + 1];
+		dst[2] = sv[t + 2];
+		s_mergeBinUsed[N3DS_MERGE_UNTEX_BIN] += 3;
+		s_demit.frameEmitTris++;
+	}
+	s_gpu.framebufferFeedbackRunActive = false;
+}
+
+#if defined(CTR_INTERNAL)
+/* dumpreq 'g4check': every 8th flag quad is emitted by BOTH paths from the
+ * same state and the six vertices compared; the generic walker's result is the
+ * one kept (the fast path's side effects are rewound first). A line per 256
+ * checks reports quads and mismatches. Skipped when the bin could spill. */
+internal void DirectEmit_G4CheckQuad(const u32 *w, const G4FastCtx *c)
+{
+	const int bin = N3DS_MERGE_UNTEX_BIN;
+	static u32 s_checked;
+
+	if (((s_g4CheckQuads++ & 7u) != 0u) || ((s_mergeBinUsed[bin] + 6) > N3DS_MERGE_BIN_CAP_VERTS))
+	{
+		DirectEmit_G4FastQuad(w, c);
+		return;
+	}
+	{
+		const int used0 = (int)s_mergeBinUsed[bin];
+		const __typeof__(s_gpu.emitOrdinal) ord0 = s_gpu.emitOrdinal;
+		const __typeof__(s_gpu.lastStampedZ) lastZ0 = s_gpu.lastStampedZ;
+		const u32 stamps0 = s_pktDepthStamps;
+		const DirectEmitStats stats0 = s_demit;
+		N3DS_Vertex ref[6];
+		__typeof__(s_gpu.emitOrdinal) ordSlow;
+		int bad;
+
+		(void)DirectEmit_WalkNodeG4(w);
+		memcpy(ref, &s_mergeBinVerts[bin][used0], sizeof(ref));
+		ordSlow = s_gpu.emitOrdinal;
+
+		s_mergeBinUsed[bin] = used0;
+		s_gpu.emitOrdinal = ord0;
+		s_gpu.lastStampedZ = lastZ0;
+		s_pktDepthStamps = stamps0;
+		s_demit = stats0;
+
+		DirectEmit_G4FastQuad(w, c);
+		bad = (memcmp(ref, &s_mergeBinVerts[bin][used0], sizeof(ref)) != 0) || (ordSlow != s_gpu.emitOrdinal);
+		s_g4CheckBad += (u32)bad;
+		if ((++s_checked & 255u) == 0u)
+		{
+			char line[96];
+
+			snprintf(line, sizeof(line), "[G4CHECK] checked=%lu bad=%lu", (unsigned long)s_checked, (unsigned long)s_g4CheckBad);
+			N3DS_DebugLog(line);
+		}
+	}
+}
+#endif
+
+/*
  * Runtime A/B for the G4 run below (dumpreq 'g4run'); both legs produce the
  * same bins, so a flip mid-frame only splits that frame between them.
  */
@@ -667,14 +887,17 @@ int g_dbg_g4Run = 1;
 internal u8 *NativeDirectEmit_G4Run(u8 *packet, u32 tagLength, u32 *walkIterations, u32 *runNodes)
 {
 	u8 *node = packet;
+	G4FastCtx fctx;
 
 	*runNodes = 0;
+	fctx.valid = 0;
 	if (!g_dbg_g4Run || g_dbg_perfTriScopes || (tagLength != DEMIT_LEN_POLY_G4) ||
 	    ((((const u32 *)packet)[P_LEN] >> 24) != DEMIT_CODE_POLY_G4) || NativeGpu_InTagEnvelope((uintptr_t)packet))
 	{
 		return node;
 	}
 
+	DirectEmit_G4FastSeed(&fctx);
 	for (;;)
 	{
 		u8 *next;
@@ -707,7 +930,55 @@ internal u8 *NativeDirectEmit_G4Run(u8 *packet, u32 tagLength, u32 *walkIteratio
 		(*walkIterations)++;
 		node = next;
 		s_demit.frameNodes++;
-		scan = DirectEmit_WalkNodeG4((const u32 *)node + P_LEN);
+		{
+#if defined(CTR_INTERNAL)
+			const int g4Sampled = ((((*runNodes) % PARSEPROF_G4_SAMPLE_EVERY) == 0u));
+			const u64 g4Start = g4Sampled ? PARSEPROF_TICK() : 0;
+#endif
+			if (DirectEmit_G4FastOk(&fctx))
+			{
+				const u32 *fw = (const u32 *)node + P_LEN;
+
+#if defined(CTR_INTERNAL)
+				if (g_dbg_g4Check)
+				{
+					DirectEmit_G4CheckQuad(fw, &fctx);
+				}
+				else
+#endif
+				{
+					DirectEmit_G4FastQuad(fw, &fctx);
+				}
+				/* The resolve's own counters, as the generic walker leaves them. */
+				if (fctx.suppressed)
+				{
+					s_pktDepth.suppressed2d++;
+				}
+				else
+				{
+					s_pktDepth.fellBack++;
+					s_pktDepth2.unkFellBack++;
+				}
+				scan = DEMIT_OK;
+			}
+			else
+			{
+#if defined(CTR_INTERNAL)
+				s_parseProfG4Sample = g4Sampled;
+#endif
+				scan = DirectEmit_WalkNodeG4((const u32 *)node + P_LEN);
+#if defined(CTR_INTERNAL)
+				s_parseProfG4Sample = 0;
+#endif
+			}
+#if defined(CTR_INTERNAL)
+			if (g4Sampled)
+			{
+				s_parseProf.g4NodeTicks += PARSEPROF_TICK() - g4Start;
+				s_parseProf.g4Samples++;
+			}
+#endif
+		}
 		if (scan != DEMIT_OK)
 		{
 			/* Unreachable for an opaque untextured G4 of the right length;

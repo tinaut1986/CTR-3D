@@ -221,7 +221,11 @@ heap/linear use, grep them for the real peak per level):
   hardware-voice mirror, XA parcels at the source rate); the `audioprof` line
   reports its split (`vbl` counts vblanks, `wakes` stays 0). The OT walk's
   cost per node class is the `[PARSEPROF]` line (268 MHz ticks, i.e. Old-3DS
-  cycles); dumpreq `g4run` A/Bs the menu flag's fast path.
+  cycles); dumpreq `g4run` A/Bs the menu flag's fast path. Inside that run the flag's quads
+  skip the depth resolve and the float vertex conversion (dumpreq `g4fast`, default on):
+  they share the first quad's resolved occlusion stamp and read only their own
+  parallax slot. `g4check` emits every 8th quad both ways and reports `[G4CHECK]
+  checked/bad`; `[G4PROF]` is the sampled cycles per quad (~3970 -> ~1470 on an Old 2DS).
 - The game thread's own CPU work: `[INSTPROF]` splits
   `mainframe_execute_instances_ms` per draw-func kind (`normal`, `alt`, `split`,
   `special`, `refl`: drawn instances per frame, whole cost, cycles per instance)

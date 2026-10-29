@@ -5041,7 +5041,18 @@ global_variable struct
 	 * nodes counted here and NOT in nodes[DEMIT] (the run's first node is). */
 	u32 runNodes;
 	u64 runTicks;
+	/* One in PARSEPROF_G4_SAMPLE_EVERY run nodes timed on its own: the whole
+	 * single-pass walker, and the depth resolve inside it. The difference to
+	 * runTicks/runNodes is the run loop's own per-node work (link checks,
+	 * MarkOTNode). */
+	u32 g4Samples;
+	u64 g4NodeTicks;
+	u64 g4ResolveTicks;
 } s_parseProf;
+#define PARSEPROF_G4_SAMPLE_EVERY 8
+/* Set by NativeDirectEmit_G4Run around a sampled node; read by the emit's
+ * depth resolve to time itself into g4ResolveTicks. */
+global_variable int s_parseProfG4Sample;
 /* Set by the walk for the node being sampled; read by the direct-emit scan and
  * the emit's depth resolve to time their own parts of that same node. */
 global_variable int s_parseProfSampleNode;
@@ -5082,6 +5093,12 @@ internal void ParseProf_FoldWalk(void)
 	         (unsigned long)(s_parseProf.runNodes ? (s_parseProf.runTicks / s_parseProf.runNodes) : 0u),
 	         (unsigned long)((double)s_parseProf.runTicks * usPerTick / (double)s_parseProf.walks), (unsigned long)perFrame[PARSEPROF_PARSE],
 	         (unsigned long)cyc[PARSEPROF_PARSE], (unsigned long)estUs[PARSEPROF_PARSE]);
+	N3DS_DebugLog(line);
+	/* Inside the g4 run, per node (cycles): walker whole / its depth resolve. */
+	snprintf(line, sizeof(line), "[G4PROF] samples=%lu node=%lu resolve=%lu runPerNode=%lu",
+	         (unsigned long)s_parseProf.g4Samples, (unsigned long)(s_parseProf.g4Samples ? (s_parseProf.g4NodeTicks / s_parseProf.g4Samples) : 0u),
+	         (unsigned long)(s_parseProf.g4Samples ? (s_parseProf.g4ResolveTicks / s_parseProf.g4Samples) : 0u),
+	         (unsigned long)(s_parseProf.runNodes ? (s_parseProf.runTicks / s_parseProf.runNodes) : 0u));
 	N3DS_DebugLog(line);
 	memset(&s_parseProf, 0, sizeof(s_parseProf));
 }

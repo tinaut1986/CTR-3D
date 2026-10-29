@@ -5009,6 +5009,10 @@ unsigned int N3DS_ReadButtons(void)
 	 *   single      -- toggle g_dbg_forceSingleTexture
 	 *   textureless -- toggle g_dbg_texturelessMode
 	 *   triscopes   -- toggle g_dbg_perfTriScopes (per-triangle perf split; taxed)
+ *   g4fast      -- toggle g_dbg_g4Fast (DEFAULT ON): the flag quads of a G4 run
+ *                  skip the depth resolve and float vertex conversion
+ *   g4check     -- toggle g_dbg_g4Check: emit every 8th flag quad both ways
+ *                  and compare ([G4CHECK] checked/bad)
  *   g4run       -- toggle g_dbg_g4Run (the walk's POLY_G4 run fast path, the
  *                  menu flag; A/B for [PARSEPROF] / draw_otag_parse_ms)
  *   flaglean    -- toggle g_dbg_flagLean (DEFAULT ON): the menu flag's 360 RTPT
@@ -5595,6 +5599,22 @@ unsigned int N3DS_ReadButtons(void)
 					 * native_direct_emit.c. */
 					g_dbg_directEmit ^= 1;
 					N3DS_DebugLog(g_dbg_directEmit ? "[CTR-3DS] direct emit: ON" : "[CTR-3DS] direct emit: OFF");
+				}
+				else if (strncmp(word, "g4fast", 6) == 0)
+				{
+					extern int g_dbg_g4Fast;
+
+					/* Same bins as the generic walker (native_direct_emit.c). */
+					g_dbg_g4Fast ^= 1;
+					N3DS_DebugLog(g_dbg_g4Fast ? "[CTR-3DS] flag quad fast path: ON" : "[CTR-3DS] flag quad fast path: off");
+				}
+				else if (strncmp(word, "g4check", 7) == 0)
+				{
+					extern int g_dbg_g4Check;
+
+					/* Emits every 8th flag quad both ways and compares ([G4CHECK]). */
+					g_dbg_g4Check ^= 1;
+					N3DS_DebugLog(g_dbg_g4Check ? "[CTR-3DS] flag quad check: ON" : "[CTR-3DS] flag quad check: off");
 				}
 				else if (strncmp(word, "g4run", 5) == 0)
 				{

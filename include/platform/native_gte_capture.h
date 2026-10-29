@@ -262,6 +262,7 @@ u32 GTECapture_FlagParallaxCapacity(void);
 void GTECapture_SetFlagParallaxCount(u32 quads);
 int GTECapture_NodeFlagTable(void);
 int GTECapture_NodeFlagDepth(s16 sx, s16 sy, u16 *outSz3);
+const u16 *GTECapture_NodeFlagSlot(void);
 
 // PAINT-ON-TOP models (the talking-mask hint heads). Retail parks these
 // instances inside hub geometry and its painter's algorithm carries them --
