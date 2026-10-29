@@ -456,6 +456,22 @@ static void ui_ring_stats(u32 *minUs, u32 *maxUs, u32 *avgUs)
 	*avgUs = (s_ringCount > 0) ? (u32)(sum / (unsigned)s_ringCount) : 0;
 }
 
+/* Mean of the newest `n` frame times. The STATUS tab repaints every 250 ms, so
+ * showing the single latest frame (s_lastDtUs) read one random frame per
+ * repaint: on the New 3DS, where the game thread's call interval is not
+ * vblank-locked, that swung 28-80 while the presented rate sat at a steady 30. */
+static u32 ui_ring_recent_avg(int n)
+{
+	unsigned long long sum = 0;
+	int i, k = (n < s_ringCount) ? n : s_ringCount;
+
+	for (i = 1; i <= k; i++)
+	{
+		sum += s_ring[(s_ringHead - i + (UI_RING * 2)) % UI_RING];
+	}
+	return (k > 0) ? (u32)(sum / (unsigned)k) : 0;
+}
+
 static u16 ui_time_col(u32 us)
 {
 	return (us <= 34000U) ? COL_GOOD : (us <= 50000U) ? COL_WARN : COL_BAD;
@@ -507,7 +523,11 @@ static void ui_draw_status(void)
 
 	ui_ring_stats(&mn, &mx, &av);
 
-	ui_fmt10(a, sizeof(a), (s_lastDtUs > 0) ? (10000000ULL / s_lastDtUs) : 0ULL);
+	{
+		const u32 recent = ui_ring_recent_avg(15); /* ~0.5 s at 30 fps */
+
+		ui_fmt10(a, sizeof(a), (recent > 0) ? (10000000ULL / recent) : 0ULL);
+	}
 	ui_fmt10(b, sizeof(b), (av > 0) ? (10000000ULL / av) : 0ULL);
 	snprintf(c, sizeof(c), "%s  AVG %s", a, b);
 	ui_kv(y, "FPS", c, ui_time_col(av));
