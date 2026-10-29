@@ -866,6 +866,9 @@ internal void DirectEmit_G4CheckQuad(const u32 *w, const G4FastCtx *c)
  * same bins, so a flip mid-frame only splits that frame between them.
  */
 int g_dbg_g4Run = 1;
+/* Why a G4Run entry/run ended: [0] entered, [1] tagLength != 8, [2] code != G4, [3] in tag envelope (first node),
+ * [4] run ended: next not G4, [5] run ended: next in envelope/inactive, [6] g4 nodes with run length 1. */
+u32 g_dbg_g4Why[8];
 
 /*
  * POLY_G4 run. The menu/loading flag (RaceFlag_DrawSelf) links its ~1000
@@ -891,8 +894,21 @@ internal u8 *NativeDirectEmit_G4Run(u8 *packet, u32 tagLength, u32 *walkIteratio
 
 	*runNodes = 0;
 	fctx.valid = 0;
+	g_dbg_g4Why[0]++;
+	if (tagLength != DEMIT_LEN_POLY_G4)
+	{
+		g_dbg_g4Why[1]++;
+	}
+	else if ((((const u32 *)packet)[P_LEN] >> 24) != DEMIT_CODE_POLY_G4)
+	{
+		g_dbg_g4Why[2]++;
+	}
+	else if (NativeGpu_InAnyTagRange((uintptr_t)packet))
+	{
+		g_dbg_g4Why[3]++;
+	}
 	if (!g_dbg_g4Run || g_dbg_perfTriScopes || (tagLength != DEMIT_LEN_POLY_G4) ||
-	    ((((const u32 *)packet)[P_LEN] >> 24) != DEMIT_CODE_POLY_G4) || NativeGpu_InTagEnvelope((uintptr_t)packet))
+	    ((((const u32 *)packet)[P_LEN] >> 24) != DEMIT_CODE_POLY_G4) || NativeGpu_InAnyTagRange((uintptr_t)packet))
 	{
 		return node;
 	}
@@ -914,6 +930,7 @@ internal u8 *NativeDirectEmit_G4Run(u8 *packet, u32 tagLength, u32 *walkIteratio
 		}
 		if ((getlen(next) != DEMIT_LEN_POLY_G4) || ((((const u32 *)next)[P_LEN] >> 24) != DEMIT_CODE_POLY_G4))
 		{
+			g_dbg_g4Why[4]++;
 			return node;
 		}
 		if (*walkIterations >= 65536)
@@ -922,8 +939,9 @@ internal u8 *NativeDirectEmit_G4Run(u8 *packet, u32 tagLength, u32 *walkIteratio
 		}
 
 		GTECapture_MarkOTNode(next);
-		if (NativeGpu_InTagEnvelope((uintptr_t)next) || !g_dbg_directEmit || !DirectEmit_NodeActive())
+		if (NativeGpu_InAnyTagRange((uintptr_t)next) || !g_dbg_directEmit || !DirectEmit_NodeActive())
 		{
+			g_dbg_g4Why[5]++;
 			return node;
 		}
 

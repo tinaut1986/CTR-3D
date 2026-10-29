@@ -2196,6 +2196,16 @@ internal int NativeGpu_InTagEnvelope(uintptr_t addr)
 	return (addr >= s_tagEnvelopeLo) && (addr < s_tagEnvelopeHi);
 }
 
+/* Precise form of the envelope test: the envelope is only the hull of every tag
+ * range, so a node can sit inside it (the track select screen's menu flag does)
+ * while belonging to none of them. 1 when some tag flag would be set for addr. */
+internal int NativeGpu_InAnyTagRange(uintptr_t addr)
+{
+	return NativeGpu_InTagEnvelope(addr) &&
+	       (NativeGpu_IsSkyPacket(addr) || NativeGpu_IsStarPacket(addr) || NativeGpu_IsMenuBackdropPacket(addr) || NativeGpu_IsGlowPacket(addr) ||
+	        NativeGpu_IsUiMapPacket(addr) || NativeGpu_IsUiFpsPacket(addr) || NativeGpu_IsUiPicPacket(addr) || NativeGpu_IsHudShinePacket(addr));
+}
+
 /* The walk's per-node tag flags (s_skyNodeActive and its siblings) for the
  * node at addr. */
 force_inline void NativeGpu_TagWalkNode(uintptr_t addr)
@@ -5100,6 +5110,14 @@ internal void ParseProf_FoldWalk(void)
 	         (unsigned long)(s_parseProf.g4Samples ? (s_parseProf.g4ResolveTicks / s_parseProf.g4Samples) : 0u),
 	         (unsigned long)(s_parseProf.runNodes ? (s_parseProf.runTicks / s_parseProf.runNodes) : 0u));
 	N3DS_DebugLog(line);
+	{
+		extern u32 g_dbg_g4Why[8];
+
+		snprintf(line, sizeof(line), "[G4WHY] enter=%lu len!=8:%lu code!=G4:%lu env:%lu endNotG4:%lu endEnvInactive:%lu", (unsigned long)g_dbg_g4Why[0],
+		         (unsigned long)g_dbg_g4Why[1], (unsigned long)g_dbg_g4Why[2], (unsigned long)g_dbg_g4Why[3], (unsigned long)g_dbg_g4Why[4],
+		         (unsigned long)g_dbg_g4Why[5]);
+		N3DS_DebugLog(line);
+	}
 	memset(&s_parseProf, 0, sizeof(s_parseProf));
 }
 #define PARSEPROF_TICK() N3DS_GetTickCount()
