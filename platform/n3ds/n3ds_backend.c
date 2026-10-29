@@ -4507,6 +4507,8 @@ unsigned int N3DS_ReadButtons(void)
 	 *   single      -- toggle g_dbg_forceSingleTexture
 	 *   textureless -- toggle g_dbg_texturelessMode
 	 *   triscopes   -- toggle g_dbg_perfTriScopes (per-triangle perf split; taxed)
+ *   g4run       -- toggle g_dbg_g4Run (the walk's POLY_G4 run fast path, the
+ *                  menu flag; A/B for [PARSEPROF] / draw_otag_parse_ms)
 	 *   drawmerge   -- toggle g_dbg_drawMerge: 0 falls back to immediate
 	 *                  per-run submission instead of the state-sorted bins
 	 *   flagstyle [N] -- menu/loading flag: 0 = retail grey checkers (default),
@@ -5065,6 +5067,14 @@ unsigned int N3DS_ReadButtons(void)
 					 * native_direct_emit.c. */
 					g_dbg_directEmit ^= 1;
 					N3DS_DebugLog(g_dbg_directEmit ? "[CTR-3DS] direct emit: ON" : "[CTR-3DS] direct emit: OFF");
+				}
+				else if (strncmp(word, "g4run", 5) == 0)
+				{
+					extern int g_dbg_g4Run;
+
+					/* Both legs emit the same bins (native_direct_emit.c). */
+					g_dbg_g4Run ^= 1;
+					N3DS_DebugLog(g_dbg_g4Run ? "[CTR-3DS] POLY_G4 run fast path: ON" : "[CTR-3DS] POLY_G4 run fast path: off (one node per walk iteration)");
 				}
 #endif
 				else if (strncmp(word, "resolvememo", 11) == 0)

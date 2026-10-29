@@ -96,7 +96,14 @@ enum
  * whose prim lengths do not tile tagLength is rejected, same guard as the
  * [OTPROF] shape walker.
  */
-internal int DirectEmit_WalkNode(const u32 *words, u32 len, int emit)
+/*
+ * knownCode: -1 for the generic walker; otherwise the caller guarantees the
+ * node is exactly one prim with this command byte, and the constant lets the
+ * compiler fold the shape decode and every branch that depends on it into a
+ * walker specialised for that one prim type (DirectEmit_WalkNodeG4). Same
+ * source, so the same bytes by construction.
+ */
+force_inline int DirectEmit_WalkNodeImpl(const u32 *words, u32 len, int emit, int knownCode)
 {
 	u32 w = 0;
 
@@ -118,7 +125,7 @@ internal int DirectEmit_WalkNode(const u32 *words, u32 len, int emit)
 	while (w < len)
 	{
 		const u32 cmd = words[w];
-		const u32 code = cmd >> 24;
+		const u32 code = (knownCode >= 0) ? (u32)knownCode : (cmd >> 24);
 
 		if ((code < 0x20u) || (code > 0x3Fu))
 		{
@@ -457,24 +464,29 @@ internal int DirectEmit_WalkNode(const u32 *words, u32 len, int emit)
 	return DEMIT_OK;
 }
 
-/*
- * Called from ParsePrimitivesLinkedList per OT node (after the tagLength
- * validity checks, before the parse loop). Returns 1 when the node was fully
- * emitted here and the parse loop must be skipped; 0 means parse normally
- * (ineligible node, fast path inactive, or PC count-only build).
- */
-internal int NativeDirectEmit_TryNode(const u8 *packet, u32 tagLength)
+internal int DirectEmit_WalkNode(const u32 *words, u32 len, int emit)
 {
-	const u32 *words = (const u32 *)packet + P_LEN;
-	int active;
-	int scan;
+	return DirectEmit_WalkNodeImpl(words, len, emit, -1);
+}
 
-	/* OFF leg of the A/B (and the PC default) stays truly zero-cost: no
-	 * scan, no counters. */
-	if (!g_dbg_directEmit)
-	{
-		return 0;
-	}
+/* Single-pass walker for a one-prim POLY_G4 node (code 0x38: gouraud quad,
+ * untextured, opaque, shaded) -- the shape of every menu/loading flag quad
+ * (RaceFlag_DrawSelf). */
+#define DEMIT_CODE_POLY_G4 0x38u
+#define DEMIT_LEN_POLY_G4  8u
+
+internal int DirectEmit_WalkNodeG4(const u32 *words)
+{
+	return DirectEmit_WalkNodeImpl(words, DEMIT_LEN_POLY_G4, DEMIT_PASS_COUNT_AND_EMIT, (int)DEMIT_CODE_POLY_G4);
+}
+
+/*
+ * Whether the fast path may emit the node the walk is on (per node: the UI
+ * band latch and the hud-shine tag change during a walk). PC: never.
+ */
+internal int DirectEmit_NodeActive(void)
+{
+	int active;
 
 #ifdef __3DS__
 	active = s_mergeActive && (s_gpu.overrideTexture == 0) && !s_gpu.drawPrimMode && !g_dbg_texturelessMode && !g_dbg_forceSingleTexture &&
@@ -517,6 +529,30 @@ internal int NativeDirectEmit_TryNode(const u8 *packet, u32 tagLength)
 	active = 0;
 #endif
 
+	return active;
+}
+
+/*
+ * Called from ParsePrimitivesLinkedList per OT node (after the tagLength
+ * validity checks, before the parse loop). Returns 1 when the node was fully
+ * emitted here and the parse loop must be skipped; 0 means parse normally
+ * (ineligible node, fast path inactive, or PC count-only build).
+ */
+internal int NativeDirectEmit_TryNode(const u8 *packet, u32 tagLength)
+{
+	const u32 *words = (const u32 *)packet + P_LEN;
+	int active;
+	int scan;
+
+	/* OFF leg of the A/B (and the PC default) stays truly zero-cost: no
+	 * scan, no counters. */
+	if (!g_dbg_directEmit)
+	{
+		return 0;
+	}
+
+	active = DirectEmit_NodeActive();
+
 #ifdef __3DS__
 	/*
 	 * Single-prim node (the menu flag's ~1000 quads are one POLY_G4 each, and
@@ -543,7 +579,8 @@ internal int NativeDirectEmit_TryNode(const u8 *packet, u32 tagLength)
 				{
 					NativePerf_BeginScope(NATIVE_PERF_BUCKET_DIRECT_EMIT);
 				}
-				scan = DirectEmit_WalkNode(words, tagLength, DEMIT_PASS_COUNT_AND_EMIT);
+				scan = ((code == DEMIT_CODE_POLY_G4) && (tagLength == DEMIT_LEN_POLY_G4)) ? DirectEmit_WalkNodeG4(words)
+				                                                                          : DirectEmit_WalkNode(words, tagLength, DEMIT_PASS_COUNT_AND_EMIT);
 				if (g_dbg_perfTriScopes)
 				{
 					NativePerf_EndScope(NATIVE_PERF_BUCKET_DIRECT_EMIT);
@@ -602,6 +639,90 @@ internal int NativeDirectEmit_TryNode(const u8 *packet, u32 tagLength)
 	DirectEmit_WalkNode(words, tagLength, DEMIT_PASS_EMIT);
 	return 1;
 }
+
+#ifdef __3DS__
+/*
+ * Runtime A/B for the G4 run below (dumpreq 'g4run'); both legs produce the
+ * same bins, so a flip mid-frame only splits that frame between them.
+ */
+int g_dbg_g4Run = 1;
+
+/*
+ * POLY_G4 run. The menu/loading flag (RaceFlag_DrawSelf) links its ~1000
+ * quads one per OT node, back to back, so the walk's generic per-node work --
+ * tag tests, the fast-path predicate, the shape decode, three function
+ * frames -- costs more than the quad itself. Called by the walk right after
+ * NativeDirectEmit_TryNode emitted `packet`: while the next node is another
+ * one-prim POLY_G4 node the generic loop would hand to the same single-pass
+ * walker, this does for it exactly what one generic iteration does -- link
+ * validation, GTECapture_MarkOTNode, the tag test, the fast-path predicate,
+ * the counters, DirectEmit_WalkNodeG4 -- and moves on. It stops BEFORE the
+ * first node that needs anything else (tag range, UI band latch, another
+ * shape, the end of the OT, a bad link, the cycle guard) and returns the last
+ * node it emitted, so the walk's own tail and next iteration take over there
+ * unchanged (MarkOTNode is idempotent for the node it re-marks). The node the
+ * walk handed in must itself be outside every tag range, so the walk's tag
+ * flags are all zero and stay zero across the run.
+ */
+internal u8 *NativeDirectEmit_G4Run(u8 *packet, u32 tagLength, u32 *walkIterations, u32 *runNodes)
+{
+	u8 *node = packet;
+
+	*runNodes = 0;
+	if (!g_dbg_g4Run || g_dbg_perfTriScopes || (tagLength != DEMIT_LEN_POLY_G4) ||
+	    ((((const u32 *)packet)[P_LEN] >> 24) != DEMIT_CODE_POLY_G4) || NativeGpu_InTagEnvelope((uintptr_t)packet))
+	{
+		return node;
+	}
+
+	for (;;)
+	{
+		u8 *next;
+		int scan;
+
+		if (isendprim(node))
+		{
+			return node;
+		}
+		next = nextPrim(node);
+		if (!NativeGpu_IsValidOTLink((uintptr_t)next))
+		{
+			return node; /* the walk's tail logs it */
+		}
+		if ((getlen(next) != DEMIT_LEN_POLY_G4) || ((((const u32 *)next)[P_LEN] >> 24) != DEMIT_CODE_POLY_G4))
+		{
+			return node;
+		}
+		if (*walkIterations >= 65536)
+		{
+			return node; /* the walk's cycle guard reports it */
+		}
+
+		GTECapture_MarkOTNode(next);
+		if (NativeGpu_InTagEnvelope((uintptr_t)next) || !g_dbg_directEmit || !DirectEmit_NodeActive())
+		{
+			return node;
+		}
+
+		(*walkIterations)++;
+		node = next;
+		s_demit.frameNodes++;
+		scan = DirectEmit_WalkNodeG4((const u32 *)node + P_LEN);
+		if (scan != DEMIT_OK)
+		{
+			/* Unreachable for an opaque untextured G4 of the right length;
+			 * counted the way TryNode would, and the node is still handled
+			 * here rather than parsed twice. */
+			s_demit.frameSkip[scan]++;
+		}
+		else
+		{
+			s_demit.frameElig++;
+		}
+		(*runNodes)++;
+	}
+}
+#endif
 
 /*
  * Per content-frame fold + 64-frame window report, called from ClearSplits

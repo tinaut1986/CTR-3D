@@ -41,6 +41,9 @@ extern int g_dbg_polygonSelected;
 // needs this file's and the 3DS renderer's file-scope state in view).
 internal int NativeDirectEmit_TryNode(const u8 *packet, u32 tagLength);
 internal void DirectEmit_FoldFrame(void);
+#if defined(__3DS__)
+internal u8 *NativeDirectEmit_G4Run(u8 *packet, u32 tagLength, u32 *walkIterations, u32 *runNodes);
+#endif
 #endif
 
 // NOTE(aalhendi): Little-endian tag `CTRG` = CTR native GPU snapshot.
@@ -4954,6 +4957,10 @@ global_variable struct
 	u64 demitResolveTicks;
 	u64 walkTicks; /* whole walks, every walk: the denominator */
 	u32 walks;
+	/* POLY_G4 runs (NativeDirectEmit_G4Run): every run timed whole, its
+	 * nodes counted here and NOT in nodes[DEMIT] (the run's first node is). */
+	u32 runNodes;
+	u64 runTicks;
 } s_parseProf;
 /* Set by the walk for the node being sampled; read by the direct-emit scan and
  * the emit's depth resolve to time their own parts of that same node. */
@@ -4961,7 +4968,7 @@ global_variable int s_parseProfSampleNode;
 
 internal void ParseProf_FoldWalk(void)
 {
-	char line[256];
+	char line[320];
 	const double usPerTick = 1000000.0 / (double)N3DS_GetTickFrequency();
 	double estUs[PARSEPROF_CLASSES];
 	u32 perFrame[PARSEPROF_CLASSES];
@@ -4987,12 +4994,14 @@ internal void ParseProf_FoldWalk(void)
 	resolveCyc = s_parseProf.samples[PARSEPROF_DEMIT] ? (u32)(s_parseProf.demitResolveTicks / s_parseProf.samples[PARSEPROF_DEMIT]) : 0u;
 
 	snprintf(line, sizeof(line),
-	         "[PARSEPROF] walks=%lu walkUs=%lu | empty n/f=%lu cyc=%lu us=%lu | demit n/f=%lu cyc=%lu (scan=%lu depth=%lu) us=%lu | parse n/f=%lu cyc=%lu us=%lu",
+	         "[PARSEPROF] walks=%lu walkUs=%lu | empty n/f=%lu cyc=%lu us=%lu | demit n/f=%lu cyc=%lu (scan=%lu depth=%lu) us=%lu | g4run n/f=%lu cyc=%lu us=%lu | parse n/f=%lu cyc=%lu us=%lu",
 	         (unsigned long)s_parseProf.walks, (unsigned long)((double)s_parseProf.walkTicks * usPerTick / (double)s_parseProf.walks),
 	         (unsigned long)perFrame[PARSEPROF_EMPTY], (unsigned long)cyc[PARSEPROF_EMPTY], (unsigned long)estUs[PARSEPROF_EMPTY],
 	         (unsigned long)perFrame[PARSEPROF_DEMIT], (unsigned long)cyc[PARSEPROF_DEMIT], (unsigned long)scanCyc, (unsigned long)resolveCyc,
-	         (unsigned long)estUs[PARSEPROF_DEMIT], (unsigned long)perFrame[PARSEPROF_PARSE], (unsigned long)cyc[PARSEPROF_PARSE],
-	         (unsigned long)estUs[PARSEPROF_PARSE]);
+	         (unsigned long)estUs[PARSEPROF_DEMIT], (unsigned long)(s_parseProf.runNodes / s_parseProf.walks),
+	         (unsigned long)(s_parseProf.runNodes ? (s_parseProf.runTicks / s_parseProf.runNodes) : 0u),
+	         (unsigned long)((double)s_parseProf.runTicks * usPerTick / (double)s_parseProf.walks), (unsigned long)perFrame[PARSEPROF_PARSE],
+	         (unsigned long)cyc[PARSEPROF_PARSE], (unsigned long)estUs[PARSEPROF_PARSE]);
 	N3DS_DebugLog(line);
 	memset(&s_parseProf, 0, sizeof(s_parseProf));
 }
@@ -5149,7 +5158,7 @@ void ParsePrimitivesLinkedList(u32 *p, int singlePrimitive)
 			otWalkIterations++;
 #if defined(CTR_INTERNAL) && defined(__3DS__)
 			const int profSample = ((otWalkIterations % PARSEPROF_SAMPLE_EVERY) == 0);
-			const u64 profNodeStart = profSample ? PARSEPROF_TICK() : 0;
+			u64 profNodeStart = profSample ? PARSEPROF_TICK() : 0;
 			int profClass = PARSEPROF_EMPTY;
 
 			s_parseProfSampleNode = profSample;
@@ -5235,6 +5244,30 @@ void ParsePrimitivesLinkedList(u32 *p, int singlePrimitive)
 					// handled: nothing to parse
 #if defined(CTR_INTERNAL) && defined(__3DS__)
 					profClass = PARSEPROF_DEMIT;
+#endif
+#if defined(__3DS__)
+					/* A POLY_G4 node: emit the run of them that follows it
+					 * (the menu flag) without the generic per-node work, and
+					 * resume the walk at the last one -- see
+					 * NativeDirectEmit_G4Run. */
+					{
+						u32 runNodes;
+#if defined(CTR_INTERNAL)
+						const u64 runStart = PARSEPROF_TICK();
+#endif
+						basePacket = NativeDirectEmit_G4Run(basePacket, (u32)tagLength, &otWalkIterations, &runNodes);
+#if defined(CTR_INTERNAL)
+						if (runNodes > 0)
+						{
+							const u64 runTicks = PARSEPROF_TICK() - runStart;
+
+							s_parseProf.runNodes += runNodes;
+							s_parseProf.runTicks += runTicks;
+							/* Keep this node's own sample free of the run. */
+							profNodeStart += runTicks;
+						}
+#endif
+					}
 #endif
 				}
 				else
