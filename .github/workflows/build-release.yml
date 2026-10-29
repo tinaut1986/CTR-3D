@@ -89,14 +89,16 @@ jobs:
           # No game data is ever part of the repository or of a published build.
           test ! -d assets
           if git ls-files | grep -Ei '(^|/)assets/|\.(bin|iso|cue|sav|cia|3dsx|elf)$'; then echo "Game data or build output tracked by git"; exit 1; fi
-          # Published builds are the production configuration (CTR_INTERNAL=OFF, no debug
-          # surface) on both channels. The channel is baked into the binary: a beta shows
-          # "X.Y.Z BETA", and its updater offers the stable build of its number.
-          if [ "${{ steps.vars.outputs.channel }}" = "Release" ]; then CH=release; else CH=beta; fi
-          echo "channel ${{ steps.vars.outputs.channel }}: CTR_CHANNEL=$CH"
-          CTR_VERSION="${{ steps.vars.outputs.version }}" CTR_CHANNEL=$CH ./build3ds.sh --release
+          # Same as ../zelda-tmc-3ds: betas carry the debug tools (CTR_INTERNAL ON:
+          # Debug tab, full FTP server) for playtesting; stable releases are the
+          # production configuration (CTR_INTERNAL=OFF). The channel is baked into the
+          # binary: a beta shows "X.Y.Z BETA", and its updater offers the stable build.
+          if [ "${{ steps.vars.outputs.channel }}" = "Release" ]; then CH=release; OPT=--release; OUT=build-3ds-release; else CH=beta; OPT=; OUT=build-3ds; fi
+          echo "channel ${{ steps.vars.outputs.channel }}: CTR_CHANNEL=$CH build=$OUT"
+          CTR_VERSION="${{ steps.vars.outputs.version }}" CTR_CHANNEL=$CH ./build3ds.sh $OPT
           V="${{ steps.vars.outputs.version }}"
-          test -f "build-3ds-release/cia/ctr3d-v${V}.cia"
+          test -f "${OUT}/cia/ctr3d-v${V}.cia"
+          mkdir -p dist && cp "${OUT}/cia/ctr3d-v${V}.cia" dist/
 
       - name: Generate release notes and QR code
         run: |
@@ -150,8 +152,8 @@ jobs:
           qrencode -s 10 -o "QR-${TAG}.png" "${BASE}/ctr3d-v${V}.cia"
 
           # CIA only: from the Homebrew Launcher the game does not get the New 3DS'
-          # full memory (owner, 2026-10-11); build3ds.sh still makes a 3DSX locally.
-          cp "build-3ds-release/cia/ctr3d-v${V}.cia" .
+          # full memory; build3ds.sh still makes a 3DSX locally.
+          cp "dist/ctr3d-v${V}.cia" .
 
       - name: Upload build artifacts
         uses: actions/upload-artifact@v4

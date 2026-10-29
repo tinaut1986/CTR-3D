@@ -54,8 +54,10 @@ minor bump; never infer one.
 `.github/workflows/build-release.yml` builds the CIA on any `vX.Y.Z` tag push (and
 on manual dispatch) and publishes a GitHub Release with it and a QR code. No 3DSX:
 from the Homebrew Launcher the game does not get the New 3DS' full memory;
-`build3ds.sh` still makes one locally. Published builds are the production
-configuration (`./build3ds.sh --release`, `CTR_INTERNAL=OFF`). The channel depends
+`build3ds.sh` still makes one locally. As in ../zelda-tmc-3ds, betas carry the debug
+tools (`./build3ds.sh`, `CTR_INTERNAL` on: Debug tab, full FTP server) and stable
+releases are the production configuration (`./build3ds.sh --release`,
+`CTR_INTERNAL=OFF`; FTP only with `dev-ftp.txt`, install-only). The channel depends
 on whether `main` can reach the tagged commit:
 
 | Built from | Channel |
