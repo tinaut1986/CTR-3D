@@ -2196,6 +2196,33 @@ internal int NativeGpu_InTagEnvelope(uintptr_t addr)
 	return (addr >= s_tagEnvelopeLo) && (addr < s_tagEnvelopeHi);
 }
 
+/* The walk's per-node tag flags (s_skyNodeActive and its siblings) for the
+ * node at addr. */
+force_inline void NativeGpu_TagWalkNode(uintptr_t addr)
+{
+	if (NativeGpu_InTagEnvelope(addr))
+	{
+		s_skyNodeActive = NativeGpu_IsSkyPacket(addr) || NativeGpu_IsStarPacket(addr);
+		s_menubdNodeActive = NativeGpu_IsMenuBackdropPacket(addr);
+		s_glowNodeActive = NativeGpu_IsGlowPacket(addr);
+		s_uimapNodeActive = NativeGpu_IsUiMapPacket(addr);
+		s_uifpsNodeActive = NativeGpu_IsUiFpsPacket(addr);
+		s_uipicNodeActive = NativeGpu_IsUiPicPacket(addr);
+		s_hudshineNodeActive = NativeGpu_IsHudShinePacket(addr);
+	}
+	else
+	{
+		/* Outside every tag range (see NativeGpu_InTagEnvelope). */
+		s_skyNodeActive = 0;
+		s_menubdNodeActive = 0;
+		s_glowNodeActive = 0;
+		s_uimapNodeActive = 0;
+		s_uifpsNodeActive = 0;
+		s_uipicNodeActive = 0;
+		s_hudshineNodeActive = 0;
+	}
+}
+
 #endif
 
 internal u16 PacketDepth_ClampWorld(u32 stamp)
@@ -4922,6 +4949,56 @@ internal void OTProf_DryWalk(u8 *basePacket)
 }
 #endif /* CTR_NATIVE_OTWALK_PROFILE */
 
+/* One zero-length node crossed by the walk (the walk's own zero-length branch,
+ * and the empty-slot run after it). */
+force_inline void NativeGpu_WalkCrossEmptyNode(uintptr_t addr)
+{
+	/* Zero-length node: either an OT slot or a len-0 filler
+	 * packet (v1 conflated them; primMem sits contiguous with
+	 * the OT arena, so only the game's own ClearOTag bounds
+	 * discriminate -- measured, [OTZ2]). slotIdx = plain
+	 * array index = the retail otIndex GetProjectedOtIndex
+	 * computes from depth. */
+	s_gpu.otSlotsCrossed++;
+
+	/* Read the SAME latched value the walk's clear used --
+	 * never re-evaluate g_dbg_otzWiden /
+	 * NATIVE_GPU_TRACK_RENDER_ACTIVE live here, see
+	 * otRecorderActive's field comment for why. */
+	if (s_gpu.otRecorderActive)
+	{
+		if ((s_gpu.walkOtBase != 0) && (addr >= s_gpu.walkOtBase) && (addr < s_gpu.walkOtBase + (uintptr_t)s_gpu.walkOtCount * 4u))
+		{
+			u32 slotIdx = (u32)((addr - s_gpu.walkOtBase) >> 2);
+
+			if (slotIdx < OTZ_TABLE_SLOTS)
+			{
+				s_gpu.otBucketOrdinal[slotIdx] = (u16)(s_gpu.emitOrdinal < 0xFFFFu ? s_gpu.emitOrdinal : 0xFFFFu);
+				s_gpu.otSlotsDetected++;
+
+				/* Depth-compose fix: remember which bucket the
+				 * walk is passing through right now, so a later
+				 * content advance (NativeGpu_RecordContentAdvance)
+				 * knows which bucket to attribute itself to.
+				 * Slots are visited in descending order, so
+				 * whichever bucket was crossed most recently is
+				 * simply the current one -- no comparison needed
+				 * here, only at the point that reads it. */
+				s_gpu.otCurrentSlotIdx = slotIdx;
+
+				if (slotIdx > s_gpu.otMaxSlotIdx)
+				{
+					s_gpu.otMaxSlotIdx = slotIdx;
+				}
+			}
+		}
+		else
+		{
+			s_gpu.otSpuriousLen0++;
+		}
+	}
+}
+
 #if defined(CTR_INTERNAL) && defined(__3DS__)
 /*
  * [PARSEPROF] -- where draw_otag_parse_ms goes, per node class, on hardware.
@@ -5198,27 +5275,7 @@ void ParsePrimitivesLinkedList(u32 *p, int singlePrimitive)
 			 * a walk-order guard here counted zero rescues across a full test run
 			 * -- the minimap black box was the sky PASS clobbering the open blend
 			 * run's state memo, fixed in N3DS_DrawSkyPass.) */
-			if (NativeGpu_InTagEnvelope((uintptr_t)basePacket))
-			{
-				s_skyNodeActive = NativeGpu_IsSkyPacket((uintptr_t)basePacket) || NativeGpu_IsStarPacket((uintptr_t)basePacket);
-				s_menubdNodeActive = NativeGpu_IsMenuBackdropPacket((uintptr_t)basePacket);
-				s_glowNodeActive = NativeGpu_IsGlowPacket((uintptr_t)basePacket);
-				s_uimapNodeActive = NativeGpu_IsUiMapPacket((uintptr_t)basePacket);
-				s_uifpsNodeActive = NativeGpu_IsUiFpsPacket((uintptr_t)basePacket);
-				s_uipicNodeActive = NativeGpu_IsUiPicPacket((uintptr_t)basePacket);
-				s_hudshineNodeActive = NativeGpu_IsHudShinePacket((uintptr_t)basePacket);
-			}
-			else
-			{
-				/* Outside every tag range (see NativeGpu_InTagEnvelope). */
-				s_skyNodeActive = 0;
-				s_menubdNodeActive = 0;
-				s_glowNodeActive = 0;
-				s_uimapNodeActive = 0;
-				s_uifpsNodeActive = 0;
-				s_uipicNodeActive = 0;
-				s_hudshineNodeActive = 0;
-			}
+			NativeGpu_TagWalkNode((uintptr_t)basePacket);
 #endif
 			if (tagLength > 0)
 			{
@@ -5310,52 +5367,58 @@ void ParsePrimitivesLinkedList(u32 *p, int singlePrimitive)
 			}
 			else
 			{
-				/* Zero-length node: either an OT slot or a len-0 filler
-				 * packet (v1 conflated them; primMem sits contiguous with
-				 * the OT arena, so only the game's own ClearOTag bounds
-				 * discriminate -- measured, [OTZ2]). slotIdx = plain
-				 * array index = the retail otIndex GetProjectedOtIndex
-				 * computes from depth. */
-				s_gpu.otSlotsCrossed++;
+				NativeGpu_WalkCrossEmptyNode((uintptr_t)basePacket);
 
-				/* Read the SAME latched value the clear above used --
-				 * never re-evaluate g_dbg_otzWiden /
-				 * NATIVE_GPU_TRACK_RENDER_ACTIVE live here, see
-				 * otRecorderActive's field comment for why. */
-				if (s_gpu.otRecorderActive)
+#if !defined(CTR_NATIVE_OTWALK_PROFILE)
+				/*
+				 * Empty-slot run. A 1P frame walks ~1030 OT slots, most of them
+				 * empty and back to back, and each paid a whole generic
+				 * iteration. Following zero-length nodes are crossed here doing
+				 * only what that iteration does that can matter: link
+				 * validation, the cycle guard's count, GTECapture_MarkOTNode
+				 * (the UI-band latch can be entered on an OT slot) and the slot
+				 * crossing itself. The tag flags only matter for a node with
+				 * content, so they are set once, for the node the run stops on
+				 * -- the value the generic loop would have left behind. The
+				 * run stops before any node with content, the OT's end, a bad
+				 * link or the cycle guard, so the walk's tail takes over there
+				 * unchanged. (Off in OTPROF builds, which record every node.)
+				 */
 				{
-					uintptr_t addr = (uintptr_t)basePacket;
+					u32 emptyRun = 0;
 
-					if ((s_gpu.walkOtBase != 0) && (addr >= s_gpu.walkOtBase) && (addr < s_gpu.walkOtBase + (uintptr_t)s_gpu.walkOtCount * 4u))
+					while (!isendprim(basePacket))
 					{
-						u32 slotIdx = (u32)((addr - s_gpu.walkOtBase) >> 2);
+						u8 *next = nextPrim(basePacket);
 
-						if (slotIdx < OTZ_TABLE_SLOTS)
+						if (!NativeGpu_IsValidOTLink((uintptr_t)next) || (getlen(next) != 0) || (otWalkIterations >= 65536))
 						{
-							s_gpu.otBucketOrdinal[slotIdx] = (u16)(s_gpu.emitOrdinal < 0xFFFFu ? s_gpu.emitOrdinal : 0xFFFFu);
-							s_gpu.otSlotsDetected++;
-
-							/* Depth-compose fix: remember which bucket the
-							 * walk is passing through right now, so a later
-							 * content advance (NativeGpu_RecordContentAdvance)
-							 * knows which bucket to attribute itself to.
-							 * Slots are visited in descending order, so
-							 * whichever bucket was crossed most recently is
-							 * simply the current one -- no comparison needed
-							 * here, only at the point that reads it. */
-							s_gpu.otCurrentSlotIdx = slotIdx;
-
-							if (slotIdx > s_gpu.otMaxSlotIdx)
-							{
-								s_gpu.otMaxSlotIdx = slotIdx;
-							}
+							break;
 						}
+						otWalkIterations++;
+#if defined(CTR_NATIVE) && CTR_NATIVE_GTE_CAPTURE
+						GTECapture_MarkOTNode(next);
+#endif
+						basePacket = next;
+						NativeGpu_WalkCrossEmptyNode((uintptr_t)basePacket);
+						emptyRun++;
 					}
-					else
+					if (emptyRun > 0)
 					{
-						s_gpu.otSpuriousLen0++;
+#if defined(CTR_NATIVE) && CTR_NATIVE_GTE_CAPTURE
+						NativeGpu_TagWalkNode((uintptr_t)basePacket);
+#endif
+#if defined(CTR_INTERNAL) && defined(__3DS__)
+						/* This iteration's sample (if any) timed the whole run. */
+						s_parseProf.nodes[PARSEPROF_EMPTY] += emptyRun;
+						if (profSample)
+						{
+							s_parseProf.samples[PARSEPROF_EMPTY] += emptyRun;
+						}
+#endif
 					}
 				}
+#endif
 			}
 
 			GPUDrawSplit *lastSplit = &s_gpu.splits[s_gpu.splitIndex];
