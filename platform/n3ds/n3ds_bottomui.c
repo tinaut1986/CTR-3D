@@ -323,17 +323,20 @@ enum
 {
 	OPT_BTMMAP = 0,
 	OPT_STEREO,
+	OPT_FPSCAP,
 	OPT_CPU804,
 	OPT_SDLOG,
 	OPT_COUNT
 };
 
+/* Five rows of 34 px at a 37 px pitch: the last ends at 216, clear of the
+ * message line at UI_H - 12. */
 static void ui_opt_rect(int i, int *x, int *y, int *w, int *h)
 {
 	*x = 6;
-	*y = CONTENT_Y + 6 + (i * 44);
+	*y = CONTENT_Y + 6 + (i * 37);
 	*w = 308;
-	*h = 40;
+	*h = 34;
 }
 
 #ifdef CTR_INTERNAL
@@ -539,7 +542,10 @@ static void ui_draw_status(void)
 		const float sl = N3DS_StereoSliderState();
 
 		snprintf(c, sizeof(c), "%d.%02d %s", (int)sl, (int)(sl * 100.0f) % 100,
-		         !g_dbg_stereo ? TR("OFF (OPTIONS)", "NO (OPCIONES)") : N3DS_StereoFrameActive() ? "3D" : "2D");
+		         !g_dbg_stereo                     ? TR("OFF (OPTIONS)", "NO (OPCIONES)")
+		         : N3DS_FramePaceStereoSuppressed() ? TR("2D (AUTO, SLOW)", "2D (AUTO, LENTO)")
+		         : N3DS_StereoFrameActive()         ? "3D"
+		                                            : "2D");
 		ui_kv(y, TR("3D SLIDER", "SLIDER 3D"), c, COL_TEXT);
 		y += 17;
 	}
@@ -590,14 +596,40 @@ static void ui_draw_option(int i, const char *label, int on, const char *stateTe
 
 	ui_opt_rect(i, &x, &y, &w, &h);
 	ui_button(x, y, w, h, on ? COL_BTN_ON : COL_BTN_OFF, (i == s_pressBtn));
-	ui_text(x + 10, y + 13, 2, COL_TEXT, label);
-	ui_text(x + w - 10 - ui_text_w(2, stateText), y + 13, 2, COL_TEXT, stateText);
+	ui_text(x + 10, y + 10, 2, COL_TEXT, label);
+	ui_text(x + w - 10 - ui_text_w(2, stateText), y + 10, 2, COL_TEXT, stateText);
+}
+
+/* 3D EFFECT: OFF / ON / AUTO (the Old-3DS default: the right eye yields when it
+ * alone costs the frame its cap, see n3ds_backend.h's frame-pace block). */
+static const char *ui_stereo_text(void)
+{
+	if (g_dbg_stereo == 2)
+	{
+		return N3DS_FramePaceStereoSuppressed() ? TR("AUTO (2D)", "AUTO (2D)") : "AUTO";
+	}
+	return ui_onoff(g_dbg_stereo);
+}
+
+/* FRAME CAP: AUTO shows the cap in force. */
+static const char *ui_fpscap_text(void)
+{
+	if (g_dbg_frameCap == 1)
+	{
+		return "30";
+	}
+	if (g_dbg_frameCap == 2)
+	{
+		return "20";
+	}
+	return (N3DS_FramePaceFlipVBlanks() == 3) ? "AUTO (20)" : "AUTO (30)";
 }
 
 static void ui_draw_options(void)
 {
 	ui_draw_option(OPT_BTMMAP, TR("MINIMAP BELOW", "MAPA ABAJO"), g_dbg_btmMap, ui_onoff(g_dbg_btmMap));
-	ui_draw_option(OPT_STEREO, TR("3D EFFECT", "EFECTO 3D"), g_dbg_stereo, ui_onoff(g_dbg_stereo));
+	ui_draw_option(OPT_STEREO, TR("3D EFFECT", "EFECTO 3D"), g_dbg_stereo, ui_stereo_text());
+	ui_draw_option(OPT_FPSCAP, TR("FRAME CAP", "LIMITE FPS"), 1, ui_fpscap_text());
 	if (s_isNew3DS < 0)
 	{
 		bool n = false;
@@ -616,7 +648,7 @@ static void ui_draw_options(void)
 
 		ui_opt_rect(OPT_CPU804, &x, &y, &w, &h);
 		ui_rect(x, y, w, h, COL_PANEL);
-		ui_text(x + 10, y + 13, 2, COL_LABEL, "OLD 3DS: 268MHZ");
+		ui_text(x + 10, y + 10, 2, COL_LABEL, "OLD 3DS: 268MHZ");
 	}
 	ui_draw_option(OPT_SDLOG, TR("SD LOG", "LOG EN SD"), g_dbg_sdLog, ui_onoff(g_dbg_sdLog));
 	if (s_msg[0] != '\0')
@@ -1104,8 +1136,22 @@ static void ui_press_option(int i)
 		N3DS_ConfigSet("btmmap", g_dbg_btmMap);
 		break;
 	case OPT_STEREO:
-		g_dbg_stereo ^= 1;
+		/* Old 3DS / 2DS (and the simulation): AUTO -> ON -> OFF -> AUTO. A New
+		 * 3DS keeps its two states (a 2 left by the simulation reads as ON). */
+		if (N3DS_FramePaceOldClass())
+		{
+			g_dbg_stereo = (g_dbg_stereo == 2) ? 1 : (g_dbg_stereo == 1) ? 0 : 2;
+		}
+		else
+		{
+			g_dbg_stereo = g_dbg_stereo ? 0 : 1;
+		}
 		N3DS_ConfigSet("stereo", g_dbg_stereo);
+		break;
+	case OPT_FPSCAP:
+		/* AUTO -> 30 -> 20 -> AUTO. */
+		g_dbg_frameCap = (g_dbg_frameCap + 1) % 3;
+		N3DS_ConfigSet("fpscap", g_dbg_frameCap);
 		break;
 	case OPT_CPU804:
 		if (s_isNew3DS > 0)
@@ -1444,6 +1490,17 @@ void N3DS_BottomUi_Frame(const struct N3DS_BottomUiGameInfo *gi)
 		if (N3DS_FtpNotice() != NULL)
 		{
 			s_tab = TAB_UPDATER; /* an upload/install has begun: show where */
+		}
+	}
+	{
+		/* The frame cap and AUTO 3D change on their own (OPTIONS shows both). */
+		static int s_paceSig = -1;
+		const int paceSig = (N3DS_FramePaceFlipVBlanks() * 2) + N3DS_FramePaceStereoSuppressed();
+
+		if (paceSig != s_paceSig)
+		{
+			s_paceSig = paceSig;
+			s_dirty = 1;
 		}
 	}
 	if ((now - s_lastLiveTick) >= liveTicks)

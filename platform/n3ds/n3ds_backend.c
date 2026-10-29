@@ -459,7 +459,15 @@ void N3DS_EarlyInit(void)
 		extern int g_dbg_stereo;
 
 		g_dbg_btmMap = N3DS_ConfigGet("btmmap", g_dbg_btmMap);
+		/* AUTO 3D by default on an Old 3DS / 2DS (and in the simulation): the
+		 * right eye yields when it alone costs the frame its cap. A saved
+		 * choice wins either way. */
+		if (N3DS_FramePaceOldClass())
+		{
+			g_dbg_stereo = 2;
+		}
 		g_dbg_stereo = N3DS_ConfigGet("stereo", g_dbg_stereo);
+		g_dbg_frameCap = N3DS_ConfigGet("fpscap", g_dbg_frameCap);
 	}
 
 	/* FTP: debug builds on by default, production only with dev-ftp.txt (see
@@ -1185,6 +1193,13 @@ static int s_trackDepthWriteState = -1;
  * the other track statics because N3DS_TrackDraw_Begin resets it and sits above
  * the function that uses it. */
 static int s_trackTexturedState = -1;
+/* Track-atlas units bound to texture units 0 and 1 inside the current track
+ * bracket (-1 = unknown; Begin resets both, since the packet path rebinds
+ * unit 0 between brackets). C3D_TexBind marks the unit dirty even when the
+ * texture is the same, which re-emits its configuration on the next draw --
+ * per leaf, and again per leaf in the right eye's replay. */
+static int s_trackBoundUnit0 = -1;
+static int s_trackBoundUnit1 = -1;
 static C3D_AttrInfo s_trackAttrInfo;
 static C3D_BufInfo s_trackBufInfo;
 
@@ -1276,7 +1291,7 @@ static int s_trackDrawActive = 0;
  * shifts RIGHT in the right eye. p = k*(1 - C/d) with k > 0 for the right
  * eye gives exactly that. If hardware disagrees, `stereosep -12` is the A/B.
  */
-int g_dbg_stereo = 1; /* master enable; the slider still gates frame by frame */
+int g_dbg_stereo = 1; /* master enable: 0 off, 1 on, 2 AUTO (Old-3DS default, frame-pace block); the slider still gates frame by frame */
 /*
  * WINDOW MODE: with pop-out allowed, the
  * clamp band turns the near ground into a constant-disparity sheet -- a
@@ -1460,7 +1475,7 @@ static void N3DS_StereoLatchFrame(void)
 	s_stereoEye = 0;
 	s_stereoFrameActive = 0;
 
-	if (g_dbg_stereo && (s_renderTargetRight != NULL))
+	if (g_dbg_stereo && (s_renderTargetRight != NULL) && !N3DS_FramePaceStereoSuppressed())
 	{
 		slider = osGet3DSliderState();
 		if (slider > 0.01f)
@@ -1501,7 +1516,10 @@ static void N3DS_StereoLatchFrame(void)
 	{
 		char msg[96];
 
-		snprintf(msg, sizeof(msg), s_stereoFrameActive ? "[CTR-3DS] stereo: ACTIVE (slider=%d%% sep=%d conv=%d pktdepth=%d)" : "[CTR-3DS] stereo: inactive (slider down)",
+		snprintf(msg, sizeof(msg),
+		         s_stereoFrameActive                ? "[CTR-3DS] stereo: ACTIVE (slider=%d%% sep=%d conv=%d pktdepth=%d)"
+		         : N3DS_FramePaceStereoSuppressed() ? "[CTR-3DS] stereo: inactive (AUTO 3D: right eye off, frame over its cap)"
+		                                            : "[CTR-3DS] stereo: inactive (slider down)",
 		         (int)(slider * 100.0f), (int)s_stereoSep, (int)s_stereoConv, N3DS_StereoPacketDepthActive());
 		N3DS_DebugLog(msg);
 		s_wasActive = s_stereoFrameActive;
@@ -1546,6 +1564,350 @@ void N3DS_StereoRecordVram(int slot, int baseVertex)
 		op->u.pkt.baseVertex = baseVertex;
 		op->u.pkt.vertCount = 6;
 	}
+}
+
+/* ------------------------------------------------ end-of-scene profile --- */
+/* See n3ds_backend.h. Window accumulators in system ticks, folded and reset by
+ * N3DS_EndProfFormat from the [PERF] window report (same thread as every
+ * mark: the no-worker path is the one this exists for; with the render worker
+ * the EndScene marks land on core 2 and a torn read costs one frame of 64). */
+static unsigned long long s_rightEyeLastTicks; /* every build: the stereo policy reads it */
+
+unsigned long long N3DS_StereoLastRightEyeTicks(void)
+{
+	return s_rightEyeLastTicks;
+}
+
+/* ----------------------------------------------------------- frame pace --- */
+/*
+ * See n3ds_backend.h's frame-pace block. Everything here runs on the game
+ * thread, once per flip, from Platform_FlipVBlanks (RenderSubmit): no locks.
+ *
+ * AUTO cap (Old-3DS class only), decided per window of N3DS_PACE_WINDOW
+ * flips:
+ *   30 -> 20 when N3DS_PACE_MISS_DOWN or more frames of the window missed the
+ *            2-vblank budget (each such frame is shown for 3 vblanks next to
+ *            2-vblank neighbours: the judder the cap exists to remove);
+ *   20 -> 30 when N3DS_PACE_UP_WINDOWS windows in a row had at most one frame
+ *            over N3DS_PACE_UP_US (2 vblanks minus a 4 ms margin).
+ * After any change the next N3DS_PACE_DWELL windows decide nothing, so the
+ * two thresholds cannot chase each other. Frames over N3DS_PACE_IGNORE_US are
+ * loads or stalls, not a frame rate, and are not counted.
+ *
+ * AUTO stereo (g_dbg_stereo == 2, Old-3DS class only), after the cap decision,
+ * against the slowest cap the option allows (3 vblanks unless the player forced
+ * 30: 3D at 20 beats 2D at 30, the slider is up): the right eye goes off when
+ * the window missed that budget N3DS_PACE_MISS_DOWN times or more but its
+ * average frame minus
+ * the average right-eye cost would fit with N3DS_PACE_ST_MARGIN_US to spare;
+ * it comes back when, N3DS_PACE_UP_WINDOWS windows in a row, the average
+ * frame plus the last measured right-eye cost fits with the same margin. The
+ * slider still gates frame by frame; a window without stereo frames (slider
+ * down) decides nothing about stereo.
+ */
+#define N3DS_PACE_WINDOW         32
+#define N3DS_PACE_MISS_DOWN      8
+#define N3DS_PACE_UP_WINDOWS     2
+#define N3DS_PACE_DWELL          2
+#define N3DS_PACE_VBLANK_US      16667u
+#define N3DS_PACE_UP_US          (2u * N3DS_PACE_VBLANK_US - 4000u)
+#define N3DS_PACE_IGNORE_US      250000u
+#define N3DS_PACE_ST_MARGIN_US   3000u
+
+int g_dbg_frameCap = 0;
+
+static int s_paceOldClass = -1;   /* lazily: APT_CheckNew3DS and the simulation */
+static int s_paceVbl = 2;         /* the AUTO cap's current flip interval */
+static int s_paceStereoOff = 0;   /* AUTO stereo dropped the right eye */
+static unsigned s_paceWinN;
+static unsigned s_paceWinOver2; /* frames over 2 vblanks (33.3 ms) */
+static unsigned s_paceWinOver3; /* frames over 3 vblanks (50 ms) */
+static unsigned s_paceWinOverUp;
+static unsigned long long s_paceWinWorkUs;
+static unsigned s_paceWinStereoN;
+static unsigned long long s_paceWinRightUs;
+static unsigned s_paceRightLastUs; /* average right-eye cost of the last stereo window */
+static int s_paceUpStreak;
+static int s_paceStereoUpStreak;
+static int s_paceDwell;
+/* [PACE] report window (the [PERF] cadence), separate from the decision window. */
+static unsigned s_paceRepN;
+static unsigned s_paceRepMiss;
+static unsigned s_paceRepMaxUs;
+static unsigned long long s_paceRepWorkUs;
+static unsigned s_paceRepChanges;
+
+int N3DS_FramePaceOldClass(void)
+{
+	if (s_paceOldClass < 0)
+	{
+		bool isNew3DS = false;
+
+		APT_CheckNew3DS(&isNew3DS);
+		s_paceOldClass = isNew3DS ? 0 : 1;
+	}
+	/* The simulation can be switched on from the DEBUG tab mid-run, so it is
+	 * read live; the console model cannot change. */
+	return s_paceOldClass || (s_o3dsSim != 0);
+}
+
+int N3DS_FramePaceFlipVBlanks(void)
+{
+	if (g_dbg_frameCap == 1)
+	{
+		return 2;
+	}
+	if (g_dbg_frameCap == 2)
+	{
+		return 3;
+	}
+	return N3DS_FramePaceOldClass() ? s_paceVbl : 2;
+}
+
+int N3DS_FramePaceStereoSuppressed(void)
+{
+	return (g_dbg_stereo == 2) && s_paceStereoOff && N3DS_FramePaceOldClass();
+}
+
+static void N3DS_FramePaceDecide(void)
+{
+	const int oldClass = N3DS_FramePaceOldClass();
+	const unsigned avgWork = (s_paceWinN != 0) ? (unsigned)(s_paceWinWorkUs / s_paceWinN) : 0;
+	char msg[160];
+
+	if (!oldClass)
+	{
+		s_paceVbl = 2;
+		s_paceStereoOff = 0;
+		return;
+	}
+	if (s_paceDwell > 0)
+	{
+		s_paceDwell--;
+		return;
+	}
+
+	if (g_dbg_frameCap == 0)
+	{
+		if ((s_paceVbl == 2) && (s_paceWinOver2 >= N3DS_PACE_MISS_DOWN))
+		{
+			s_paceVbl = 3;
+			s_paceUpStreak = 0;
+			s_paceDwell = N3DS_PACE_DWELL;
+			s_paceRepChanges++;
+			snprintf(msg, sizeof(msg), "[PACE] auto cap 30 -> 20 fps (%u/%u frames over 2 vblanks, avg work %u us)", s_paceWinOver2, s_paceWinN, avgWork);
+			N3DS_DebugLog(msg);
+			return;
+		}
+		if (s_paceVbl == 3)
+		{
+			s_paceUpStreak = (s_paceWinOverUp <= 1) ? (s_paceUpStreak + 1) : 0;
+			if (s_paceUpStreak >= N3DS_PACE_UP_WINDOWS)
+			{
+				s_paceVbl = 2;
+				s_paceUpStreak = 0;
+				s_paceDwell = N3DS_PACE_DWELL;
+				s_paceRepChanges++;
+				snprintf(msg, sizeof(msg), "[PACE] auto cap 20 -> 30 fps (avg work %u us, %u frames over %u us)", avgWork, s_paceWinOverUp, N3DS_PACE_UP_US);
+				N3DS_DebugLog(msg);
+				return;
+			}
+		}
+	}
+
+	if (g_dbg_stereo != 2)
+	{
+		s_paceStereoOff = 0;
+		return;
+	}
+	{
+		/* The budget 3D is held to: the slowest cap AUTO would pick (3D at 20
+		 * beats 2D at 30 -- the player raised the slider), or the forced one. */
+		const int stVbl = (g_dbg_frameCap == 1) ? 2 : 3;
+		const unsigned budget = (unsigned)stVbl * N3DS_PACE_VBLANK_US;
+		const unsigned over = (stVbl == 2) ? s_paceWinOver2 : s_paceWinOver3;
+
+		if (!s_paceStereoOff && (s_paceWinStereoN * 2 >= s_paceWinN) && (s_paceWinStereoN != 0))
+		{
+			const unsigned avgRight = (unsigned)(s_paceWinRightUs / s_paceWinStereoN);
+
+			s_paceRightLastUs = avgRight;
+			if ((over >= N3DS_PACE_MISS_DOWN) && ((avgWork - ((avgRight < avgWork) ? avgRight : avgWork)) + N3DS_PACE_ST_MARGIN_US <= budget))
+			{
+				s_paceStereoOff = 1;
+				s_paceStereoUpStreak = 0;
+				s_paceDwell = N3DS_PACE_DWELL;
+				s_paceRepChanges++;
+				snprintf(msg, sizeof(msg), "[PACE] auto 3D: right eye OFF (%u/%u frames over %u us, avg work %u us, right eye %u us)", over, s_paceWinN,
+				         budget, avgWork, avgRight);
+				N3DS_DebugLog(msg);
+			}
+		}
+		else if (s_paceStereoOff)
+		{
+			s_paceStereoUpStreak = ((avgWork + s_paceRightLastUs + N3DS_PACE_ST_MARGIN_US) <= budget) ? (s_paceStereoUpStreak + 1) : 0;
+			if (s_paceStereoUpStreak >= N3DS_PACE_UP_WINDOWS)
+			{
+				s_paceStereoOff = 0;
+				s_paceStereoUpStreak = 0;
+				s_paceDwell = N3DS_PACE_DWELL;
+				s_paceRepChanges++;
+				snprintf(msg, sizeof(msg), "[PACE] auto 3D: right eye back ON (avg work %u us + right eye %u us fits %u us)", avgWork, s_paceRightLastUs,
+				         budget);
+				N3DS_DebugLog(msg);
+			}
+		}
+	}
+}
+
+void N3DS_FramePaceNoteFrame(unsigned workUs)
+{
+	const unsigned vbl = (unsigned)N3DS_FramePaceFlipVBlanks();
+	const unsigned rightUs = (unsigned)((s_rightEyeLastTicks * 1000000ull) / (unsigned long long)SYSCLOCK_ARM11);
+
+	if (workUs > N3DS_PACE_IGNORE_US)
+	{
+		return;
+	}
+
+	s_paceWinN++;
+	s_paceWinWorkUs += workUs;
+	if (workUs > (2u * N3DS_PACE_VBLANK_US))
+	{
+		s_paceWinOver2++;
+	}
+	if (workUs > (3u * N3DS_PACE_VBLANK_US))
+	{
+		s_paceWinOver3++;
+	}
+	if (workUs > N3DS_PACE_UP_US)
+	{
+		s_paceWinOverUp++;
+	}
+	if (s_rightEyeLastTicks != 0)
+	{
+		s_paceWinStereoN++;
+		s_paceWinRightUs += rightUs;
+	}
+
+	s_paceRepN++;
+	s_paceRepWorkUs += workUs;
+	s_paceRepMiss += (workUs > (vbl * N3DS_PACE_VBLANK_US)) ? 1u : 0u;
+	if (workUs > s_paceRepMaxUs)
+	{
+		s_paceRepMaxUs = workUs;
+	}
+
+	if (s_paceWinN >= N3DS_PACE_WINDOW)
+	{
+		N3DS_FramePaceDecide();
+		s_paceWinN = 0;
+		s_paceWinOver2 = 0;
+		s_paceWinOver3 = 0;
+		s_paceWinOverUp = 0;
+		s_paceWinWorkUs = 0;
+		s_paceWinStereoN = 0;
+		s_paceWinRightUs = 0;
+	}
+}
+
+void N3DS_FramePaceFormat(char *out, int outSize)
+{
+	const unsigned n = (s_paceRepN != 0) ? s_paceRepN : 1;
+
+	/* cap = the flip interval in force (fps), mode = the option, miss = frames
+	 * of the window over the cap's budget, 3d = the stereo option and whether
+	 * AUTO has the right eye off, rEye = last stereo window's right-eye cost. */
+	snprintf(out, (size_t)outSize, "[PACE] cap=%d mode=%s old=%d frames=%u avgWorkUs=%u maxWorkUs=%u miss=%u changes=%u 3d=%s%s rEyeUs=%u",
+	         60 / N3DS_FramePaceFlipVBlanks(), (g_dbg_frameCap == 1) ? "30" : (g_dbg_frameCap == 2) ? "20" : "auto", N3DS_FramePaceOldClass(),
+	         s_paceRepN, (unsigned)(s_paceRepWorkUs / n), s_paceRepMaxUs, s_paceRepMiss, s_paceRepChanges,
+	         (g_dbg_stereo == 0) ? "off" : (g_dbg_stereo == 2) ? "auto" : "on", N3DS_FramePaceStereoSuppressed() ? "(2D)" : "", s_paceRightLastUs);
+	s_paceRepN = 0;
+	s_paceRepMiss = 0;
+	s_paceRepMaxUs = 0;
+	s_paceRepWorkUs = 0;
+	s_paceRepChanges = 0;
+}
+
+#ifdef CTR_INTERNAL
+static unsigned long long s_endProfTicks[N3DS_ENDPROF_PHASES];
+static unsigned s_endProfFrames;
+static unsigned s_endProfStereoFrames;
+/* Journal shape, summed over the window's stereo frames: what the right eye
+ * replays per frame, by op kind (index = N3DS_STEREO_OP_*). */
+static unsigned s_endProfOps[N3DS_STEREO_OP_MODEL_END + 1];
+static unsigned s_endProfOverflows;
+#endif
+
+unsigned long long N3DS_EndProfNow(void)
+{
+#ifdef CTR_INTERNAL
+	return (unsigned long long)svcGetSystemTick();
+#else
+	return 0;
+#endif
+}
+
+unsigned long long N3DS_EndProfMark(int phase, unsigned long long since)
+{
+#ifdef CTR_INTERNAL
+	const unsigned long long now = (unsigned long long)svcGetSystemTick();
+
+	if ((phase >= 0) && (phase < N3DS_ENDPROF_PHASES))
+	{
+		s_endProfTicks[phase] += now - since;
+	}
+	if (phase == N3DS_ENDPROF_FRAMEEND)
+	{
+		s_endProfFrames++; /* the chain's last mark: one per EndScene */
+	}
+	return now;
+#else
+	(void)phase;
+	(void)since;
+	return 0;
+#endif
+}
+
+void N3DS_EndProfFormat(char *out, int outSize)
+{
+#ifdef CTR_INTERNAL
+	const unsigned n = (s_endProfFrames != 0) ? s_endProfFrames : 1;
+	const unsigned st = (s_endProfStereoFrames != 0) ? s_endProfStereoFrames : 1;
+	unsigned us[N3DS_ENDPROF_PHASES];
+	unsigned sum = 0;
+	int i;
+
+	for (i = 0; i < N3DS_ENDPROF_PHASES; i++)
+	{
+		us[i] = (unsigned)((s_endProfTicks[i] * 1000000ull) / ((unsigned long long)SYSCLOCK_ARM11 * n));
+		if ((i != N3DS_ENDPROF_BEGIN) && (i != N3DS_ENDPROF_FLUSH))
+		{
+			sum += us[i];
+		}
+	}
+	/* avg us per frame; rEyeSt = per STEREO frame; ops per stereo frame. */
+	snprintf(out, (size_t)outSize,
+	         "[ENDPROF] frames=%u st=%u sum=%u sky=%u trk=%u mrg=%u ui=%u mdl=%u smk=%u oth=%u rEye=%u btm=%u fend=%u flush=%u | begin=%u | "
+	         "rEyeSt=%u ops/f pkt=%u vram=%u leaf=%u run=%u inst=%u brk=%u ovf=%u",
+	         s_endProfFrames, s_endProfStereoFrames, sum, us[N3DS_ENDPROF_SKY], us[N3DS_ENDPROF_TRACK], us[N3DS_ENDPROF_MERGE], us[N3DS_ENDPROF_UI],
+	         us[N3DS_ENDPROF_MODEL], us[N3DS_ENDPROF_SMOKE], us[N3DS_ENDPROF_OTHER], us[N3DS_ENDPROF_RIGHT], us[N3DS_ENDPROF_BOTTOM],
+	         us[N3DS_ENDPROF_FRAMEEND], us[N3DS_ENDPROF_FLUSH], us[N3DS_ENDPROF_BEGIN],
+	         (unsigned)((s_endProfTicks[N3DS_ENDPROF_RIGHT] * 1000000ull) / ((unsigned long long)SYSCLOCK_ARM11 * st)),
+	         s_endProfOps[N3DS_STEREO_OP_PKT] / st, s_endProfOps[N3DS_STEREO_OP_VRAM] / st, s_endProfOps[N3DS_STEREO_OP_TRACK_LEAF] / st,
+	         s_endProfOps[N3DS_STEREO_OP_MODEL_RUN] / st, s_endProfOps[N3DS_STEREO_OP_MODEL_INSTANCE] / st,
+	         (s_endProfOps[N3DS_STEREO_OP_TRACK_BEGIN] + s_endProfOps[N3DS_STEREO_OP_MODEL_BEGIN]) / st, s_endProfOverflows);
+	memset(s_endProfTicks, 0, sizeof(s_endProfTicks));
+	memset(s_endProfOps, 0, sizeof(s_endProfOps));
+	s_endProfFrames = 0;
+	s_endProfStereoFrames = 0;
+	s_endProfOverflows = 0;
+#else
+	if (outSize > 0)
+	{
+		out[0] = '\0';
+	}
+#endif
 }
 
 /* Top-screen widescreen mode. 0 = off (4:3 pillarbox crop).
@@ -2514,6 +2876,23 @@ static int N3DS_NextPktBias(int cur)
  */
 int g_dbg_frameSync = 0;
 
+/*
+ * What C3D_FrameEnd flushes from the CPU's data cache before the GPU reads the
+ * frame. 0 (default): C3D_FrameEnd(0), i.e. citro3d's GSPGPU_FlushDataCache
+ * over the WHOLE linear heap (32 MiB on an Old 3DS, 88 MiB on a New 3DS) every
+ * frame. 1: only what the CPU wrote for this frame and nobody flushed yet --
+ * the vertex range [0, s_vertexCursor) -- plus GX_CMDLIST_FLUSH, which has
+ * GSP flush the command list itself. Every other CPU write the GPU reads
+ * flushes at its own site: decoded cells and track-atlas rects
+ * (N3DS_C3DUploadTileBlock), the track geometry block and its per-frame
+ * patches, the VRAM-display chunks, the bottom-UI texture. dumpreq
+ * `c3dflush [N]`; [ENDPROF] `fend` is the whole FrameEnd and `flush` the
+ * range flush of mode 1. Off by default until hardware says the range flush
+ * is the cheaper one (the kernel may well clean the whole L1 for a range that
+ * large, which would make mode 0 the cheap one).
+ */
+int g_dbg_c3dFlush = 0;
+
 /* Nonzero between a successful C3D_FrameBegin and C3D_FrameEnd. citro3d
  * points libctru's GPU command buffer at NULL once a frame ends, so ANY draw
  * or state change issued outside the bracket is a svcBreak (GPUCMD_Add's
@@ -2546,6 +2925,8 @@ void N3DS_C3DBeginFrame(void)
 	 * cleared, which parallax the left eye's own uniforms carry, and whether
 	 * the draw journal records. Pure CPU, so it sits ahead of the SYNCDRAW
 	 * wait rather than inside the frame bracket. */
+	const unsigned long long endProfT = N3DS_EndProfNow();
+
 	N3DS_StereoLatchFrame();
 
 	N3DS_FrameTrace("[CTR-3DS] FrameBegin: enter (SYNCDRAW wait)");
@@ -2639,6 +3020,7 @@ void N3DS_C3DBeginFrame(void)
 	 * fresh offset (see the header comment on N3DS_C3DAppendVertices) --
 	 * reset the write cursor once per frame, not per draw. */
 	s_vertexCursor = 0;
+	(void)N3DS_EndProfMark(N3DS_ENDPROF_BEGIN, endProfT);
 }
 
 /* GPU-time window accumulator (see n3ds_backend.h). Written on whichever
@@ -2664,7 +3046,21 @@ void N3DS_C3DEndFrame(void)
 	N3DS_FrameTrace("[CTR-3DS] FrameEnd: enter (submit)");
 	N3DS_BeatMark(beatThread, N3DS_BEAT_WHERE_FRAMEEND);
 	s_frameOpen = 0;
-	C3D_FrameEnd(0);
+	if (g_dbg_c3dFlush && (s_vertexBufferMem != NULL))
+	{
+		const unsigned long long flushT = N3DS_EndProfNow();
+
+		if (s_vertexCursor > 0)
+		{
+			GSPGPU_FlushDataCache(s_vertexBufferMem, (u32)((size_t)s_vertexCursor * sizeof(N3DS_Vertex)));
+		}
+		(void)N3DS_EndProfMark(N3DS_ENDPROF_FLUSH, flushT);
+		C3D_FrameEnd(GX_CMDLIST_FLUSH);
+	}
+	else
+	{
+		C3D_FrameEnd(0);
+	}
 	N3DS_BeatMark(beatThread, N3DS_BEAT_WHERE_OK);
 	N3DS_FrameTrace("[CTR-3DS] FrameEnd: returned");
 
@@ -2711,6 +3107,27 @@ int N3DS_C3DAppendVertices(const N3DS_Vertex *vertices, int count)
 	}
 
 	return base;
+}
+
+N3DS_Vertex *N3DS_C3DReserveVertices(int count, int *baseOut)
+{
+	int base;
+
+	if ((count <= 0) || ((s_vertexCursor + count) > N3DS_MAX_FRAME_VERTICES))
+	{
+		*baseOut = -1;
+		return NULL;
+	}
+
+	base = s_vertexCursor;
+	s_vertexCursor += count;
+	if (s_vertexHighWater < s_vertexCursor)
+	{
+		s_vertexHighWater = s_vertexCursor;
+	}
+
+	*baseOut = base;
+	return (N3DS_Vertex *)s_vertexBufferMem + base;
 }
 
 int N3DS_C3DFrameVertexHighWater(void)
@@ -3100,6 +3517,10 @@ int N3DS_TrackGeom_Upload(const void *verts, int vertCount, int vertStride, cons
 
 	memcpy(block, verts, vertBytes);
 	memcpy(block + indexOffset, indices, (size_t)indexCount * sizeof(u16));
+	/* Once per level load. Covered by C3D_FrameEnd(0)'s whole-heap flush
+	 * anyway; required under `c3dflush 1`, which flushes only the frame's
+	 * vertex range. */
+	GSPGPU_FlushDataCache(block, (u32)totalBytes);
 
 	s_trackGeomMem = block;
 	s_trackIndexPtr = block + indexOffset;
@@ -3503,6 +3924,8 @@ void N3DS_TrackDraw_Begin(const float *qx, const float *qy, const float *qw, flo
 	/* The packet path owns texenv 0 between track frames, so whatever
 	 * N3DS_TrackDraw_SetTextured last recorded is stale by now. */
 	s_trackTexturedState = 0;
+	s_trackBoundUnit0 = -1;
+	s_trackBoundUnit1 = -1;
 
 	s_trackDrawActive = 1;
 }
@@ -3622,10 +4045,15 @@ void N3DS_TrackDraw_Leaf(int firstIndex, int indexCount, float otIndexLo, float 
 		 * bilinear off, mode 1 is the nearest single-sample path unchanged. */
 		int split = g_dbg_trackBilinear && (blend == 3);
 
-		N3DS_TrackAtlas_Bind(atlasBin);
-		if (split)
+		if (s_trackBoundUnit0 != atlasBin)
+		{
+			N3DS_TrackAtlas_Bind(atlasBin);
+			s_trackBoundUnit0 = atlasBin;
+		}
+		if (split && (s_trackBoundUnit1 != atlasBin))
 		{
 			N3DS_TrackAtlas_BindNearestView(atlasBin);
+			s_trackBoundUnit1 = atlasBin;
 		}
 		N3DS_TrackDraw_SetTextured(split ? 2 : 1);
 	}
@@ -4318,11 +4746,19 @@ void N3DS_StereoRenderRightEye(void)
 	int i;
 	int lastDoubling = -1;
 	int lastDepthWrite = 1;
+	/* Atlas bound to texture unit 0 by the previous packet op; -1 after
+	 * anything else binds it (VRAM quads, track/model brackets). Consecutive
+	 * merge emits often share an atlas, and C3D_TexBind dirties the unit even
+	 * for the same texture. */
+	int lastAtlas = -1;
+	unsigned long long rightT0;
 
+	s_rightEyeLastTicks = 0;
 	if (!s_stereoFrameActive || (s_renderTargetRight == NULL) || !s_frameOpen)
 	{
 		return;
 	}
+	rightT0 = (unsigned long long)svcGetSystemTick();
 
 	s_stereoRecording = 0;
 	s_stereoEye = 1;
@@ -4357,10 +4793,20 @@ void N3DS_StereoRenderRightEye(void)
 		}
 	}
 
+#ifdef CTR_INTERNAL
+	s_endProfStereoFrames++;
+	s_endProfOverflows += (unsigned)s_stereoOverflow;
+#endif
 	for (i = 0; i < s_stereoOpCount; i++)
 	{
 		const N3DS_StereoOp *op = &s_stereoOps[i];
 
+#ifdef CTR_INTERNAL
+		if (op->kind <= N3DS_STEREO_OP_MODEL_END)
+		{
+			s_endProfOps[op->kind]++;
+		}
+#endif
 		switch (op->kind)
 		{
 		case N3DS_STEREO_OP_PKT:
@@ -4376,7 +4822,11 @@ void N3DS_StereoRenderRightEye(void)
 				lastDepthWrite = (int)op->u.pkt.depthWrite;
 			}
 			N3DS_C3DSetBlendMode((int)op->u.pkt.blend);
-			N3DS_C3DBindAtlas((int)op->u.pkt.atlas);
+			if ((int)op->u.pkt.atlas != lastAtlas)
+			{
+				N3DS_C3DBindAtlas((int)op->u.pkt.atlas);
+				lastAtlas = (int)op->u.pkt.atlas;
+			}
 			C3D_DrawArrays(GPU_TRIANGLES, op->u.pkt.baseVertex, op->u.pkt.vertCount);
 			break;
 		}
@@ -4392,6 +4842,7 @@ void N3DS_StereoRenderRightEye(void)
 				lastDoubling = 0;
 			}
 			N3DS_C3DBindVramDisplayTex((int)op->u.pkt.atlas);
+			lastAtlas = -1;
 			C3D_DrawArrays(GPU_TRIANGLES, op->u.pkt.baseVertex, op->u.pkt.vertCount);
 			break;
 		}
@@ -4399,6 +4850,7 @@ void N3DS_StereoRenderRightEye(void)
 		{
 			N3DS_TrackDraw_Begin(op->u.mtx.qx, op->u.mtx.qy, op->u.mtx.qw, op->u.mtx.h);
 			lastDoubling = -1; /* the bracket owns doubling/blend/depth-write */
+			lastAtlas = -1;    /* ... and texture unit 0 */
 			break;
 		}
 		case N3DS_STEREO_OP_TRACK_LEAF:
@@ -4418,6 +4870,7 @@ void N3DS_StereoRenderRightEye(void)
 		{
 			N3DS_ModelDraw_Begin();
 			lastDoubling = -1;
+			lastAtlas = -1;
 			break;
 		}
 		case N3DS_STEREO_OP_MODEL_INSTANCE:
@@ -4458,6 +4911,7 @@ void N3DS_StereoRenderRightEye(void)
 
 	/* s_stereoEye stays 1 until the next frame's latch resets it -- nothing
 	 * else draws between here and N3DS_C3DEndFrame. */
+	s_rightEyeLastTicks = (unsigned long long)svcGetSystemTick() - rightT0;
 }
 
 /* Depth-WRITE only; the test itself stays LEQUAL so translucent content is
@@ -4518,6 +4972,10 @@ void N3DS_C3DUploadVramDisplayChunk(int slotIndex, const void *tiled256)
 	}
 
 	C3D_TexUpload(&s_vramDisplayTex[slotIndex], tiled256);
+	/* C3D_TexUpload is a plain memcpy into linear memory. Covered by
+	 * C3D_FrameEnd(0)'s whole-heap flush anyway; required under
+	 * `c3dflush 1` (see g_dbg_c3dFlush). */
+	GSPGPU_FlushDataCache(s_vramDisplayTex[slotIndex].data, s_vramDisplayTex[slotIndex].size);
 }
 
 void N3DS_C3DBindVramDisplayTex(int slotIndex)
@@ -4681,6 +5139,10 @@ unsigned int N3DS_ReadButtons(void)
 	 *   vol [N]     -- output-stage gain, percent of SPU-faithful amplitude
 	 *                  (retail's 0x3fff master is half digital scale, so 200
 	 *                  = full scale and the default). Bare resets to default.
+	 *   c3dflush [N] -- frame-end cache flush (default 0): 0 = citro3d's
+	 *                  flush of the whole linear heap, 1 = only this frame's
+	 *                  vertex range plus GX_CMDLIST_FLUSH. Bare token toggles.
+	 *                  [ENDPROF] fend/flush price the two.
 	 *   gxguard [N] -- bounded C3D_FrameBegin with stall-recovery logging
 	 *                  (Rosalina-freeze hardening, default ON). Bare token
 	 *                  toggles, N sets 0/1. OFF calls libctru's C3D_FrameBegin
@@ -4847,6 +5309,19 @@ unsigned int N3DS_ReadButtons(void)
 					g_dbg_frameSync ^= 1;
 					N3DS_DebugLog(g_dbg_frameSync ? "[CTR-3DS] framesync: ON (FrameBegin waits for hw vblank)"
 					                              : "[CTR-3DS] framesync: OFF (begin immediately)");
+				}
+				else if (strncmp(word, "c3dflush", 8) == 0)
+				{
+					if (word[8] == ' ')
+					{
+						g_dbg_c3dFlush = (atoi(&word[9]) != 0) ? 1 : 0;
+					}
+					else
+					{
+						g_dbg_c3dFlush = !g_dbg_c3dFlush;
+					}
+					N3DS_DebugLog(g_dbg_c3dFlush ? "[CTR-3DS] c3dflush: 1 (frame vertex range + command list only)"
+					                             : "[CTR-3DS] c3dflush: 0 (citro3d flushes the whole linear heap)");
 				}
 				else if (strncmp(word, "gxguard", 7) == 0)
 				{
@@ -5755,7 +6230,8 @@ unsigned int N3DS_ReadButtons(void)
 				}
 				else if (strncmp(word, "stereo", 6) == 0)
 				{
-					g_dbg_stereo ^= 1;
+					/* Not ^= 1: 2 is AUTO (the Old-3DS default), see the frame-pace block. */
+					g_dbg_stereo = g_dbg_stereo ? 0 : 1;
 					N3DS_DebugLog(g_dbg_stereo ? "[CTR-3DS] stereo: enabled (slider gates per frame)" : "[CTR-3DS] stereo: FORCED OFF");
 				}
 				else if (strncmp(word, "depthtest", 9) == 0)

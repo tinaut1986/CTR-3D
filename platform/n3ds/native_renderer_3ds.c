@@ -4441,10 +4441,16 @@ void NativeRenderer_BeginScene(void)
 
 void NativeRenderer_EndScene(void)
 {
+	/* [ENDPROF] chain (n3ds_backend.h): each mark closes one phase and opens
+	 * the next, so the phases tile EndScene exactly. 0 and no-ops in a
+	 * production build. */
+	unsigned long long endProfT;
+
 	if (!s_rendererInitialised)
 	{
 		return;
 	}
+	endProfT = N3DS_EndProfNow();
 
 	/*
 	 * Draw the skybox FIRST -- before the resident track pass and before the
@@ -4463,6 +4469,7 @@ void NativeRenderer_EndScene(void)
 		N3DS_DrawBackdropPass();
 		N3DS_DrawSkyPass();
 	}
+	endProfT = N3DS_EndProfMark(N3DS_ENDPROF_SKY, endProfT);
 
 #if defined(CTR_NATIVE_TRACK_RENDERER) && CTR_NATIVE_TRACK_RENDERER
 	/*
@@ -4500,6 +4507,7 @@ void NativeRenderer_EndScene(void)
 		NativePerf_BeginScope(NATIVE_PERF_BUCKET_NATIVE_TRACK_DRAW);
 		NativeTrackDraw_IssueForWalk();
 		NativePerf_EndScope(NATIVE_PERF_BUCKET_NATIVE_TRACK_DRAW);
+		endProfT = N3DS_EndProfMark(N3DS_ENDPROF_TRACK, endProfT);
 
 		/* NativeTrackDraw_IssueForWalk's own N3DS_TrackDraw_End (called once
 		 * per leaf-draw bracket, even when zero leaves drew) already restored
@@ -4528,12 +4536,14 @@ void NativeRenderer_EndScene(void)
 	NativePerf_BeginScope(NATIVE_PERF_BUCKET_MERGE_FLUSH);
 	N3DS_MergeFlush();
 	NativePerf_EndScope(NATIVE_PERF_BUCKET_MERGE_FLUSH);
+	endProfT = N3DS_EndProfMark(N3DS_ENDPROF_MERGE, endProfT);
 
 	/* Bisect ('uilast' off): draw the UI pass HERE, in the slot UI occupied
 	 * when it still lived in the merge bins, instead of last. See g_dbg_uiLast. */
 	if (!g_dbg_uiLast)
 	{
 		N3DS_DrawUiPass();
+		endProfT = N3DS_EndProfMark(N3DS_ENDPROF_UI, endProfT);
 	}
 
 #if defined(CTR_NATIVE_MODEL_RENDERER) && CTR_NATIVE_MODEL_RENDERER
@@ -4563,6 +4573,7 @@ void NativeRenderer_EndScene(void)
 		NativePerf_EndScope(NATIVE_PERF_BUCKET_NATIVE_MODEL_DRAW);
 		s_texdecFrameMdlTicks += N3DS_GetTickCount() - texdecMdlT0;
 	}
+	endProfT = N3DS_EndProfMark(N3DS_ENDPROF_MODEL, endProfT);
 #endif
 
 #if defined(CTR_NATIVE_TRACK_RENDERER) && CTR_NATIVE_TRACK_RENDERER
@@ -4574,6 +4585,7 @@ void NativeRenderer_EndScene(void)
 		NativePerf_BeginScope(NATIVE_PERF_BUCKET_NATIVE_TRACK_DRAW);
 		NativeTrackDraw_IssueForWalk();
 		NativePerf_EndScope(NATIVE_PERF_BUCKET_NATIVE_TRACK_DRAW);
+		endProfT = N3DS_EndProfMark(N3DS_ENDPROF_TRACK, endProfT);
 	}
 #endif
 
@@ -4603,6 +4615,7 @@ void NativeRenderer_EndScene(void)
 		s_mergeDepthWriteState = -1;
 		N3DS_MergeFlush();
 	}
+	endProfT = N3DS_EndProfMark(N3DS_ENDPROF_SMOKE, endProfT);
 #endif
 
 	/*
@@ -4616,6 +4629,7 @@ void NativeRenderer_EndScene(void)
 	if (g_dbg_uiLast)
 	{
 		N3DS_DrawUiPass();
+		endProfT = N3DS_EndProfMark(N3DS_ENDPROF_UI, endProfT);
 	}
 
 #ifdef CTR_INTERNAL
@@ -4693,16 +4707,19 @@ void NativeRenderer_EndScene(void)
 	 * holding its last stereo frame while that diagnostic combo is active --
 	 * defined, visible-as-what-it-is, and gone the moment merge is back on.
 	 */
+	endProfT = N3DS_EndProfMark(N3DS_ENDPROF_OTHER, endProfT); /* the atlas inspector */
 	if (s_mergeActive)
 	{
 		N3DS_StereoRenderRightEye();
 	}
+	endProfT = N3DS_EndProfMark(N3DS_ENDPROF_RIGHT, endProfT);
 
 	/* Bottom-screen minimap, LAST of all: after the right-eye replay so its
 	 * target/state switches can never leak into the journaled eyes, before
 	 * FrameEnd so its draws join this frame's command list. Self-guarding --
 	 * drains its own state even when there is nothing to draw. */
 	N3DS_DrawBottomMapPass();
+	endProfT = N3DS_EndProfMark(N3DS_ENDPROF_BOTTOM, endProfT);
 
 	s_endSceneCount++;
 	// C3D_FrameEnd: the whole frame's queued GPU commands actually execute
@@ -4710,6 +4727,7 @@ void NativeRenderer_EndScene(void)
 	NativePerf_BeginScope(NATIVE_PERF_BUCKET_N3DS_FRAME_END);
 	N3DS_C3DEndFrame();
 	NativePerf_EndScope(NATIVE_PERF_BUCKET_N3DS_FRAME_END);
+	(void)N3DS_EndProfMark(N3DS_ENDPROF_FRAMEEND, endProfT);
 }
 
 void NativeRenderer_UpdateSwapIntervalState(int swapInterval)

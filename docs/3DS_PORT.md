@@ -74,7 +74,11 @@ renderer's per-pixel palette decode cannot be reproduced. The 3DS renderer
 - **Stereoscopic 3D.** The frame's draw commands are journaled and the right eye
   replays the journal through a second projection. The slider sets the
   separation frame by frame; the UI sits on the screen plane with a small
-  pop-out.
+  pop-out. The replay re-issues draws from the vertices the left eye already
+  wrote (nothing is re-converted or re-appended), so its CPU cost is the
+  citro3d draw issue of the frame's ~20-300 draws; the left eye pays nothing
+  extra but the journal entries. OPTIONS > 3D EFFECT is ON / OFF, plus AUTO on
+  an Old 3DS (see "Old 3DS / 2DS").
 - **Bottom screen.** The map's primitives are marked in the UI stream, peeled
   off at conversion time, and replayed on a bottom-screen target through an
   orthographic window fitted to their bounds. In map mode a copy stays on the
@@ -147,7 +151,7 @@ Rules the hardware enforces and emulators do not:
   it in the content area under the tab bar. Before the first GPU frame the same
   picture is blitted on the CPU. It repaints only on change; idle it costs nothing.
   Log text goes to the DEBUG > LOG view, the SD log and the 3dslink stream.
-  Settings (ftp, btmmap, stereo, cpu804) persist in `ctr3d.cfg` in the app dir.
+  Settings (ftp, btmmap, stereo, fpscap, cpu804) persist in `ctr3d.cfg` in the app dir.
 - App data lives in `sdmc:/3ds/ctr_native/` (assets/, memcards/, update/,
   ctr3d.cfg, enable-log.txt, dev-ftp.txt) for a .3dsx and an installed CIA alike.
 - FTP (`n3ds_ftp.c`, port 5000, one lowest-priority thread on core 3, else 2;
@@ -233,6 +237,40 @@ heap/linear use, grep them for the real peak per level):
   RenderBucket_Execute on random model scenes (prim memory, OT, scratchpad, GTE
   registers, capture table, native-model capture calls). Run it before
   committing a change to either.
+
+Frame pacing (OPTIONS > FRAME CAP, cfg `fpscap`: AUTO / 30 / 20). The game flips
+after `vsyncTillFlip` emulated vblanks, set at each submit from
+`Platform_FlipVBlanks`: 2 (30 fps, retail) or 3 (20 fps). AUTO is 30 on a New 3DS;
+on an Old 3DS / 2DS and in the simulation it drops to 20 while 8 of 32 frames miss
+33.3 ms of work and goes back after two 32-frame windows with at most one frame over
+29.3 ms. A frame that cannot hold 30 is then shown for a steady 3 vblanks instead
+of alternating 2 and 3. Game logic is time-based (`elapsedTimeMS` from the root
+counter, clamped at 64 ms, i.e. correct down to ~15.6 fps and slow motion below)
+and HOWL runs per vblank, so the cap changes neither game speed nor music tempo;
+retail itself drops to 20 on heavy frames. The emulated vblank is 60.00 Hz and the
+panel ~59.83 Hz, so one frame in ~115 at the cap still shows a vblank short.
+
+3D on an Old 3DS: 3D EFFECT defaults to AUTO there (a saved choice wins). The
+right eye is dropped while it alone makes the frame miss 50 ms (or the forced 30
+cap's 33.3 ms) in 8 of 32 frames, and comes back when the frame plus its last
+measured right-eye cost fits with 3 ms to spare; 3D at 20 is preferred to 2D at
+30. The status tab says "2D (AUTO, SLOW)" meanwhile. A 2DS / New 2DS XL has no
+3D panel: no right-eye target and gfxSet3D(false), whatever the option says.
+
+Measuring (CTR_INTERNAL, SD log, every 64 frames after `[GPUTIME]`):
+- `[ENDPROF]`: platform_end_scene_ms split into contiguous phases, avg us per
+  frame: `sky trk mrg ui mdl smk oth rEye btm fend` (their `sum` is the whole
+  EndScene), `flush` (the range flush of `c3dflush 1`), `begin` (latch + wait for
+  the previous GPU frame + clears; ~0 on the no-worker path, where the GPU's
+  3-7 ms overlap the next frame's game logic), `rEyeSt` (right eye per stereo
+  frame) and the journal per stereo frame (`pkt vram leaf run inst brk ovf`).
+- `[PACE]`: `cap` in force, `mode`, `avgWorkUs`/`maxWorkUs` (flip to flip minus
+  the pacer's sleep), `miss` (frames over the cap), `changes`, `3d` (AUTO shows
+  `(2D)` when it has the right eye off), `rEyeUs`; plus one `[PACE] auto ...` line
+  per decision.
+- dumpreq `c3dflush [N]`: 0 (default) lets C3D_FrameEnd flush the whole linear
+  heap every frame, 1 flushes only the frame's vertex range (GX_CMDLIST_FLUSH for
+  the command list). A/B with `fend` on hardware before changing the default.
 - `./build3ds.sh --o3ds-sim` also builds `build-3ds/cia/ctr3d-o3dssim.cia` (own
   title ID 0x0004000005A2C400, SystemModeExt Legacy, SystemMode `O3DS_MEM`
   default 80MB, 268MHz, no L2). It installs next to the normal CIA and shares the

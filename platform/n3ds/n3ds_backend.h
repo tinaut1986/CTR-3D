@@ -205,6 +205,39 @@ void N3DS_StereoRenderRightEye(void);
  * overscans X by this so a per-eye shift cannot expose the window edge.
  * Constant per stereosep, not slider-tracking. */
 int N3DS_StereoSkyPadX(void);
+/* System ticks the last N3DS_StereoRenderRightEye spent on the CPU (0 on a
+ * mono frame). Measured in every build: the Old-3DS stereo policy
+ * (N3DS_FramePace_*) prices the right eye with it. */
+unsigned long long N3DS_StereoLastRightEyeTicks(void);
+
+/* -------------------------------------------------- end-of-scene profile --- */
+/*
+ * [ENDPROF] (CTR_INTERNAL): where platform_end_scene_ms goes, phase by phase,
+ * plus the frame-begin wait and the right eye's journal shape. The phases of
+ * NativeRenderer_EndScene are contiguous (each mark closes one and opens the
+ * next), so their sum is the whole EndScene; platform_end_scene_ms minus that
+ * sum is the VRAM-present / pinned-display wrapper around it. Plain int phase
+ * ids, not an enum: this header crosses the -fshort-enums split.
+ * N3DS_EndProfMark adds (now - since) to the phase and returns now; both are
+ * no-ops returning 0 in a production build.
+ */
+#define N3DS_ENDPROF_SKY      0 /* backdrop + sky passes (skyfirst) */
+#define N3DS_ENDPROF_TRACK    1 /* resident track issue (either slot) */
+#define N3DS_ENDPROF_MERGE    2 /* the frame's main N3DS_MergeFlush */
+#define N3DS_ENDPROF_UI       3 /* UI pass (either slot) */
+#define N3DS_ENDPROF_MODEL    4 /* model issue (CPU vertex build + draws) */
+#define N3DS_ENDPROF_SMOKE    5 /* deferred smoke + its flush */
+#define N3DS_ENDPROF_RIGHT    6 /* right-eye journal replay */
+#define N3DS_ENDPROF_BOTTOM   7 /* bottom-screen pass */
+#define N3DS_ENDPROF_FRAMEEND 8 /* C3D_FrameEnd: cache flush + submit */
+#define N3DS_ENDPROF_OTHER    9 /* debug overlays and the rest of EndScene */
+#define N3DS_ENDPROF_BEGIN    10 /* N3DS_C3DBeginFrame: wait for the previous frame + clears */
+#define N3DS_ENDPROF_FLUSH    11 /* inside FRAMEEND: the cache flush alone (c3dflush 1) */
+#define N3DS_ENDPROF_PHASES   12
+unsigned long long N3DS_EndProfNow(void);
+unsigned long long N3DS_EndProfMark(int phase, unsigned long long since);
+/* Formats the window line into out and resets the window. */
+void N3DS_EndProfFormat(char *out, int outSize);
 
 /*
  * One real vertex buffer per FRAME, not per draw. C3D_DrawArrays only
@@ -249,6 +282,12 @@ int N3DS_StereoSkyPadX(void);
  * N3DS_C3DDrawTriangles), or -1 if the frame buffer is full -- caller must
  * skip drawing in that case, not draw from a stale/wrong offset. */
 int N3DS_C3DAppendVertices(const N3DS_Vertex *vertices, int count);
+/* The same allocation without the copy: reserves count vertices at the frame
+ * cursor and returns where to write them (the caller writes every field of
+ * every vertex before the frame ends), with their offset in *baseOut; NULL
+ * and -1 when the frame buffer is full. For per-triangle emitters, which
+ * otherwise build each triangle on the stack only to have it copied. */
+N3DS_Vertex *N3DS_C3DReserveVertices(int count, int *baseOut);
 void N3DS_C3DDrawTriangles(int startVertex, int triangleCount);
 /* Nonzero inside a C3D_FrameBegin/End bracket. Draws outside one would panic
  * libctru's GPU command buffer (NULL after FrameEnd); sites that issue GPU work
@@ -725,6 +764,34 @@ int N3DS_O3dsSimActive(void);       /* 0 off, 1 o3ds-sim.txt, 2 legacy-mode CIA 
 int N3DS_O3dsSimFtpAllowed(void);
 int N3DS_O3dsSimToggleFile(void);   /* DEBUG > ACTIONS; returns the new state */
 int N3DS_ExtraCoresUsable(void);    /* New 3DS and not simulating an Old one */
+
+/*
+ * Frame pacing and the Old-3DS stereo policy (n3ds_backend.c, "frame pace").
+ *
+ * The game flips when sdata->vsyncTillFlip, set at every submit, has counted
+ * down: 2 emulated vblanks (30 fps) is retail. Platform_FlipVBlanks
+ * (native_platform.c) measures each frame's WORK -- flip to flip minus the
+ * time the pacer slept -- hands it to N3DS_FramePaceNoteFrame and returns
+ * N3DS_FramePaceFlipVBlanks: 2 or 3 (20 fps). Option (cfg `fpscap`):
+ * 0 AUTO, 1 30 FPS, 2 20 FPS. AUTO is 30 on a New 3DS (unchanged) and, on an
+ * Old 3DS / 2DS or the simulation, 20 while a quarter of the frames would miss
+ * 30 and back to 30 once they all fit with margin, so the cadence is a steady 3
+ * vblanks instead of a 2/3 judder. Game logic is time-based (elapsedTimeMS
+ * from the root counter, clamped at 64 ms) and HOWL runs per vblank, so the
+ * cap changes neither game speed nor music tempo; retail drops to 20 itself on
+ * heavy frames.
+ *
+ * g_dbg_stereo: 0 off, 1 on, 2 AUTO (the Old-3DS default): on an Old 3DS the
+ * right eye is dropped while it alone makes the frame miss the cap the frame
+ * would otherwise hold, and comes back once the frame plus its last measured
+ * cost fits again. On a New 3DS 2 behaves as 1.
+ */
+void N3DS_FramePaceNoteFrame(unsigned workUs);
+int N3DS_FramePaceFlipVBlanks(void);
+int N3DS_FramePaceOldClass(void);          /* Old 3DS / 2DS, or simulating one */
+int N3DS_FramePaceStereoSuppressed(void);  /* AUTO stereo has the right eye off */
+void N3DS_FramePaceFormat(char *out, int outSize); /* [PACE] window line, resets */
+extern int g_dbg_frameCap;                 /* 0 AUTO, 1 30 fps, 2 20 fps (cfg fpscap) */
 
 /* Read-only state for the bottom-screen UI (n3ds_bottomui.c). */
 int N3DS_StereoFrameActive(void);   /* this frame rendered both eyes */
