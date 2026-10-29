@@ -17,6 +17,7 @@
 #include "n3ds_beat.h"
 #include "n3ds_bottomui.h"
 #include "n3ds_ftp.h"
+#include "updater.h"
 #include "n3ds_render_thread.h" /* N3DS_RenderWorkerIsSelf -- which thread the frame-begin guard is running on */
 #include "ctr_shbin.h"
 #ifdef CTR_NATIVE_TRACK_RENDERER
@@ -97,7 +98,7 @@ void N3DS_SetSdLogEnabled(int enabled)
 
 static void N3DS_NetloadStreamExit(void)
 {
-	if ((s_socBuffer != NULL) && !N3DS_FtpActive())
+	if ((s_socBuffer != NULL) && !N3DS_FtpActive() && !Updater_Active())
 	{
 		socExit();
 	}
@@ -336,6 +337,9 @@ void N3DS_EarlyInit(void)
 	/* FTP: debug builds on by default, production only with dev-ftp.txt (see
 	 * n3ds_ftp.h). */
 	N3DS_FtpBoot();
+	/* The in-game updater: loads its channel; nothing starts until the player asks
+	 * (or AUTO CHECK on the first frame). */
+	Updater_Init();
 }
 
 /* Last SD-log flush, in system ticks. Per-LINE fflush stalls gameplay
@@ -1895,7 +1899,7 @@ void N3DS_ExitLog(const char *step)
 }
 
 /* First thing of the exit sequence (Platform_Shutdown): settings to disk, the
- * FTP thread joined and its sockets closed, so nothing network-side outlives
+ * FTP and updater threads joined and its sockets closed, so nothing network-side outlives
  * the services under it. The relaunch after SITE INSTALL and a normal quit
  * both come through here. */
 void N3DS_ExitBegin(void)
@@ -1905,6 +1909,8 @@ void N3DS_ExitBegin(void)
 	N3DS_ExitLog("settings saved");
 	N3DS_FtpShutdown();
 	N3DS_ExitLog("ftp stopped");
+	Updater_Shutdown();
+	N3DS_ExitLog("updater stopped");
 }
 
 void N3DS_C3DExit(void)

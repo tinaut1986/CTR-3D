@@ -1,0 +1,70 @@
+name: Build 3DS
+
+# Compile check for pull requests and the release line; publishes nothing (the
+# packages are kept as workflow artifacts). Releases come from
+# build-release.yml on a vX.Y.Z tag.
+
+on:
+  push:
+    branches:
+      - main
+      - 'release/**'
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    name: Nintendo 3DS packages (debug and production)
+    runs-on: ubuntu-latest
+    container:
+      image: devkitpro/devkitarm:20260610
+
+    steps:
+      - name: Checkout source
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Install host tools
+        run: |
+          command -v cmake > /dev/null || (apt-get update -qq && apt-get install -y -qq cmake > /dev/null)
+          command -v python3 > /dev/null || (apt-get update -qq && apt-get install -y -qq python3 > /dev/null)
+
+      - name: Build CIA and 3DSX (debug configuration, CTR_INTERNAL on)
+        run: |
+          git config --global --add safe.directory '*'
+          export DEVKITPRO=/opt/devkitpro
+          export DEVKITARM=/opt/devkitpro/devkitARM
+          chmod +x platform/n3ds/tools/bin/bannertool platform/n3ds/tools/bin/makerom
+          ./build3ds.sh
+
+      - name: Build CIA (production configuration, CTR_INTERNAL off)
+        run: |
+          git config --global --add safe.directory '*'
+          export DEVKITPRO=/opt/devkitpro
+          export DEVKITARM=/opt/devkitpro/devkitARM
+          ./build3ds.sh --release --no-cia
+          ./package-cia.sh build-3ds-release
+
+      - name: Verify build outputs and legal files
+        run: |
+          git config --global --add safe.directory '*'
+          VERSION="$(sh platform/n3ds/tools/version.sh)"
+          test ! -d assets
+          ! git ls-files | grep -Ei '(^|/)assets/|\.(bin|iso|cue|sav|cia|3dsx|elf)$'
+          test -f "build-3ds/ctr_native.3dsx"
+          test -f "build-3ds/cia/ctr3d-v${VERSION}.cia"
+          test -f "build-3ds-release/cia/ctr3d-v${VERSION}.cia"
+
+      - name: Upload packages
+        uses: actions/upload-artifact@v4
+        with:
+          name: ctr3d-packages
+          if-no-files-found: error
+          path: |
+            build-3ds/ctr_native.3dsx
+            build-3ds/cia/ctr3d-v*.cia
+            build-3ds-release/cia/ctr3d-v*.cia
