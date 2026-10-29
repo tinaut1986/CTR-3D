@@ -6154,6 +6154,17 @@ unsigned int N3DS_ReadButtons(void)
 					N3DS_DebugLog(g_dbg_modelGate ? "[CTR-3DS] model gate: ON (no software GTE for native-model triangles)"
 					                              : "[CTR-3DS] model gate: off (software GTE per triangle)");
 				}
+				else if (strncmp(word, "trkanimvis", 10) == 0)
+				{
+					extern int g_dbg_trackAnimVisible;
+
+					/* Animated track vertices (water) patched only in the
+					 * leaves the walk draws (native_track_mesh.c). Off: every
+					 * animated vertex every walk. A/B for track_anim_ms and
+					 * [TRKANIM] animPatched/f. */
+					g_dbg_trackAnimVisible ^= 1;
+					N3DS_DebugLog(g_dbg_trackAnimVisible ? "[CTR-3DS] track anim: visible leaves only" : "[CTR-3DS] track anim: every animated vertex");
+				}
 				else if (strncmp(word, "vcstop", 6) == 0)
 				{
 					extern int g_dbg_voiceFillStopFull;
