@@ -924,8 +924,17 @@ internal void NativePerf_Report3DSWindow(void)
 		unsigned lfTotal = 0;
 		unsigned lfCount = 0;
 
+		int lfAsync = 0;
+		unsigned lfSync = 0;
+		unsigned lfSyncWorst = 0;
+
 		N3DS_LogFlushStats(&lfWorst, &lfTotal, &lfCount);
-		snprintf(out, sizeof(out), "[LOGFLUSH] worstUs=%u totalUs=%u n=%u", lfWorst, lfTotal, lfCount);
+		N3DS_LogAsyncStats(&lfAsync, &lfSync, &lfSyncWorst);
+		/* async=1: worstUs/totalUs are the writer thread's flushes, off the
+		 * game thread; sync/syncWorstUs are full-buffer drains on a logging
+		 * thread (what still lands in a frame). */
+		snprintf(out, sizeof(out), "[LOGFLUSH] worstUs=%u totalUs=%u n=%u async=%d sync=%u syncWorstUs=%u", lfWorst, lfTotal, lfCount, lfAsync, lfSync,
+		         lfSyncWorst);
 		N3DS_DebugLog(out);
 	}
 

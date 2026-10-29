@@ -60,6 +60,9 @@ static FILE *s_logFile = NULL;
  * any other thread exists.
  */
 static LightLock s_logBufferLock;
+/* The SD FILE itself under the async writer (see N3DS_LogDrainFileLocked):
+ * taken before s_logBufferLock, never after it. */
+static LightLock s_logFileLock;
 /* Rosalina-freeze bisect: 1 = stop emitting svcOutputDebugString (the SD and
  * netload sinks are unaffected). dumpreq `dbgoff`. */
 static int s_logSvcOff = 0;
@@ -439,6 +442,7 @@ void N3DS_EarlyInit(void)
 	 * message a few lines down does exactly that) and long before any worker
 	 * thread exists to contend for it. */
 	LightLock_Init(&s_logBufferLock);
+	LightLock_Init(&s_logFileLock);
 
 	consoleDebugInit(debugDevice_SVC);
 
@@ -513,6 +517,124 @@ static unsigned s_logFlushWorstUs = 0;
 static unsigned s_logFlushTotalUs = 0;
 static unsigned s_logFlushCount = 0;
 
+/*
+ * Asynchronous SD log (g_dbg_logAsync, dumpreq `logasync`, default on).
+ * [LOGFLUSH] worstUs tracked [PACE] maxWorkUs window for window on the Old 3DS
+ * (menu: 146 ms flush -> 188 ms frame, 129 -> 171, 127 -> 169; race: up to
+ * 285 ms): the 2 s fflush+fsync ran on whichever thread logged, the game
+ * thread almost always, and SD latency there is high and variable. Now a
+ * logging thread only appends the line to a RAM buffer (s_logBufferLock, a
+ * memcpy); a low-priority writer thread swaps the buffer out every ~2 s (or
+ * when half full) and does the fwrite + fflush + fsync under s_logFileLock,
+ * which no logging thread takes. On core 0 at 0x3E it runs while the game
+ * waits for the vblank or the GPU. A full buffer (the writer starved during a
+ * load) drains synchronously on the logging thread, the old cost, counted as
+ * sync=. Lock order: s_logFileLock before s_logBufferLock, never the reverse.
+ * N3DS_LogFlushNow / N3DS_LogCloseFile drain synchronously.
+ * [LOGFLUSH] then times the writer's flushes (off the game thread) and adds
+ * async=, sync= (game-thread drains) and syncWorstUs=.
+ */
+#define N3DS_LOG_ABUF_SIZE (64 * 1024)
+int g_dbg_logAsync = 1;
+static char s_logABuf[2][N3DS_LOG_ABUF_SIZE];
+static int s_logABufCur = 0;     /* buffer the logging threads append to */
+static size_t s_logABufUsed = 0; /* bytes in s_logABuf[s_logABufCur] */
+static Thread s_logWriterThread = NULL;
+static int s_logWriterFailed = 0;
+static unsigned s_logSyncDrains = 0;
+static unsigned s_logSyncWorstUs = 0;
+static u64 s_logWriterLastTick = 0;
+
+/* Caller holds s_logFileLock and NOT s_logBufferLock. Swaps the append buffer
+ * out and writes it; flushes (fflush + fsync) when `commit`. Returns the
+ * microseconds it took. */
+static unsigned N3DS_LogDrainFileLocked(int commit)
+{
+	const u64 t0 = svcGetSystemTick();
+	const char *data;
+	size_t bytes;
+	FILE *f;
+
+	LightLock_Lock(&s_logBufferLock);
+	data = s_logABuf[s_logABufCur];
+	bytes = s_logABufUsed;
+	s_logABufCur ^= 1;
+	s_logABufUsed = 0;
+	f = s_logFile;
+	LightLock_Unlock(&s_logBufferLock);
+
+	if (f != NULL)
+	{
+		if (bytes != 0)
+		{
+			fwrite(data, 1, bytes, f);
+		}
+		if (commit)
+		{
+			fflush(f);
+			fsync(fileno(f));
+		}
+	}
+	return (unsigned)(((svcGetSystemTick() - t0) * 1000000ull) / (u64)SYSCLOCK_ARM11);
+}
+
+static void N3DS_LogWriterMain(void *arg)
+{
+	(void)arg;
+	for (;;)
+	{
+		u64 now;
+		int due;
+
+		svcSleepThread(50ll * 1000ll * 1000ll);
+		now = svcGetSystemTick();
+		LightLock_Lock(&s_logBufferLock);
+		due = g_dbg_logAsync && (s_logFile != NULL) && (s_logABufUsed != 0) &&
+		      (((now - s_logWriterLastTick) > (SYSCLOCK_ARM11 * 2ull)) || (s_logABufUsed >= (N3DS_LOG_ABUF_SIZE / 2)));
+		LightLock_Unlock(&s_logBufferLock);
+		if (!due)
+		{
+			continue;
+		}
+
+		LightLock_Lock(&s_logFileLock);
+		{
+			const unsigned tookUs = N3DS_LogDrainFileLocked(1);
+
+			LightLock_Lock(&s_logBufferLock);
+			s_logFlushTotalUs += tookUs;
+			if (tookUs > s_logFlushWorstUs)
+			{
+				s_logFlushWorstUs = tookUs;
+			}
+			s_logFlushCount++;
+			LightLock_Unlock(&s_logBufferLock);
+		}
+		LightLock_Unlock(&s_logFileLock);
+		s_logWriterLastTick = now;
+	}
+}
+
+/* Caller holds s_logBufferLock. Whether lines go through the writer. */
+static int N3DS_LogAsyncActiveLocked(void)
+{
+	if (!g_dbg_logAsync || s_logWriterFailed)
+	{
+		return 0;
+	}
+	if (s_logWriterThread == NULL)
+	{
+		s_logWriterLastTick = svcGetSystemTick();
+		s_logWriterThread = threadCreate(N3DS_LogWriterMain, NULL, 16 * 1024, 0x3E, -2, true);
+		if (s_logWriterThread == NULL)
+		{
+			s_logWriterFailed = 1;
+			return 0;
+		}
+	}
+	return 1;
+}
+
 void N3DS_DebugLog(const char *msg)
 {
 	if (msg == NULL)
@@ -555,7 +677,37 @@ void N3DS_DebugLog(const char *msg)
 		N3DS_LogOpenFileLocked();
 	}
 
-	if ((s_logFile != NULL) && g_dbg_sdLog)
+	if ((s_logFile != NULL) && g_dbg_sdLog && N3DS_LogAsyncActiveLocked())
+	{
+		const size_t len = strlen(msg);
+
+		if (s_logABufUsed + len + 1u > (size_t)N3DS_LOG_ABUF_SIZE)
+		{
+			/* Full: the writer is starved (a load keeps the game thread
+			 * busy). Drain here, outside the buffer lock (lock order). */
+			unsigned tookUs;
+
+			LightLock_Unlock(&s_logBufferLock);
+			LightLock_Lock(&s_logFileLock);
+			tookUs = N3DS_LogDrainFileLocked(0);
+			LightLock_Unlock(&s_logFileLock);
+			LightLock_Lock(&s_logBufferLock);
+			s_logSyncDrains++;
+			if (tookUs > s_logSyncWorstUs)
+			{
+				s_logSyncWorstUs = tookUs;
+			}
+		}
+		if (s_logABufUsed + len + 1u <= (size_t)N3DS_LOG_ABUF_SIZE)
+		{
+			char *dst = &s_logABuf[s_logABufCur][s_logABufUsed];
+
+			memcpy(dst, msg, len);
+			dst[len] = '\n';
+			s_logABufUsed += len + 1u;
+		}
+	}
+	else if ((s_logFile != NULL) && g_dbg_sdLog)
 	{
 		fputs(msg, s_logFile);
 		fputc('\n', s_logFile);
@@ -564,8 +716,9 @@ void N3DS_DebugLog(const char *msg)
 	/* Flush BOTH buffered sinks at most every ~2s (SD file and the netload
 	 * stderr stream -- see the setvbuf in N3DS_NetloadStreamInit). Both are
 	 * post-hoc trails that tolerate a bounded tail loss on a hard crash;
-	 * svcOutputDebugString above is the per-line instant trail. */
-	if (((s_logFile != NULL) && g_dbg_sdLog) || s_netloadStreamActive)
+	 * svcOutputDebugString above is the per-line instant trail. With the
+	 * async writer the SD file is its job; only the stream flushes here. */
+	if (((s_logFile != NULL) && g_dbg_sdLog && (s_logWriterThread == NULL || !g_dbg_logAsync)) || s_netloadStreamActive)
 	{
 		const u64 now = svcGetSystemTick();
 
@@ -580,7 +733,7 @@ void N3DS_DebugLog(const char *msg)
 			 * its back. Reported as [LOGFLUSH]. */
 			const u64 flushStart = svcGetSystemTick();
 
-			if ((s_logFile != NULL) && g_dbg_sdLog)
+			if ((s_logFile != NULL) && g_dbg_sdLog && (s_logWriterThread == NULL || !g_dbg_logAsync))
 			{
 				fflush(s_logFile);
 				/* fflush alone moves bytes into the FS session; the FAT
@@ -619,17 +772,17 @@ void N3DS_DebugLog(const char *msg)
  * only ever sits in a buffer the next power-cycle discards. */
 void N3DS_LogFlushNow(void)
 {
-	LightLock_Lock(&s_logBufferLock);
-	if (s_logFile != NULL)
-	{
-		fflush(s_logFile);
-		fsync(fileno(s_logFile));
-	}
-	LightLock_Unlock(&s_logBufferLock);
+	/* File lock first (lock order): the drain writes the async buffer, then
+	 * commits; with no async lines it is the old fflush + fsync. */
+	LightLock_Lock(&s_logFileLock);
+	(void)N3DS_LogDrainFileLocked(1);
+	LightLock_Unlock(&s_logFileLock);
 }
 
 void N3DS_LogCloseFile(void)
 {
+	LightLock_Lock(&s_logFileLock);
+	(void)N3DS_LogDrainFileLocked(0);
 	LightLock_Lock(&s_logBufferLock);
 	if (s_logFile != NULL)
 	{
@@ -637,7 +790,20 @@ void N3DS_LogCloseFile(void)
 		fclose(s_logFile);
 		s_logFile = NULL;
 	}
+	LightLock_Unlock(&s_logFileLock);
 	g_dbg_sdLog = 0;
+	LightLock_Unlock(&s_logBufferLock);
+}
+
+/* Game-side drains of a full async buffer since the last call, and the worst. */
+void N3DS_LogAsyncStats(int *async, unsigned *syncDrains, unsigned *syncWorstUs)
+{
+	LightLock_Lock(&s_logBufferLock);
+	*async = (g_dbg_logAsync && (s_logWriterThread != NULL)) ? 1 : 0;
+	*syncDrains = s_logSyncDrains;
+	*syncWorstUs = s_logSyncWorstUs;
+	s_logSyncDrains = 0;
+	s_logSyncWorstUs = 0;
 	LightLock_Unlock(&s_logBufferLock);
 }
 
@@ -6153,6 +6319,16 @@ unsigned int N3DS_ReadButtons(void)
 					g_dbg_modelGate ^= 1;
 					N3DS_DebugLog(g_dbg_modelGate ? "[CTR-3DS] model gate: ON (no software GTE for native-model triangles)"
 					                              : "[CTR-3DS] model gate: off (software GTE per triangle)");
+				}
+				else if (strncmp(word, "logasync", 8) == 0)
+				{
+					/* SD log through the writer thread (default) or the old
+					 * fflush + fsync on the logging thread every ~2 s. Drained
+					 * first so the two paths never share the FILE. A/B for
+					 * [LOGFLUSH] and [PACE] maxWorkUs. */
+					N3DS_LogFlushNow();
+					g_dbg_logAsync ^= 1;
+					N3DS_DebugLog(g_dbg_logAsync ? "[CTR-3DS] sd log: async writer" : "[CTR-3DS] sd log: flush on the logging thread");
 				}
 				else if (strncmp(word, "trkanimvis", 10) == 0)
 				{
