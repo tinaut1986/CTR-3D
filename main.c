@@ -74,6 +74,9 @@
 #endif
 #include "platform/native_input.c"
 #include "platform/native_inline_c.c"
+// After the GTE core and its register accessors: the native-model projection
+// gate reuses the core's UNR divide and MTC2/MFC2.
+#include "platform/native_model_gate.c"
 #include "platform/native_libapi.c"
 #include "platform/native_libetc.c"
 #include "platform/native_libgte.c"

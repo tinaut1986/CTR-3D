@@ -38,6 +38,9 @@ u32 NativeGpuLinks_FromHostPointer(const void *p) { return (u32)(uintptr_t)p & 0
 #include "platform/native_gte_capture.c"
 #include "platform/native_gte_core.c"
 #include "platform/native_inline_c.c"
+#if __has_include("platform/native_model_gate.c")
+#include "platform/native_model_gate.c"
+#endif
 #include "game/RenderBucket/RenderBucket_QueueExecute.c"
 const void *cap_buf(int i) { return &s_gteCaptureBuf[i]; }
 unsigned cap_size(void) { return sizeof(s_gteCaptureBuf[0]); }

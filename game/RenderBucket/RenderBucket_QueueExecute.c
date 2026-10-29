@@ -56,6 +56,10 @@ extern int NativeModelEmit_Triangle(const u32 *packedXY3, const u32 *packedZ3, c
 extern void NativeModelEmit_EndInstance(void);
 extern int NativeModelEmit_SkipRetailDraw(void);
 extern int NativeModelEmit_SpecularEnabled(void);
+/* The projection gate of a replaced instance (platform/native_model_gate.c). The
+ * header is included rather than mirrored: the gate's FIFO struct lives on this
+ * file's stack, and the header pulls in nothing but <macros.h>. */
+#include <platform/native_model_gate.h>
 #endif
 
 #ifdef CTR_NATIVE
@@ -2761,14 +2765,11 @@ static uint32_t *RenderBucket_GetClampedOTEntry(struct RenderBucketDrawContext *
  * survive it -- so widening here feeds retail packets and the PICA-native
  * model path alike. Reads the SXY FIFO only; no GTE ops, so the
  * avsz3->stopz bracket in CheckProjectedPrim is undisturbed. */
-static int RenderBucket_TriangleInWideMargin(struct RenderBucketDrawContext *ctx)
+static int RenderBucket_TriangleInWideMargin(struct RenderBucketDrawContext *ctx, u32 sxy0, u32 sxy1, u32 sxy2)
 {
 	int w = (u16)ctx->pb->rect.w;
 	int h = (u16)ctx->pb->rect.h;
 	int margin = NativeWide_MarginClassOn(2) ? NativeWide_CullMarginX(w) : 0;
-	u32 sxy0 = MFC2(12);
-	u32 sxy1 = MFC2(13);
-	u32 sxy2 = MFC2(14);
 	s16 x0, x1, x2, y0, y1, y2;
 
 	if (margin == 0)
@@ -2817,12 +2818,11 @@ static int RenderBucket_TriangleInWideMargin(struct RenderBucketDrawContext *ctx
 }
 #endif
 
-static int RenderBucket_TriangleInScreenWindow(struct RenderBucketDrawContext *ctx)
+/* The SXY FIFO is an argument so the native-model gate (RenderBucket_CheckGatedPrim)
+ * runs the same test on its own FIFO; the retail callers pass the GTE's. */
+static int RenderBucket_TriangleInScreenWindowXY(struct RenderBucketDrawContext *ctx, u32 sxy0, u32 sxy1, u32 sxy2)
 {
 	u32 screen = RenderBucket_PackXY(ctx->pb->rect.w, ctx->pb->rect.h);
-	u32 sxy0 = MFC2(12);
-	u32 sxy1 = MFC2(13);
-	u32 sxy2 = MFC2(14);
 	u32 allNegative = sxy0 & sxy1 & sxy2;
 	u32 allPastScreen = ~(((sxy0 - screen) | (sxy1 - screen) | (sxy2 - screen)));
 	u32 reject = allNegative | allPastScreen;
@@ -2830,7 +2830,7 @@ static int RenderBucket_TriangleInScreenWindow(struct RenderBucketDrawContext *c
 	if ((s32)reject < 0)
 	{
 #ifdef CTR_NATIVE
-		return RenderBucket_TriangleInWideMargin(ctx);
+		return RenderBucket_TriangleInWideMargin(ctx, sxy0, sxy1, sxy2);
 #else
 		return 0;
 #endif
@@ -2839,13 +2839,18 @@ static int RenderBucket_TriangleInScreenWindow(struct RenderBucketDrawContext *c
 	if ((s32)(reject << 16) < 0)
 	{
 #ifdef CTR_NATIVE
-		return RenderBucket_TriangleInWideMargin(ctx);
+		return RenderBucket_TriangleInWideMargin(ctx, sxy0, sxy1, sxy2);
 #else
 		return 0;
 #endif
 	}
 
 	return 1;
+}
+
+static int RenderBucket_TriangleInScreenWindow(struct RenderBucketDrawContext *ctx)
+{
+	return RenderBucket_TriangleInScreenWindowXY(ctx, MFC2(12), MFC2(13), MFC2(14));
 }
 
 static void RenderBucket_LoadPrimRTPT(struct RenderBucketDrawContext *ctx)
@@ -2964,6 +2969,55 @@ static int RenderBucket_ProjectPrim_Normal(struct RenderBucketDrawContext *ctx, 
 
 	return RenderBucket_CheckProjectedPrim(ctx, command, CFC2(31), 0, depthMac0Out);
 }
+
+#if defined(CTR_NATIVE) && defined(CTR_NATIVE_MODEL_RENDERER) && CTR_NATIVE_MODEL_RENDERER
+/* RenderBucket_ProjectPrim_Normal for an instance the native model path replaces,
+ * on the gate's own SXY/SZ FIFO instead of the software GTE
+ * (include/platform/native_model_gate.h). Same tests, same order, same
+ * arithmetic as RenderBucket_CheckProjectedPrim with cullXorMask 0 -- FLAG bit
+ * 18, the optional NCLIP side test, the screen window -- minus the AVSZ3 / MAC0
+ * that only the packet's OT bin consumes. A claimed triangle writes no packet;
+ * one the capture declines is re-projected through the GTE by the caller. */
+static int RenderBucket_ProjectGatedPrim(struct RenderBucketDrawContext *ctx, struct NativeModelGate *gate, u32 command, int useRtps, int reuseFirstVertex)
+{
+	u32 gteFlag;
+
+	if (useRtps != 0)
+	{
+		gteFlag = NativeModelGate_Rtps(gate, reuseFirstVertex, ctx->tempPacked[3].xy, ctx->tempPacked[3].z);
+	}
+	else
+	{
+		gteFlag = NativeModelGate_Rtpt(gate, ctx->tempPacked[1].xy, ctx->tempPacked[1].z, ctx->tempPacked[2].xy, ctx->tempPacked[2].z, ctx->tempPacked[3].xy,
+		                               ctx->tempPacked[3].z);
+	}
+
+	if ((s32)(gteFlag << 13) < 0)
+	{
+		return 0;
+	}
+
+	if ((s32)(command << 3) < 0)
+	{
+		int opZ = NativeModelGate_Nclip(&gate->fifo);
+		int cullXor;
+		s16 cullFlags = (s16)(u16)ctx->idpp->instFlags;
+
+		if (opZ == 0)
+		{
+			return 0;
+		}
+
+		cullXor = (s32)cullFlags ^ (s32)(command << 2);
+		if ((s32)((u32)opZ ^ (u32)cullXor) <= 0)
+		{
+			return 0;
+		}
+	}
+
+	return RenderBucket_TriangleInScreenWindowXY(ctx, gate->fifo.sxy[0], gate->fifo.sxy[1], gate->fifo.sxy[2]);
+}
+#endif
 
 static void RenderBucket_InitSplitVertex(struct RenderBucketDrawContext *ctx, int slot, u32 packedXY, u32 packedZ, int color)
 {
@@ -4635,6 +4689,15 @@ void RenderBucket_DrawFunc_Normal(struct RenderBucketDrawContext *ctx)
 	 * Evaluated once per instance, not per triangle, and only meaningful when
 	 * the capture is actually running. */
 	const int mdlReplaces = mdlCapture && NativeModelEmit_SkipRetailDraw();
+	/* A replaced instance's triangles are gated without the software GTE
+	 * (include/platform/native_model_gate.h): the GPU transforms them, so the
+	 * CPU only has to decide which ones it hands over. Only in state 1 -- in
+	 * states 0 and 2 the packet path consumes the full projection anyway. */
+	struct NativeModelGate mdlGate;
+	int mdlGated;
+
+	memset(&mdlGate, 0, sizeof(mdlGate));
+	mdlGated = mdlReplaces && NativeModelGate_Begin(&mdlGate);
 #endif
 
 	// NOTE(aalhendi): ASM-verified NTSC-U 926 0x8006a52c-0x8006a8e0;
@@ -4733,8 +4796,25 @@ void RenderBucket_DrawFunc_Normal(struct RenderBucketDrawContext *ctx)
 			int isValidTexture;
 			int shouldDraw;
 
+#if defined(CTR_NATIVE) && defined(CTR_NATIVE_MODEL_RENDERER) && CTR_NATIVE_MODEL_RENDERER
+			/* The FIFO as it stood before this triangle: a declined triangle
+			 * replays its retail projection from here (see the packet write). */
+			const struct NativeModelGateFifo mdlFifoBefore = mdlGate.fifo;
+#endif
+
 			ipT0 = ipSample ? RB_INSTPROF_TICK() : 0u;
-			shouldDraw = RenderBucket_ProjectPrim_Normal(ctx, drawCommand, useRtps, reuseFirstVertex, &depthMac0);
+#if defined(CTR_NATIVE) && defined(CTR_NATIVE_MODEL_RENDERER) && CTR_NATIVE_MODEL_RENDERER
+			if (mdlGated)
+			{
+				depthMac0 = 0;
+				shouldDraw = RenderBucket_ProjectGatedPrim(ctx, &mdlGate, drawCommand, useRtps, reuseFirstVertex);
+				RB_INSTPROF_COUNT(gated);
+			}
+			else
+#endif
+			{
+				shouldDraw = RenderBucket_ProjectPrim_Normal(ctx, drawCommand, useRtps, reuseFirstVertex, &depthMac0);
+			}
 			if (ipSample)
 			{
 				RB_INSTPROF_PHASE(NATIVE_INSTPROF_PROJECT, ipT0);
@@ -4807,8 +4887,17 @@ void RenderBucket_DrawFunc_Normal(struct RenderBucketDrawContext *ctx)
 				{
 					int mdlSigned;
 
-					gte_nclip();
-					mdlSigned = MFC2_S(24) ^ ((s16)ctx->idpp->instFlags ^ (int)(drawCommand << 2));
+					if (mdlGated)
+					{
+						/* Same MAC0, from the gate's FIFO. */
+						mdlSigned = NativeModelGate_Nclip(&mdlGate.fifo);
+					}
+					else
+					{
+						gte_nclip();
+						mdlSigned = MFC2_S(24);
+					}
+					mdlSigned ^= ((s16)ctx->idpp->instFlags ^ (int)(drawCommand << 2));
 					mdlColor[0] = (int)RenderBucket_LightFlatTextureColor((u32)ctx->tempColor[1], mdlSigned);
 					mdlColor[1] = mdlColor[0];
 					mdlColor[2] = mdlColor[0];
@@ -4846,7 +4935,24 @@ void RenderBucket_DrawFunc_Normal(struct RenderBucketDrawContext *ctx)
 
 				RB_INSTPROF_COUNT(packets);
 				ipT0 = ipSample ? RB_INSTPROF_TICK() : 0u;
-				drawResult = RenderBucket_DispatchDrawInstPrim(ctx, drawCommand, tex, depthMac0);
+#if defined(CTR_NATIVE) && defined(CTR_NATIVE_MODEL_RENDERER) && CTR_NATIVE_MODEL_RENDERER
+				if (mdlGated)
+				{
+					/* Declined under the gate: the writer needs the GTE as the
+					 * retail walk would have left it -- the projection's
+					 * registers and AVSZ3's MAC0. Re-run the retail projection
+					 * from the FIFO this triangle started with; it accepts
+					 * (same arithmetic), and the writer runs as in state 0. */
+					NativeModelGate_ToGte(&mdlFifoBefore);
+					drawResult = RenderBucket_ProjectPrim_Normal(ctx, drawCommand, useRtps, reuseFirstVertex, &depthMac0) ? RenderBucket_DispatchDrawInstPrim(ctx, drawCommand, tex, depthMac0) : 0;
+					/* A writer may move the FIFO (the GTE state is the truth now). */
+					NativeModelGate_FromGte(&mdlGate.fifo);
+				}
+				else
+#endif
+				{
+					drawResult = RenderBucket_DispatchDrawInstPrim(ctx, drawCommand, tex, depthMac0);
+				}
 				if (ipSample)
 				{
 					RB_INSTPROF_PHASE(NATIVE_INSTPROF_PACKET, ipT0);
@@ -4872,6 +4978,12 @@ void RenderBucket_DrawFunc_Normal(struct RenderBucketDrawContext *ctx)
 	}
 
 #if defined(CTR_NATIVE) && defined(CTR_NATIVE_MODEL_RENDERER) && CTR_NATIVE_MODEL_RENDERER
+	if (mdlGated)
+	{
+		/* Leave the SXY/SZ FIFO where the retail walk would have; the gate
+		 * writes no other GTE register. */
+		NativeModelGate_ToGte(&mdlGate.fifo);
+	}
 	if (mdlCapture)
 	{
 		NativeModelEmit_EndInstance();

@@ -674,9 +674,9 @@ internal void NativePerf_ReportInstProf(u32 frames)
 			estUs[k] = (u32)(mean * (double)reach[k] * usPerTick / (double)frames);
 		}
 		snprintf(line, sizeof(line),
-		         "[INSTPROF] normal/f cmd=%lu dec=%lu cached=%lu rtpt=%lu rtps=%lu acc=%lu claim=%lu pkt=%lu | cyc dec=%lu proj=%lu cap=%lu pkt=%lu | us dec=%lu proj=%lu cap=%lu pkt=%lu",
+		         "[INSTPROF] normal/f cmd=%lu dec=%lu cached=%lu rtpt=%lu rtps=%lu gate=%lu acc=%lu claim=%lu pkt=%lu | cyc dec=%lu proj=%lu cap=%lu pkt=%lu | us dec=%lu proj=%lu cap=%lu pkt=%lu",
 		         (unsigned long)(ip->cmds / frames), (unsigned long)(ip->decodes / frames), (unsigned long)(ip->cached / frames),
-		         (unsigned long)(ip->rtpt / frames), (unsigned long)(ip->rtps / frames), (unsigned long)(ip->accepted / frames),
+		         (unsigned long)(ip->rtpt / frames), (unsigned long)(ip->rtps / frames), (unsigned long)(ip->gated / frames), (unsigned long)(ip->accepted / frames),
 		         (unsigned long)(ip->claimed / frames), (unsigned long)(ip->packets / frames), (unsigned long)cyc[0], (unsigned long)cyc[1],
 		         (unsigned long)cyc[2], (unsigned long)cyc[3], (unsigned long)estUs[0], (unsigned long)estUs[1], (unsigned long)estUs[2],
 		         (unsigned long)estUs[3]);

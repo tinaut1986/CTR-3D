@@ -229,6 +229,14 @@ heap/linear use, grep them for the real peak per level):
   write). `[GTEPROF]` counts software-GTE ops per frame per phase (`logic`,
   `queue`, `exec`, `level`, `effects`, `ui`, `other`) with the six most
   frequent. Both are CTR_INTERNAL-only, one line set per `[PERF]` window.
+- Native-model gate (`native_model_gate.c`, dumpreq `mdlgate`, default on): an
+  instance the model path replaces is transformed by the GPU, so its triangles
+  no longer go through the software GTE just to be accepted. The gate keeps the
+  part of RTPS/RTPT the accept test reads (the SXY/SZ FIFO and FLAG bit 18) in
+  the GTE's own integer arithmetic and runs NCLIP and the screen window on it:
+  the same triangles, no capture Stores, no NCLIP/AVSZ3 ops. A triangle the
+  capture declines replays the retail projection from the saved FIFO.
+  `[INSTPROF]` `gate=` counts gated projections; `proj` is their cost.
 - The software GTE (`native_gte_core.c`) issues each constant op word through
   its own specialised copy (`GTE_Op*`, picked by the always-inlined doCOP2) and
   inlines the register moves; the arithmetic is PsyCross's, bit for bit.

@@ -5052,6 +5052,9 @@ unsigned int N3DS_ReadButtons(void)
 	 *   triscopes   -- toggle g_dbg_perfTriScopes (per-triangle perf split; taxed)
  *   g4run       -- toggle g_dbg_g4Run (the walk's POLY_G4 run fast path, the
  *                  menu flag; A/B for [PARSEPROF] / draw_otag_parse_ms)
+ *   mdlgate     -- toggle g_dbg_modelGate (DEFAULT ON): native-model triangles
+ *                  pass the flag/NCLIP/screen gate without the software GTE
+ *                  (same triangles); A/B for [INSTPROF] proj
 	 *   drawmerge   -- toggle g_dbg_drawMerge: 0 falls back to immediate
 	 *                  per-run submission instead of the state-sorted bins
 	 *   flagstyle [N] -- menu/loading flag: 0 = retail grey checkers (default),
@@ -6346,6 +6349,19 @@ unsigned int N3DS_ReadButtons(void)
 					}
 					snprintf(msg, sizeof(msg), "[CTR-3DS] model render: %s", names[g_dbg_modelRender]);
 					N3DS_DebugLog(msg);
+				}
+				else if (strncmp(word, "mdlgate", 7) == 0)
+				{
+					extern int g_dbg_modelGate;
+
+					/* Native-model projection gate (platform/native_model_gate.c):
+					 * a replaced instance's triangles are accepted on the CPU
+					 * without the software GTE. Both legs accept the same
+					 * triangles; A/B for [INSTPROF] proj and
+					 * mainframe_execute_instances_ms. Latched per instance. */
+					g_dbg_modelGate ^= 1;
+					N3DS_DebugLog(g_dbg_modelGate ? "[CTR-3DS] model gate: ON (no software GTE for native-model triangles)"
+					                              : "[CTR-3DS] model gate: off (software GTE per triangle)");
 				}
 				else if (strncmp(word, "hudui", 5) == 0)
 				{

@@ -31,6 +31,12 @@ struct sData sdata_static;
 	int p##memcmp(const void *a, const void *b, size_t n) { return memcmp(a, b, n); }
 DECL(base_)
 DECL(test_)
+/* The native-model projection gate's toggle, when the tested tree has it (weak:
+ * a base tree from before the gate links too). Gate on, a replaced instance is
+ * gated without the software GTE: the capture calls, prim memory, OT and the
+ * GTE's SXY/SZ FIFO must still match the base; the other GTE registers and the
+ * capture table (no Stores) legitimately differ. */
+extern int test_g_dbg_modelGate __attribute__((weak));
 
 static u64 g_rng = 0x9E3779B97F4A7C15ull;
 static u32 rnd(void) { g_rng ^= g_rng << 13; g_rng ^= g_rng >> 7; g_rng ^= g_rng << 17; return (u32)g_rng; }
@@ -129,6 +135,10 @@ static void build(int side, u64 seed, int mode)
 			idpp->mvp.m[0][0] = s; idpp->mvp.m[1][1] = s; idpp->mvp.m[2][2] = s;
 			idpp->mvp.m[0][1] = (s16)(rnd() & 0x3ff) - 0x200; idpp->mvp.m[1][2] = (s16)(rnd() & 0x3ff) - 0x200; idpp->mvp.m[2][0] = (s16)(rnd() & 0x3ff) - 0x200;
 			idpp->mvp.t[0] = (int)(rnd() & 0x1ff) - 0x100; idpp->mvp.t[1] = (int)(rnd() & 0x1ff) - 0x100; idpp->mvp.t[2] = 0x300 + (rnd() & 0xfff);
+			/* One instance in four straddles the eye: vertices behind it (SZ3
+			 * saturation, FLAG bit 18) and nearer than H/2 (the divide's
+			 * 0x1ffff ceiling). */
+			if (rnd() % 4 == 0) idpp->mvp.t[2] = (int)(rnd() & 0x3ff) - 0x100;
 		}
 		idpp->instFlags = 0x40 | (rnd() & 0x0000ff00) | ((rnd() & 1) ? 0x2000 : 0);
 		idpp->instFlags &= ~0x80;
@@ -160,7 +170,7 @@ static double now(void) { struct timespec t; clock_gettime(CLOCK_MONOTONIC, &t);
 
 int main(int argc, char **argv)
 {
-	int trials = argc > 1 ? atoi(argv[1]) : 2000, fails = 0;
+	int trials = argc > 1 ? atoi(argv[1]) : 2000, fails = 0, gateTrials = 0;
 	long tris = 0;
 	for (int s = 0; s < SIDES; s++) { arena[s] = aligned_alloc(64, ARENA); scratch[s] = aligned_alloc(64, 0x4000); }
 	base_GTECapture_Clear(); test_GTECapture_Clear();
@@ -169,6 +179,12 @@ int main(int argc, char **argv)
 		u64 seed = 0x1234567ull + (u64)t * 0x9E3779B97F4A7C15ull;
 		int mode = t & 3, capMode = (t >> 2) % 3;
 		int beginRet = (t % 7) != 0, skip = (t % 5) != 0, claimMod = t % 4, margin = (t % 3) ? 0 : 32;
+		/* Gate trials come last: a gated instance leaves the capture table and
+		 * the matrix probe's shadow behind the base's, so a later gate-off
+		 * trial could not compare them any more. */
+		int gate = (&test_g_dbg_modelGate != 0) && (t >= trials / 2);
+		if (&test_g_dbg_modelGate != 0) test_g_dbg_modelGate = gate;
+		gateTrials += gate;
 		base_emitBeginRet = test_emitBeginRet = beginRet; base_emitSkip = test_emitSkip = skip; base_emitClaimMod = test_emitClaimMod = claimMod;
 		base_wideMargin = test_wideMargin = margin;
 		build(0, seed, mode); build(1, seed, mode);
@@ -208,12 +224,21 @@ int main(int argc, char **argv)
 				printf(" scratch word %d: %08x vs %08x\n", i, A[i], B[i]); bad |= 8; break;
 			}
 		}
-		if (memcmp(&base_gteRegs, &test_gteRegs, sizeof(base_gteRegs))) bad |= 16;
-		if (memcmp(base_cap_buf(0), test_cap_buf(0), base_cap_size()) || memcmp(base_cap_buf(1), test_cap_buf(1), base_cap_size())) bad |= 32;
+		if (!gate)
+		{
+			if (memcmp(&base_gteRegs, &test_gteRegs, sizeof(base_gteRegs))) bad |= 16;
+			if (memcmp(base_cap_buf(0), test_cap_buf(0), base_cap_size()) || memcmp(base_cap_buf(1), test_cap_buf(1), base_cap_size())) bad |= 32;
+		}
+		else
+		{
+			static const int fifoRegs[] = {12, 13, 14, 16, 17, 18, 19};
+			for (unsigned k = 0; k < sizeof(fifoRegs) / sizeof(fifoRegs[0]); k++)
+				if (base_gteRegs.CP2D.p[fifoRegs[k]].d != test_gteRegs.CP2D.p[fifoRegs[k]].d) bad |= 64;
+		}
 		tris += (u8 *)W[0].pm.cursor - W[0].prim;
 		if (bad) { printf("MISMATCH trial %d mode=%d cap=%d bad=%x emitN %d/%d\n", t, mode, capMode, bad, base_emitN, test_emitN); fails++; }
 	}
-	printf("trials=%d primBytes=%ld emit(last)=%d fails=%d\n", trials, tris, base_emitN, fails);
+	printf("trials=%d (gate on: %d) primBytes=%ld emit(last)=%d fails=%d\n", trials, gateTrials, tris, base_emitN, fails);
 	if (argc > 2 && argv[2][0] == 'p')
 	{
 		int s = argv[2][1] == 'o' ? 0 : 1;
@@ -226,9 +251,14 @@ int main(int argc, char **argv)
 	}
 	if (argc > 2)
 	{
-		/* timing: same scene re-executed */
-		for (int s = 0; s < SIDES; s++)
+		/* timing: same scene re-executed, every instance replaced by the native
+		 * model path and every triangle claimed (the console's state 1); the
+		 * tested side once per gate setting when it has the gate. */
+		base_emitBeginRet = test_emitBeginRet = 1; base_emitSkip = test_emitSkip = 1; base_emitClaimMod = test_emitClaimMod = 0;
+		for (int pass = 0; pass < ((&test_g_dbg_modelGate != 0) ? 3 : 2); pass++)
 		{
+			int s = (pass == 0) ? 0 : 1;
+			if (&test_g_dbg_modelGate != 0) test_g_dbg_modelGate = (pass == 2);
 			double best = 1e30;
 			for (int rep = 0; rep < 5; rep++)
 			{
@@ -240,7 +270,7 @@ int main(int argc, char **argv)
 				double tr = now() - t0 - tb;
 				if (tr < best) best = tr;
 			}
-			printf("%s: %.1f us per 8-instance scene\n", s ? "test" : "base", best / 200 / 1000);
+			printf("%s%s: %.1f us per 8-instance scene\n", s ? "test" : "base", (pass == 2) ? " (gate on)" : (pass == 1) ? " (gate off)" : "", best / 200 / 1000);
 		}
 	}
 	return fails != 0;

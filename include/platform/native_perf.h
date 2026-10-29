@@ -296,6 +296,7 @@ struct NativeInstProf
 	u32 accepted;    /* triangles past the flag / NCLIP / screen-window gate */
 	u32 claimed;     /* triangles the native model path took (no packet) */
 	u32 packets;     /* triangles that went to the packet writer */
+	u32 gated;       /* of rtpt + rtps: projected by the native-model gate, not the software GTE */
 	/* Sampled phases: one command in NATIVE_INSTPROF_SAMPLE_EVERY. */
 	u32 clock;
 	u32 samples[NATIVE_INSTPROF_PHASES];
