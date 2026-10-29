@@ -151,7 +151,7 @@ Rules the hardware enforces and emulators do not:
   it in the content area under the tab bar. Before the first GPU frame the same
   picture is blitted on the CPU. It repaints only on change; idle it costs nothing.
   Log text goes to the DEBUG > LOG view, the SD log and the 3dslink stream.
-  Settings (ftp, btmmap, stereo, fpscap, cpu804) persist in `ctr3d.cfg` in the app dir.
+  Settings (ftp, btmmap, stereo, fpsmode, cpu804) persist in `ctr3d.cfg` in the app dir.
 - App data lives in `sdmc:/3ds/ctr_native/` (assets/, memcards/, update/,
   ctr3d.cfg, enable-log.txt, dev-ftp.txt) for a .3dsx and an installed CIA alike.
 - FTP (`n3ds_ftp.c`, port 5000, one lowest-priority thread on core 3, else 2;
@@ -238,17 +238,56 @@ heap/linear use, grep them for the real peak per level):
   registers, capture table, native-model capture calls). Run it before
   committing a change to either.
 
-Frame pacing (OPTIONS > FRAME CAP, cfg `fpscap`: AUTO / 30 / 20). The game flips
+Frame pacing (OPTIONS > FRAME SKIP, cfg `fpsmode`: AUTO / 30 / OFF; the old
+FRAME CAP `fpscap` is migrated: AUTO and 30 keep, 20 becomes AUTO). The game flips
 after `vsyncTillFlip` emulated vblanks, set at each submit from
-`Platform_FlipVBlanks`: 2 (30 fps, retail) or 3 (20 fps). AUTO is 30 on a New 3DS;
-on an Old 3DS / 2DS and in the simulation it drops to 20 while 8 of 32 frames miss
-33.3 ms of work and goes back after two 32-frame windows with at most one frame over
-29.3 ms. A frame that cannot hold 30 is then shown for a steady 3 vblanks instead
-of alternating 2 and 3. Game logic is time-based (`elapsedTimeMS` from the root
-counter, clamped at 64 ms, i.e. correct down to ~15.6 fps and slow motion below)
-and HOWL runs per vblank, so the cap changes neither game speed nor music tempo;
-retail itself drops to 20 on heavy frames. The emulated vblank is 60.00 Hz and the
-panel ~59.83 Hz, so one frame in ~115 at the cap still shows a vblank short.
+`Platform_FlipVBlanks`: 1 (60 fps), 2 (30 fps, retail) or 3 (20 fps). The policy is
+`platform/n3ds/n3ds_framepace.c` (host test: `platform/n3ds/tests/run-fps60-tests.py`):
+- AUTO (default, every console): 60 while frames fit, one step down (30, then 20)
+  when 8 of 32 frames miss the current interval, one step up after two 32-frame
+  windows with at most one frame over the faster interval minus a margin (4 ms for
+  20 -> 30, 3 ms for 30 -> 60, i.e. 13.7 ms of work). Two windows of dwell after
+  each change; a 60 that misses drops at once, and if it held less than 8 windows
+  the next 30 -> 60 waits twice as long (2, 4, ... 64 windows, reset after 32
+  windows at 60), so a scene on the edge settles at 30 instead of flickering. An
+  Old 3DS normally sits at 30 or 20 as before.
+- OFF: 1 vblank whenever the context allows it; a frame that does not fit simply
+  takes the vblanks it needs.
+- 30: always 2 vblanks, the retail cadence and code paths.
+A frame is only shown for 1 vblank where the game allows 60 (`g_fps60Allowed`,
+`game/MAIN/MainFps60.c`): racing, battle, time trial and the adventure hub's
+driving. Main menu, pause, any open menu, cutscenes / podium / credits, end of
+race, demo mode and loads (the checkered flag) stay at 30.
+
+60 fps game logic (`include/ctr_fps60.h`, `game/MAIN/MainFps60.c`): the frame after
+one shown for 1 vblank runs its logic in 60 Hz mode (`g_fps60`, decided per frame
+from `Platform_LastFrameVBlanks`; a late frame is paid back by the next one ticking
+a whole retail frame, so the sum stays right). Retail logic is partly time based
+(`elapsedTimeMS` from the root counter, clamped at 64 ms: correct at 60, 30 and 20)
+and partly frame counted; the frame-counted part is handled in two worlds:
+- 60 Hz world, ticked every frame and patched per site with runtime ports of
+  CTR-ModSDK's `USE_60FPS` patch (`FPS_DOUBLE`/`FPS_HALF`/`FPS_RIGHTSHIFT`/
+  `FPS60_HALF_RATE`, each site commented `// 60fps:`): the drivers' funcPtrs
+  (`game/Vehicle/*`), AI driving (ROBOT, `BOTS.c`), the camera (`CAM.c`), turbo
+  flames, and everything drawn every frame (HUD in `game/UI/*`, fades, the hub
+  map, lap stats). Model animation data is NOT doubled as in ModSDK (not
+  runtime-switchable): driver animation frames advance on 30 Hz ticks.
+- 30 Hz world, ticked on every other 60 Hz frame with `gGT->timer`,
+  `elapsedTimeMS` and `sdata->frameCounter` swapped to 30 Hz values
+  (`Fps60_Enter30`/`Leave30`), so its retail code needs no patch: every other
+  thread bucket (weapons, hazards, crates, HUD threads, Aku hints, ghosts),
+  particles (`Particle_Init` drops 60 Hz-world spawns on half the frames, one-shot
+  bursts set `g_fps60ForceParticle`), the ghost recorder, AI item use
+  (`PickupBots_Update`), Roo's Tubes bubbles, rain motion, the clock weapon
+  countdown. Values it writes that the 60 Hz world counts (weapon roulette,
+  HUD fly-ins) are `FPS_DOUBLE`d at the write (`game/231`). Texture cycles and
+  water / SCVert read the 30 Hz timer (`Fps60_Timer30`).
+With the game never at 60, `g_fps60` stays 0, every frame is a 30 Hz tick and
+nothing is swapped: the retail paths bit for bit. HOWL runs per vblank, so the rate
+changes neither music tempo nor sound timers. The emulated vblank is 60.00 Hz and
+the panel ~59.83 Hz, so one frame in ~115 at a steady cap still shows a vblank
+short. Expect at 60: weapons, hazards, particles, ghosts and anything a 30 Hz
+thread places on the kart (Aku mask, shields, TNT on the head) move at 30.
 
 3D on an Old 3DS: 3D EFFECT defaults to AUTO there (a saved choice wins). The
 right eye is dropped while it alone makes the frame miss 50 ms (or the forced 30
@@ -264,10 +303,19 @@ Measuring (CTR_INTERNAL, SD log, every 64 frames after `[GPUTIME]`):
   the previous GPU frame + clears; ~0 on the no-worker path, where the GPU's
   3-7 ms overlap the next frame's game logic), `rEyeSt` (right eye per stereo
   frame) and the journal per stereo frame (`pkt vram leaf run inst brk ovf`).
-- `[PACE]`: `cap` in force, `mode`, `avgWorkUs`/`maxWorkUs` (flip to flip minus
-  the pacer's sleep), `miss` (frames over the cap), `changes`, `3d` (AUTO shows
-  `(2D)` when it has the right eye off), `rEyeUs`; plus one `[PACE] auto ...` line
-  per decision.
+- `[PACE]`: `cap` in force, `mode` (auto / 30 / off), `avgWorkUs`/`maxWorkUs`
+  (flip to flip minus the pacer's sleep), `miss` (frames over the cap), `changes`,
+  `3d` (AUTO shows `(2D)` when it has the right eye off), `rEyeUs`; game speed:
+  `logic` (game frames that ticked), `at60` (of which in 60 Hz mode), `speed`
+  (frame-counted logic speed in % of retail: half ticks per emulated vblank; 100 at
+  a steady 60 or 30, 67 at 20 as on retail; paused or loading windows read low),
+  `t30` (30 Hz-world ticks, ~vbl/2 at full speed), `vbl`, `sw` (60 <-> 30 logic
+  switches), `up60` (AUTO's current 30 -> 60 backoff in windows); plus one
+  `[PACE] auto ...` line per decision.
+- `[FPS60] lap N`: per lap of player 1, the race clock and the real (vblank) time
+  of the lap, logic frames and how many at 60, `speed`, and the top kart speed
+  (`speedApprox`). The same driving at 30 and at 60 should give the same lap times
+  and top speed.
 - dumpreq `c3dflush [N]`: 0 (default) lets C3D_FrameEnd flush the whole linear
   heap every frame, 1 flushes only the frame's vertex range (GX_CMDLIST_FLUSH for
   the command list). A/B with `fend` on hardware before changing the default.
