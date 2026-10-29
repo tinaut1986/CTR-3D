@@ -2607,6 +2607,23 @@ static int N3DS_NextPktBias(int cur)
  */
 int g_dbg_frameSync = 0;
 
+/*
+ * What C3D_FrameEnd flushes from the CPU's data cache before the GPU reads the
+ * frame. 0 (default): C3D_FrameEnd(0), i.e. citro3d's GSPGPU_FlushDataCache
+ * over the WHOLE linear heap (32 MiB on an Old 3DS, 88 MiB on a New 3DS) every
+ * frame. 1: only what the CPU wrote for this frame and nobody flushed yet --
+ * the vertex range [0, s_vertexCursor) -- plus GX_CMDLIST_FLUSH, which has
+ * GSP flush the command list itself. Every other CPU write the GPU reads
+ * flushes at its own site: decoded cells and track-atlas rects
+ * (N3DS_C3DUploadTileBlock), the track geometry block and its per-frame
+ * patches, the VRAM-display chunks, the bottom-UI texture. dumpreq
+ * `c3dflush [N]`; [ENDPROF] `fend` is the whole FrameEnd and `flush` the
+ * range flush of mode 1. Off by default until hardware says the range flush
+ * is the cheaper one (the kernel may well clean the whole L1 for a range that
+ * large, which would make mode 0 the cheap one).
+ */
+int g_dbg_c3dFlush = 0;
+
 /* Nonzero between a successful C3D_FrameBegin and C3D_FrameEnd. citro3d
  * points libctru's GPU command buffer at NULL once a frame ends, so ANY draw
  * or state change issued outside the bracket is a svcBreak (GPUCMD_Add's
@@ -2760,7 +2777,21 @@ void N3DS_C3DEndFrame(void)
 	N3DS_FrameTrace("[CTR-3DS] FrameEnd: enter (submit)");
 	N3DS_BeatMark(beatThread, N3DS_BEAT_WHERE_FRAMEEND);
 	s_frameOpen = 0;
-	C3D_FrameEnd(0);
+	if (g_dbg_c3dFlush && (s_vertexBufferMem != NULL))
+	{
+		const unsigned long long flushT = N3DS_EndProfNow();
+
+		if (s_vertexCursor > 0)
+		{
+			GSPGPU_FlushDataCache(s_vertexBufferMem, (u32)((size_t)s_vertexCursor * sizeof(N3DS_Vertex)));
+		}
+		(void)N3DS_EndProfMark(N3DS_ENDPROF_FLUSH, flushT);
+		C3D_FrameEnd(GX_CMDLIST_FLUSH);
+	}
+	else
+	{
+		C3D_FrameEnd(0);
+	}
 	N3DS_BeatMark(beatThread, N3DS_BEAT_WHERE_OK);
 	N3DS_FrameTrace("[CTR-3DS] FrameEnd: returned");
 
@@ -3196,6 +3227,10 @@ int N3DS_TrackGeom_Upload(const void *verts, int vertCount, int vertStride, cons
 
 	memcpy(block, verts, vertBytes);
 	memcpy(block + indexOffset, indices, (size_t)indexCount * sizeof(u16));
+	/* Once per level load. Covered by C3D_FrameEnd(0)'s whole-heap flush
+	 * anyway; required under `c3dflush 1`, which flushes only the frame's
+	 * vertex range. */
+	GSPGPU_FlushDataCache(block, (u32)totalBytes);
 
 	s_trackGeomMem = block;
 	s_trackIndexPtr = block + indexOffset;
@@ -4629,6 +4664,10 @@ void N3DS_C3DUploadVramDisplayChunk(int slotIndex, const void *tiled256)
 	}
 
 	C3D_TexUpload(&s_vramDisplayTex[slotIndex], tiled256);
+	/* C3D_TexUpload is a plain memcpy into linear memory. Covered by
+	 * C3D_FrameEnd(0)'s whole-heap flush anyway; required under
+	 * `c3dflush 1` (see g_dbg_c3dFlush). */
+	GSPGPU_FlushDataCache(s_vramDisplayTex[slotIndex].data, s_vramDisplayTex[slotIndex].size);
 }
 
 void N3DS_C3DBindVramDisplayTex(int slotIndex)
@@ -4792,6 +4831,10 @@ unsigned int N3DS_ReadButtons(void)
 	 *   vol [N]     -- output-stage gain, percent of SPU-faithful amplitude
 	 *                  (retail's 0x3fff master is half digital scale, so 200
 	 *                  = full scale and the default). Bare resets to default.
+	 *   c3dflush [N] -- frame-end cache flush (default 0): 0 = citro3d's
+	 *                  flush of the whole linear heap, 1 = only this frame's
+	 *                  vertex range plus GX_CMDLIST_FLUSH. Bare token toggles.
+	 *                  [ENDPROF] fend/flush price the two.
 	 *   gxguard [N] -- bounded C3D_FrameBegin with stall-recovery logging
 	 *                  (Rosalina-freeze hardening, default ON). Bare token
 	 *                  toggles, N sets 0/1. OFF calls libctru's C3D_FrameBegin
@@ -4958,6 +5001,19 @@ unsigned int N3DS_ReadButtons(void)
 					g_dbg_frameSync ^= 1;
 					N3DS_DebugLog(g_dbg_frameSync ? "[CTR-3DS] framesync: ON (FrameBegin waits for hw vblank)"
 					                              : "[CTR-3DS] framesync: OFF (begin immediately)");
+				}
+				else if (strncmp(word, "c3dflush", 8) == 0)
+				{
+					if (word[8] == ' ')
+					{
+						g_dbg_c3dFlush = (atoi(&word[9]) != 0) ? 1 : 0;
+					}
+					else
+					{
+						g_dbg_c3dFlush = !g_dbg_c3dFlush;
+					}
+					N3DS_DebugLog(g_dbg_c3dFlush ? "[CTR-3DS] c3dflush: 1 (frame vertex range + command list only)"
+					                             : "[CTR-3DS] c3dflush: 0 (citro3d flushes the whole linear heap)");
 				}
 				else if (strncmp(word, "gxguard", 7) == 0)
 				{
