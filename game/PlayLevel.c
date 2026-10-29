@@ -165,6 +165,10 @@ void PlayLevel_UpdateLapStats(void)
 					if ((currDriver->actionsFlagSet & ACTION_BOT) == 0)
 					{
 						// frames, so the animation lasts 3 seconds
+						// 60fps: not doubled (ModSDK PlayLevel_0 FPS_DOUBLE(90)): the
+						// mode can change during the animation, so the "FINAL LAP"
+						// drawer in MainFrame_RenderFrame.c counts these retail
+						// frames at half rate instead
 						sdata->finalLapTextTimer[driverIndex] = PLAYLEVEL_FINAL_LAP_TEXT_FRAMES;
 					}
 				}

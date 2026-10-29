@@ -16,7 +16,9 @@ void UI_Lerp2D_Angular(SVec2 *pos, s16 drawnPosition, s16 absolutePosition, s16 
 {
 	int drawnPositionInt = (int)drawnPosition;
 	int absolutePositionInt = (int)absolutePosition;
-	int angle = MATH_Sin(((int)frameCounter << UI_LERP2D_ANGULAR_FRAME_SHIFT) / UI_LERP2D_TRANSITION_FRAMES);
+	// 60fps: frameCounter is in half frames at 60 (UI_DrawRankedDrivers),
+	// ModSDK UI_20_Lerp2D_Angular FPS_DOUBLE(5)
+	int angle = MATH_Sin(((int)frameCounter << UI_LERP2D_ANGULAR_FRAME_SHIFT) / FPS_DOUBLE(UI_LERP2D_TRANSITION_FRAMES));
 	s16 horizontalOffset = (s16)(angle * UI_LERP2D_RANK_ICON_RADIUS >> UI_LERP2D_FIXED_SHIFT);
 
 	if (absolutePositionInt < drawnPositionInt)
@@ -30,7 +32,7 @@ void UI_Lerp2D_Angular(SVec2 *pos, s16 drawnPosition, s16 absolutePosition, s16 
 
 	pos->y = UI_LERP2D_RANK_ICON_BASE_Y + (drawnPosition * UI_LERP2D_RANK_ICON_SLOT_H) +
 	         ((((absolutePositionInt - drawnPositionInt) * UI_LERP2D_RANK_ICON_SLOT_H) * (int)frameCounter) * UI_LERP2D_TRANSITION_SCALE) /
-	             (UI_LERP2D_TRANSITION_FRAMES * UI_LERP2D_TRANSITION_SCALE);
+	             (FPS_DOUBLE(UI_LERP2D_TRANSITION_FRAMES) * UI_LERP2D_TRANSITION_SCALE);
 }
 
 // NOTE(aalhendi): ASM-verified NTSC-U 926 0x8004ec18-0x8004ecd4.

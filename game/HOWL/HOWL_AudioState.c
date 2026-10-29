@@ -299,7 +299,8 @@ void Audio_Update1(void)
 #if defined(CTR_NATIVE)
 		if (d == NULL)
 		{
-			if (((sdata->boolNeedXASeek != 0) && (sdata->XA_State == XA_IDLE)) && (9 < gGT->frameTimer_MainFrame_ResetDB - sdata->XA_PauseFrame))
+			// 60fps: displayed frames, double the 9-frame XA seek delay at 60
+			if (((sdata->boolNeedXASeek != 0) && (sdata->XA_State == XA_IDLE)) && (FPS_DOUBLE(9) < gGT->frameTimer_MainFrame_ResetDB - sdata->XA_PauseFrame))
 			{
 				sdata->boolNeedXASeek = 0;
 			}
@@ -310,7 +311,8 @@ void Audio_Update1(void)
 #endif
 
 		// if need to XASeek
-		if (((sdata->boolNeedXASeek != 0) && (sdata->XA_State == XA_IDLE)) && (9 < gGT->frameTimer_MainFrame_ResetDB - sdata->XA_PauseFrame))
+		// 60fps: displayed frames, double the 9-frame XA seek delay at 60
+		if (((sdata->boolNeedXASeek != 0) && (sdata->XA_State == XA_IDLE)) && (FPS_DOUBLE(9) < gGT->frameTimer_MainFrame_ResetDB - sdata->XA_PauseFrame))
 		{
 			// far from finish line
 			if (2000 < d->distanceToFinish_curr)
@@ -408,7 +410,8 @@ void Audio_Update1(void)
 #if defined(CTR_NATIVE)
 		if (d == NULL)
 		{
-			if (((sdata->boolNeedXASeek != 0) && (sdata->XA_State == XA_IDLE)) && (9 < gGT->frameTimer_MainFrame_ResetDB - sdata->XA_PauseFrame))
+			// 60fps: displayed frames, double the 9-frame XA seek delay at 60
+			if (((sdata->boolNeedXASeek != 0) && (sdata->XA_State == XA_IDLE)) && (FPS_DOUBLE(9) < gGT->frameTimer_MainFrame_ResetDB - sdata->XA_PauseFrame))
 			{
 				sdata->boolNeedXASeek = 0;
 			}
@@ -419,7 +422,8 @@ void Audio_Update1(void)
 #endif
 
 		// if need to XASeek
-		if (((sdata->boolNeedXASeek != 0) && (sdata->XA_State == XA_IDLE)) && (9 < gGT->frameTimer_MainFrame_ResetDB - sdata->XA_PauseFrame))
+		// 60fps: displayed frames, double the 9-frame XA seek delay at 60
+		if (((sdata->boolNeedXASeek != 0) && (sdata->XA_State == XA_IDLE)) && (FPS_DOUBLE(9) < gGT->frameTimer_MainFrame_ResetDB - sdata->XA_PauseFrame))
 		{
 			// far from finish line
 			if (2000 < d->distanceToFinish_curr)

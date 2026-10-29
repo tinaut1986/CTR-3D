@@ -86,7 +86,12 @@ internal int UI_Rank_GetDamageColor(int driverIndex)
 		color += strength * 0x10000;
 
 		// one frame closer to zero
-		d->damageColorTimer += 1;
+		// 60fps: every other frame, the colour formula reads retail frames
+		// (ModSDK UI_43_DrawRankedDrivers)
+		if (FPS60_HALF_RATE(gGT->timer))
+		{
+			d->damageColorTimer += 1;
+		}
 	}
 
 	// 30 to 1
@@ -99,7 +104,11 @@ internal int UI_Rank_GetDamageColor(int driverIndex)
 		color += strength * 0x10000;
 
 		// one frame closer to zero
-		d->damageColorTimer -= 1;
+		// 60fps: every other frame (ModSDK UI_43_DrawRankedDrivers)
+		if (FPS60_HALF_RATE(gGT->timer))
+		{
+			d->damageColorTimer -= 1;
+		}
 	}
 
 	return color;
@@ -232,7 +241,15 @@ void UI_DrawRankedDrivers(void)
 				// === Icon Transitioning ===
 				if (isTransitioning)
 				{
-					UI_Lerp2D_Angular(&iconPos, *curr, *des, *transitionTimer);
+					// 60fps: the timer counts retail frames at half rate (below),
+					// UI_Lerp2D_Angular reads half frames (ModSDK UI_43 / UI_20
+					// count to FPS_DOUBLE(5) instead)
+					s16 lerpFrame = *transitionTimer;
+					if (FPS60)
+					{
+						lerpFrame = (s16)((*transitionTimer * 2) + (gGT->timer & 1));
+					}
+					UI_Lerp2D_Angular(&iconPos, *curr, *des, lerpFrame);
 					pos.x = iconPos.x;
 					pos.y = iconPos.y;
 				}
@@ -249,7 +266,10 @@ void UI_DrawRankedDrivers(void)
 
 				if (isTransitioning)
 				{
-					transitionTimer[0]++;
+					if (FPS60_HALF_RATE(gGT->timer))
+					{
+						transitionTimer[0]++;
+					}
 
 					if (*transitionTimer >= UI_RANK_TRANSITION_FRAMES)
 					{
