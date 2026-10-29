@@ -525,6 +525,217 @@ internal void NativePerf_InsertWorstFrame(const struct NativePerfWorstFrame *fra
 }
 
 #if defined(__3DS__)
+/* [INSTPROF] / [GTEPROF]: see the block comment in native_perf.h. */
+struct NativeInstProf g_instProf;
+int g_gteProfPhase;
+u32 g_gteProfOps[NATIVE_GTEPROF_PHASES][64];
+
+/* Phases nest (the instance scopes sit inside render_frame), so the phase a
+ * scope replaces is restored when it closes. Main thread only: the worker
+ * never runs the GTE. */
+#define NATIVE_GTEPROF_STACK 8
+global_variable int s_gteProfStack[NATIVE_GTEPROF_STACK];
+global_variable int s_gteProfDepth;
+
+u32 NativeInstProf_Tick(void)
+{
+	return (u32)N3DS_GetTickCount();
+}
+
+internal int NativePerf_GteProfPhaseOf(enum NativePerfBucket bucket)
+{
+	/* An if chain, not a switch: -Wswitch-enum wants every bucket named. */
+	if (bucket == NATIVE_PERF_BUCKET_GAME_LOGIC)
+	{
+		return NATIVE_GTEPROF_LOGIC;
+	}
+	if (bucket == NATIVE_PERF_BUCKET_MAINFRAME_QUEUE_INSTANCES)
+	{
+		return NATIVE_GTEPROF_QUEUE;
+	}
+	if (bucket == NATIVE_PERF_BUCKET_MAINFRAME_EXECUTE_INSTANCES)
+	{
+		return NATIVE_GTEPROF_EXEC;
+	}
+	if (bucket == NATIVE_PERF_BUCKET_MAINFRAME_LEVEL_GEOMETRY)
+	{
+		return NATIVE_GTEPROF_LEVEL;
+	}
+	if ((bucket == NATIVE_PERF_BUCKET_MAINFRAME_EFFECTS) || (bucket == NATIVE_PERF_BUCKET_MAINFRAME_HUD))
+	{
+		return NATIVE_GTEPROF_EFFECTS;
+	}
+	if (bucket == NATIVE_PERF_BUCKET_MAINFRAME_UI)
+	{
+		return NATIVE_GTEPROF_UI;
+	}
+	return -1;
+}
+
+internal void NativePerf_GteProfEnter(enum NativePerfBucket bucket)
+{
+	const int phase = NativePerf_GteProfPhaseOf(bucket);
+
+	if (phase < 0)
+	{
+		return;
+	}
+	if (s_gteProfDepth < NATIVE_GTEPROF_STACK)
+	{
+		s_gteProfStack[s_gteProfDepth] = g_gteProfPhase;
+	}
+	s_gteProfDepth++;
+	g_gteProfPhase = phase;
+}
+
+internal void NativePerf_GteProfLeave(enum NativePerfBucket bucket)
+{
+	if ((NativePerf_GteProfPhaseOf(bucket) < 0) || (s_gteProfDepth <= 0))
+	{
+		return;
+	}
+	s_gteProfDepth--;
+	g_gteProfPhase = (s_gteProfDepth < NATIVE_GTEPROF_STACK) ? s_gteProfStack[s_gteProfDepth] : NATIVE_GTEPROF_OTHER;
+}
+
+/* PsyQ mnemonics of the software GTE's function codes (native_gte_core.c's
+ * switch); unnamed codes print as their hex. */
+internal const char *NativePerf_GteOpName(int funct)
+{
+	switch (funct)
+	{
+	case 0x01: return "rtps";
+	case 0x06: return "nclip";
+	case 0x0c: return "op";
+	case 0x10: return "dpcs";
+	case 0x11: return "intpl";
+	case 0x12: return "mvmva";
+	case 0x13: return "ncds";
+	case 0x14: return "cdp";
+	case 0x16: return "ncdt";
+	case 0x1b: return "nccs";
+	case 0x1c: return "cc";
+	case 0x1e: return "ncs";
+	case 0x20: return "nct";
+	case 0x28: return "sqr";
+	case 0x29: return "dcpl";
+	case 0x2a: return "dpct";
+	case 0x2d: return "avsz3";
+	case 0x2e: return "avsz4";
+	case 0x30: return "rtpt";
+	case 0x3d: return "gpf";
+	case 0x3e: return "gpl";
+	case 0x3f: return "ncct";
+	default: return NULL;
+	}
+}
+
+internal void NativePerf_ReportInstProf(u32 frames)
+{
+	static const char *const funcNames[NATIVE_INSTPROF_FUNCS] = {"normal", "alt", "split", "special", "refl", "other"};
+	static const char *const phaseNames[NATIVE_GTEPROF_PHASES] = {"other", "logic", "queue", "exec", "level", "effects", "ui"};
+	const double usPerTick = 1000000.0 / (double)N3DS_GetTickFrequency();
+	struct NativeInstProf *ip = &g_instProf;
+	char line[400];
+	int off;
+	int k;
+
+	if (frames == 0)
+	{
+		return;
+	}
+
+	/* Per draw-func kind: drawn instances per frame and their whole cost. */
+	off = snprintf(line, sizeof(line), "[INSTPROF] f=%lu", (unsigned long)frames);
+	for (k = 0; k < NATIVE_INSTPROF_FUNCS; k++)
+	{
+		if ((ip->instCount[k] != 0) && (off > 0) && ((size_t)off < sizeof(line)))
+		{
+			off += snprintf(line + off, sizeof(line) - (size_t)off, " %s n/f=%lu us=%lu cyc/inst=%lu", funcNames[k], (unsigned long)(ip->instCount[k] / frames),
+			                (unsigned long)((double)ip->instTicks[k] * usPerTick / (double)frames),
+			                (unsigned long)(ip->instTicks[k] / ip->instCount[k]));
+		}
+	}
+	N3DS_DebugLog(line);
+
+	/* DrawFunc_Normal: per-command work and the sampled phase costs. A phase's
+	 * frame estimate is its sampled mean times the commands that reach it. */
+	if (ip->cmds != 0)
+	{
+		const u32 reach[NATIVE_INSTPROF_PHASES] = {ip->cmds, ip->rtpt + ip->rtps, ip->accepted, ip->packets};
+		u32 cyc[NATIVE_INSTPROF_PHASES];
+		u32 estUs[NATIVE_INSTPROF_PHASES];
+
+		for (k = 0; k < NATIVE_INSTPROF_PHASES; k++)
+		{
+			const double mean = ip->samples[k] ? ((double)ip->ticks[k] / (double)ip->samples[k]) : 0.0;
+
+			cyc[k] = (u32)mean;
+			estUs[k] = (u32)(mean * (double)reach[k] * usPerTick / (double)frames);
+		}
+		snprintf(line, sizeof(line),
+		         "[INSTPROF] normal/f cmd=%lu dec=%lu cached=%lu rtpt=%lu rtps=%lu acc=%lu claim=%lu pkt=%lu | cyc dec=%lu proj=%lu cap=%lu pkt=%lu | us dec=%lu proj=%lu cap=%lu pkt=%lu",
+		         (unsigned long)(ip->cmds / frames), (unsigned long)(ip->decodes / frames), (unsigned long)(ip->cached / frames),
+		         (unsigned long)(ip->rtpt / frames), (unsigned long)(ip->rtps / frames), (unsigned long)(ip->accepted / frames),
+		         (unsigned long)(ip->claimed / frames), (unsigned long)(ip->packets / frames), (unsigned long)cyc[0], (unsigned long)cyc[1],
+		         (unsigned long)cyc[2], (unsigned long)cyc[3], (unsigned long)estUs[0], (unsigned long)estUs[1], (unsigned long)estUs[2],
+		         (unsigned long)estUs[3]);
+		N3DS_DebugLog(line);
+	}
+
+	/* GTE ops per frame, per phase: the total and the six most frequent. */
+	for (k = 0; k < NATIVE_GTEPROF_PHASES; k++)
+	{
+		u32 total = 0;
+		u8 taken[64];
+		int r;
+		int f;
+
+		for (f = 0; f < 64; f++)
+		{
+			total += g_gteProfOps[k][f];
+		}
+		if (total == 0)
+		{
+			continue;
+		}
+
+		memset(taken, 0, sizeof(taken));
+		off = snprintf(line, sizeof(line), "[GTEPROF] %s ops/f=%lu", phaseNames[k], (unsigned long)(total / frames));
+		for (r = 0; r < 6; r++)
+		{
+			int best = -1;
+			const char *name;
+
+			for (f = 0; f < 64; f++)
+			{
+				if (!taken[f] && (g_gteProfOps[k][f] != 0) && ((best < 0) || (g_gteProfOps[k][f] > g_gteProfOps[k][best])))
+				{
+					best = f;
+				}
+			}
+			if ((best < 0) || (off <= 0) || ((size_t)off >= sizeof(line)))
+			{
+				break;
+			}
+			taken[best] = 1;
+			name = NativePerf_GteOpName(best);
+			if (name != NULL)
+			{
+				off += snprintf(line + off, sizeof(line) - (size_t)off, " %s=%lu", name, (unsigned long)(g_gteProfOps[k][best] / frames));
+			}
+			else
+			{
+				off += snprintf(line + off, sizeof(line) - (size_t)off, " 0x%02x=%lu", best, (unsigned long)(g_gteProfOps[k][best] / frames));
+			}
+		}
+		N3DS_DebugLog(line);
+	}
+
+	memset(&g_instProf, 0, sizeof(g_instProf));
+	memset(g_gteProfOps, 0, sizeof(g_gteProfOps));
+}
+
 /*
  * Integer microseconds throughout, never %f: devkitARM's newlib only links
  * float formatting when explicitly asked to, and a silently-blank %f would
@@ -657,6 +868,8 @@ internal void NativePerf_Report3DSWindow(void)
 		snprintf(out, sizeof(out), "[GPUTIME] cpuUs=%d gpuUs=%d frames=%u", gtCpuUs, gtGpuUs, gtFrames);
 		N3DS_DebugLog(out);
 	}
+
+	NativePerf_ReportInstProf(s_windowFrames);
 
 	/* Only when the effect was live: quiet windows would otherwise pay an SD
 	 * log line each to report zeros, and the absence of the line IS the null
@@ -1286,6 +1499,9 @@ void NativePerf_BeginScope(enum NativePerfBucket bucket)
 		return;
 	}
 
+#if defined(__3DS__)
+	NativePerf_GteProfEnter(bucket);
+#endif
 	if (s_scopeDepth[bucket]++ == 0)
 	{
 		s_scopeStartCounter[bucket] = SDL_GetPerformanceCounter();
@@ -1324,6 +1540,9 @@ void NativePerf_EndScope(enum NativePerfBucket bucket)
 		return;
 	}
 
+#if defined(__3DS__)
+	NativePerf_GteProfLeave(bucket);
+#endif
 	s_scopeDepth[bucket]--;
 	if (s_scopeDepth[bucket] == 0)
 	{

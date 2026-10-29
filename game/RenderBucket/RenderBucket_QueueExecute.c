@@ -17,6 +17,27 @@
 #define RB_MODEL_PERF_END(bucket)   ((void)0)
 #endif
 
+/*
+ * [INSTPROF] hooks (platform/native_perf.c, block comment in native_perf.h):
+ * per-instance draw-func timing and DrawFunc_Normal's per-command counters and
+ * sampled phase ticks. 3DS CTR_INTERNAL builds only; elsewhere every macro is
+ * nothing, so the walk itself carries no platform #ifdef.
+ */
+#if defined(CTR_NATIVE) && defined(CTR_INTERNAL) && defined(__3DS__)
+#include <platform/native_perf.h>
+#define RB_INSTPROF                   1
+#define RB_INSTPROF_COUNT(field)      (g_instProf.field++)
+#define RB_INSTPROF_SAMPLE()          (((++g_instProf.clock) & (NATIVE_INSTPROF_SAMPLE_EVERY - 1)) == 0)
+#define RB_INSTPROF_TICK()            NativeInstProf_Tick()
+#define RB_INSTPROF_PHASE(phase, t0)  (g_instProf.samples[(phase)]++, g_instProf.ticks[(phase)] += NativeInstProf_Tick() - (t0))
+#else
+#define RB_INSTPROF                   0
+#define RB_INSTPROF_COUNT(field)      ((void)0)
+#define RB_INSTPROF_SAMPLE()          0
+#define RB_INSTPROF_TICK()            0u
+#define RB_INSTPROF_PHASE(phase, t0)  ((void)(t0))
+#endif
+
 #if defined(CTR_NATIVE) && defined(CTR_NATIVE_MODEL_RENDERER) && CTR_NATIVE_MODEL_RENDERER
 /*
  * s32 rung 1 capture hooks (platform/native_model_emit.c). Declared here rather
@@ -458,6 +479,15 @@ enum
 	RENDER_BUCKET_TEX_WORD2_OFFSET = offsetof(struct TextureLayout, u2) - offsetof(struct TextureLayout, u0),
 };
 
+/*
+ * Per-vertex decode helpers, forced inline: the delta decoder calls the bit
+ * reader three or six times per vertex (once per component and stream), and
+ * out of line each call cost more in register saves and argument moves on
+ * the ARM11 than the bit extraction itself. CTR_NATIVE's force_inline is
+ * only a hint, so this one is explicit.
+ */
+#define RB_DECODE_INLINE static inline __attribute__((always_inline))
+
 static u32 RenderBucket_ReadPackedWord(const void *src)
 {
 	const u8 *bytes = (const u8 *)src;
@@ -515,13 +545,13 @@ static struct InstDrawPerPlayer *RenderBucket_InstancePlayerIdpp(struct Instance
 	return (struct InstDrawPerPlayer *)(void *)((u8 *)instPlayerBase + sizeof(struct Instance));
 }
 
-static int RenderBucket_SignExtendBits(u32 value, int bits)
+RB_DECODE_INLINE int RenderBucket_SignExtendBits(u32 value, int bits)
 {
 	int shift = 32 - bits;
 	return (s32)(value << shift) >> shift;
 }
 
-static int RenderBucket_GetSignedBits(const u8 *vertData, int *bitIndex, int bits)
+RB_DECODE_INLINE int RenderBucket_GetSignedBits(const u8 *vertData, int *bitIndex, int bits)
 {
 	int const b = *bitIndex >> 5;
 	int const e = 32 - bits;
@@ -2478,7 +2508,7 @@ static void RenderBucket_ApplyColorOnlyCommand(struct RenderBucketDrawContext *c
 	ctx->tempColor[3] = colorB;
 }
 
-static int RenderBucket_ReadDeltaComponentFromStream(const u8 *vertData, int *bitIndex, u8 bits, int temporalBase, int *accum)
+RB_DECODE_INLINE int RenderBucket_ReadDeltaComponentFromStream(const u8 *vertData, int *bitIndex, u8 bits, int temporalBase, int *accum)
 {
 	int value = RenderBucket_GetSignedBits(vertData, bitIndex, bits + 1);
 
@@ -2494,12 +2524,12 @@ static int RenderBucket_ReadDeltaComponentFromStream(const u8 *vertData, int *bi
 	return *accum;
 }
 
-static int RenderBucket_ReadDeltaComponent(struct RenderBucketDrawContext *ctx, u8 bits, int temporalBase, int *accum)
+RB_DECODE_INLINE int RenderBucket_ReadDeltaComponent(struct RenderBucketDrawContext *ctx, u8 bits, int temporalBase, int *accum)
 {
 	return RenderBucket_ReadDeltaComponentFromStream((const u8 *)ctx->vertData, &ctx->bitIndex, bits, temporalBase, accum);
 }
 
-static void RenderBucket_ReadNextFrameDeltaComponent(struct RenderBucketDrawContext *ctx, u8 bits, int temporalBase, int *currAccum, int *nextAccum)
+RB_DECODE_INLINE void RenderBucket_ReadNextFrameDeltaComponent(struct RenderBucketDrawContext *ctx, u8 bits, int temporalBase, int *currAccum, int *nextAccum)
 {
 	RenderBucket_ReadDeltaComponentFromStream((const u8 *)ctx->vertData, &ctx->bitIndex, bits, temporalBase, currAccum);
 	RenderBucket_ReadDeltaComponentFromStream((const u8 *)ctx->nextVertData, &ctx->nextBitIndex, bits, temporalBase, nextAccum);
@@ -4623,18 +4653,32 @@ void RenderBucket_DrawFunc_Normal(struct RenderBucketDrawContext *ctx)
 		u32 drawCommand;
 		int color;
 		struct RenderBucketUncompressResult decoded;
+		int ipSample;
+		u32 ipT0;
 
+		RB_INSTPROF_COUNT(cmds);
 		if ((command >> 16) == 0)
 		{
 			RenderBucket_ApplyColorOnlyCommand(ctx, command);
 			continue;
 		}
 
+		ipSample = RB_INSTPROF_SAMPLE();
+		ipT0 = ipSample ? RB_INSTPROF_TICK() : 0u;
 		decoded = RenderBucket_DispatchUncompressAnimationFrame(ctx, command, stackIndex);
+		if (ipSample)
+		{
+			RB_INSTPROF_PHASE(NATIVE_INSTPROF_DECODE, ipT0);
+		}
 		color = decoded.color;
 		if ((flags & 4) == 0)
 		{
+			RB_INSTPROF_COUNT(decodes);
 			ctx->vertexIndex++;
+		}
+		else
+		{
+			RB_INSTPROF_COUNT(cached);
 		}
 
 		ctx->tempCoords[0] = ctx->tempCoords[1];
@@ -4689,12 +4733,26 @@ void RenderBucket_DrawFunc_Normal(struct RenderBucketDrawContext *ctx)
 			int isValidTexture;
 			int shouldDraw;
 
+			ipT0 = ipSample ? RB_INSTPROF_TICK() : 0u;
 			shouldDraw = RenderBucket_ProjectPrim_Normal(ctx, drawCommand, useRtps, reuseFirstVertex, &depthMac0);
+			if (ipSample)
+			{
+				RB_INSTPROF_PHASE(NATIVE_INSTPROF_PROJECT, ipT0);
+			}
+			if (useRtps != 0)
+			{
+				RB_INSTPROF_COUNT(rtps);
+			}
+			else
+			{
+				RB_INSTPROF_COUNT(rtpt);
+			}
 			if (shouldDraw == 0)
 			{
 				ctx->stripLength++;
 				continue;
 			}
+			RB_INSTPROF_COUNT(accepted);
 
 			tex = RenderBucket_GetCommandTexture(ctx, drawCommand, &isValidTexture);
 			if (isValidTexture == 0)
@@ -4722,6 +4780,8 @@ void RenderBucket_DrawFunc_Normal(struct RenderBucketDrawContext *ctx)
 			// individual triangle (semi-transparent texture, snapshot full),
 			// and a declined triangle still needs its packet written.
 			int mdlClaimed = 0;
+
+			ipT0 = ipSample ? RB_INSTPROF_TICK() : 0u;
 
 			/* The specular writers and DEPTH_FADE draw NOTHING for an
 			 * untextured triangle (all three bail on tex == 0), so the capture
@@ -4760,6 +4820,14 @@ void RenderBucket_DrawFunc_Normal(struct RenderBucketDrawContext *ctx)
 
 				mdlClaimed = NativeModelEmit_Triangle(mdlXY, mdlZ, mdlColor, tex, mdlBlend);
 			}
+			if (ipSample)
+			{
+				RB_INSTPROF_PHASE(NATIVE_INSTPROF_CAPTURE, ipT0);
+			}
+			if (mdlClaimed != 0)
+			{
+				RB_INSTPROF_COUNT(claimed);
+			}
 
 			// State 1: the native path draws this instance, so do not also
 			// write a packet for it. Everything above still ran -- the vertex
@@ -4774,7 +4842,16 @@ void RenderBucket_DrawFunc_Normal(struct RenderBucketDrawContext *ctx)
 			if (!mdlReplaces || !mdlClaimed)
 #endif
 			{
-				if (RenderBucket_DispatchDrawInstPrim(ctx, drawCommand, tex, depthMac0) < 0)
+				int drawResult;
+
+				RB_INSTPROF_COUNT(packets);
+				ipT0 = ipSample ? RB_INSTPROF_TICK() : 0u;
+				drawResult = RenderBucket_DispatchDrawInstPrim(ctx, drawCommand, tex, depthMac0);
+				if (ipSample)
+				{
+					RB_INSTPROF_PHASE(NATIVE_INSTPROF_PACKET, ipT0);
+				}
+				if (drawResult < 0)
 				{
 #if defined(CTR_NATIVE) && defined(CTR_NATIVE_MODEL_RENDERER) && CTR_NATIVE_MODEL_RENDERER
 					// PrimMem exhaustion ends the walk mid-model. Close the
@@ -5474,6 +5551,11 @@ static int RenderBucket_RunInstanceSetupCallback(struct RenderBucketDrawContext 
 
 static void RenderBucket_DispatchDrawFunc(struct RenderBucketDrawContext *ctx)
 {
+#if RB_INSTPROF
+	const u32 ipT0 = RB_INSTPROF_TICK();
+	int ipKind = NATIVE_INSTPROF_FUNCS - 1;
+#endif
+
 	// NOTE(aalhendi): Retail RenderBucket_Execute copies the per-model color
 	// cache to scratchpad 0x140 before Instance+0x5c setup callback dispatch.
 	RenderBucket_CopyScratchColorCache(ctx);
@@ -5536,30 +5618,45 @@ static void RenderBucket_DispatchDrawFunc(struct RenderBucketDrawContext *ctx)
 	{
 	case RB_RETAIL_DRAWFUNC_NORMAL:
 	{
+#if RB_INSTPROF
+		ipKind = 0;
+#endif
 		RenderBucket_DrawFunc_Normal(ctx);
 		break;
 	}
 
 	case RB_RETAIL_DRAWFUNC_NORMAL_ALT:
 	{
+#if RB_INSTPROF
+		ipKind = 1;
+#endif
 		RenderBucket_DrawFunc_NormalAlt(ctx);
 		break;
 	}
 
 	case RB_RETAIL_DRAWFUNC_SPLIT:
 	{
+#if RB_INSTPROF
+		ipKind = 2;
+#endif
 		RenderBucket_DrawFunc_Split(ctx);
 		break;
 	}
 
 	case RB_RETAIL_DRAWFUNC_SPECIAL:
 	{
+#if RB_INSTPROF
+		ipKind = 3;
+#endif
 		RenderBucket_DrawFunc_Special(ctx);
 		break;
 	}
 
 	case RB_RETAIL_DRAWFUNC_REFLECTION:
 	{
+#if RB_INSTPROF
+		ipKind = 4;
+#endif
 		RenderBucket_DrawFunc_Reflection(ctx);
 		break;
 	}
@@ -5574,6 +5671,11 @@ static void RenderBucket_DispatchDrawFunc(struct RenderBucketDrawContext *ctx)
 
 #if defined(CTR_NATIVE) && CTR_NATIVE_GTE_CAPTURE
 	GTECapture_EndInstanceDepth();
+#endif
+
+#if RB_INSTPROF
+	g_instProf.instCount[ipKind]++;
+	g_instProf.instTicks[ipKind] += RB_INSTPROF_TICK() - ipT0;
 #endif
 }
 

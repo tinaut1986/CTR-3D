@@ -264,9 +264,17 @@ void GTECapture_NoteMatrix(const void *words8)
 {
 	GTECaptureBuffer *buf = &s_gteCaptureBuf[s_gteCaptureWriteIdx];
 
-	if (s_gteMtxShadowValid && (memcmp(s_gteMtxShadow, words8, sizeof(s_gteMtxShadow)) == 0))
+	/* Word compare, not memcmp: this runs once per projecting GTE op and the
+	 * matrix is almost always unchanged. Same answer as the byte compare. */
+	if (s_gteMtxShadowValid)
 	{
-		return;
+		const u32 *w = (const u32 *)words8;
+
+		if (((s_gteMtxShadow[0] ^ w[0]) | (s_gteMtxShadow[1] ^ w[1]) | (s_gteMtxShadow[2] ^ w[2]) | (s_gteMtxShadow[3] ^ w[3]) |
+		     (s_gteMtxShadow[4] ^ w[4]) | (s_gteMtxShadow[5] ^ w[5]) | (s_gteMtxShadow[6] ^ w[6]) | (s_gteMtxShadow[7] ^ w[7])) == 0)
+		{
+			return;
+		}
 	}
 
 	memcpy(s_gteMtxShadow, words8, sizeof(s_gteMtxShadow));
@@ -763,6 +771,13 @@ void GTECapture_Store(s16 sx, s16 sy, s64 sxFull, s64 syFull, u16 sz3, s32 hOver
 	GTECaptureBuffer *buf = &s_gteCaptureBuf[s_gteCaptureWriteIdx];
 	u32 key = GTECapture_PackKey(sx, sy);
 	GTECaptureEntry *entry = &buf->entries[GTECapture_Hash(key)];
+
+	/* The table is ~1.5 MiB and keyed by screen position, so the entry is a
+	 * cache miss nearly every time (no L2 on an Old 3DS). Start both of its
+	 * lines (24-byte entries straddle 32-byte lines) now, so the fetch runs
+	 * under the bracket work below instead of stalling the compare. */
+	__builtin_prefetch(entry, 1);
+	__builtin_prefetch((const u8 *)entry + sizeof(*entry) - 1, 1);
 
 	/* Suppressed producers must not even EVICT -- see the comment above; the
 	 * eviction is the half of the bug that does not look like a skybox

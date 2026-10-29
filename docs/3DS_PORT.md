@@ -215,6 +215,24 @@ heap/linear use, grep them for the real peak per level):
   reports its split (`vbl` counts vblanks, `wakes` stays 0). The OT walk's
   cost per node class is the `[PARSEPROF]` line (268 MHz ticks, i.e. Old-3DS
   cycles); dumpreq `g4run` A/Bs the menu flag's fast path.
+- The game thread's own CPU work: `[INSTPROF]` splits
+  `mainframe_execute_instances_ms` per draw-func kind (`normal`, `alt`, `split`,
+  `special`, `refl`: drawn instances per frame, whole cost, cycles per instance)
+  and, for DrawFunc_Normal, counts commands, decoded/cached vertices, RTPT/RTPS
+  projections, accepted, claimed (native model path) and packet triangles, with
+  the sampled cycles and frame estimate of each phase (`dec` vertex decode,
+  `proj` projection + cull gate, `cap` native-model capture, `pkt` packet
+  write). `[GTEPROF]` counts software-GTE ops per frame per phase (`logic`,
+  `queue`, `exec`, `level`, `effects`, `ui`, `other`) with the six most
+  frequent. Both are CTR_INTERNAL-only, one line set per `[PERF]` window.
+- The software GTE (`native_gte_core.c`) issues each constant op word through
+  its own specialised copy (`GTE_Op*`, picked by the always-inlined doCOP2) and
+  inlines the register moves; the arithmetic is PsyCross's, bit for bit.
+  `platform/n3ds/tests/perf-parity/run.sh [BASE_REV]` checks that on the host:
+  the GTE of a base revision vs the working tree on random register files, and
+  RenderBucket_Execute on random model scenes (prim memory, OT, scratchpad, GTE
+  registers, capture table, native-model capture calls). Run it before
+  committing a change to either.
 - `./build3ds.sh --o3ds-sim` also builds `build-3ds/cia/ctr3d-o3dssim.cia` (own
   title ID 0x0004000005A2C400, SystemModeExt Legacy, SystemMode `O3DS_MEM`
   default 80MB, 268MHz, no L2). It installs next to the normal CIA and shares the
