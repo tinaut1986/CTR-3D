@@ -4526,6 +4526,7 @@ int N3DS_BottomPass_Wanted(int mapDrawing)
 int N3DS_BottomPass_Begin(void)
 {
 	const unsigned short *tiled;
+	int firstUpload = 0;
 	static const float zeroVec[2][4] = {{0, 0, 0, 0}, {0, 0, 0, 0}};
 
 	if (s_bottomTargetFailed || !s_frameOpen)
@@ -4544,6 +4545,7 @@ int N3DS_BottomPass_Begin(void)
 		C3D_TexSetWrap(&s_bottomUiTex, GPU_CLAMP_TO_EDGE, GPU_CLAMP_TO_EDGE);
 		s_bottomUiTexReady = 1;
 		tiled = N3DS_BottomUi_Paint(1); /* first picture: always upload */
+		firstUpload = 1;
 	}
 	else
 	{
@@ -4562,8 +4564,13 @@ int N3DS_BottomPass_Begin(void)
 	}
 	if (tiled != NULL)
 	{
-		memcpy(s_bottomUiTex.data, tiled, (size_t)N3DS_BOTTOM_UI_TEX_W * N3DS_BOTTOM_UI_TEX_H * 2U);
-		GSPGPU_FlushDataCache(s_bottomUiTex.data, (u32)N3DS_BOTTOM_UI_TEX_W * N3DS_BOTTOM_UI_TEX_H * 2U);
+		/* After the first upload, the picture's 30 tile rows (240 lines) only:
+		 * the last 16 lines are never painted and keep the first upload's
+		 * zeros. */
+		const size_t bytes = (size_t)N3DS_BOTTOM_UI_TEX_W * (firstUpload ? (size_t)N3DS_BOTTOM_UI_TEX_H : 240U) * 2U;
+
+		memcpy(s_bottomUiTex.data, tiled, bytes);
+		GSPGPU_FlushDataCache(s_bottomUiTex.data, (u32)bytes);
 	}
 
 	/* Queued clear before any bottom draw; every draw this frame executes at
