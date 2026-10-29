@@ -3109,6 +3109,27 @@ int N3DS_C3DAppendVertices(const N3DS_Vertex *vertices, int count)
 	return base;
 }
 
+N3DS_Vertex *N3DS_C3DReserveVertices(int count, int *baseOut)
+{
+	int base;
+
+	if ((count <= 0) || ((s_vertexCursor + count) > N3DS_MAX_FRAME_VERTICES))
+	{
+		*baseOut = -1;
+		return NULL;
+	}
+
+	base = s_vertexCursor;
+	s_vertexCursor += count;
+	if (s_vertexHighWater < s_vertexCursor)
+	{
+		s_vertexHighWater = s_vertexCursor;
+	}
+
+	*baseOut = base;
+	return (N3DS_Vertex *)s_vertexBufferMem + base;
+}
+
 int N3DS_C3DFrameVertexHighWater(void)
 {
 	return s_vertexHighWater;

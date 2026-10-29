@@ -282,6 +282,12 @@ void N3DS_EndProfFormat(char *out, int outSize);
  * N3DS_C3DDrawTriangles), or -1 if the frame buffer is full -- caller must
  * skip drawing in that case, not draw from a stale/wrong offset. */
 int N3DS_C3DAppendVertices(const N3DS_Vertex *vertices, int count);
+/* The same allocation without the copy: reserves count vertices at the frame
+ * cursor and returns where to write them (the caller writes every field of
+ * every vertex before the frame ends), with their offset in *baseOut; NULL
+ * and -1 when the frame buffer is full. For per-triangle emitters, which
+ * otherwise build each triangle on the stack only to have it copied. */
+N3DS_Vertex *N3DS_C3DReserveVertices(int count, int *baseOut);
 void N3DS_C3DDrawTriangles(int startVertex, int triangleCount);
 /* Nonzero inside a C3D_FrameBegin/End bracket. Draws outside one would panic
  * libctru's GPU command buffer (NULL after FrameEnd); sites that issue GPU work
