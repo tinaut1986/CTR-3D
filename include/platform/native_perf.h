@@ -184,6 +184,15 @@ enum NativePerfBucket
 	NATIVE_PERF_BUCKET_LEVEL_RENDERLISTS,
 	NATIVE_PERF_BUCKET_LEVEL_TRACK_RECORD,
 	NATIVE_PERF_BUCKET_LEVEL_SKY,
+	/*
+	 * render_submit_ms by phase (RenderSubmit): Platform_FlipVBlanks (the
+	 * pacing policy), PutDrawEnv/PutDispEnv, and DrawOTag as a whole (which
+	 * holds draw_otag_ms plus the scene begin/end around it). All nest inside
+	 * render_submit_ms (not dominant candidates). Appended, never inserted.
+	 */
+	NATIVE_PERF_BUCKET_SUBMIT_FLIP,
+	NATIVE_PERF_BUCKET_SUBMIT_ENVS,
+	NATIVE_PERF_BUCKET_SUBMIT_DRAWOTAG,
 	NATIVE_PERF_BUCKET_COUNT
 };
 
