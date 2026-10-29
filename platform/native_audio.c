@@ -7079,24 +7079,15 @@ void NativeAudio_StepVBlank(void)
 		}
 		else
 		{
-			/* Fallback: no worker thread secured (Old3DS, or couldn't claim
-			 * core 1). Renders synchronously on the main thread -- the full
-			 * mixer, so this path is SLOW, but correct and audible: it
-			 * submits to the same ndsp sink the worker would. */
-			s16 scratch[NATIVE_AUDIO_VBLANK_FRAMES * NATIVE_AUDIO_CHANNELS];
-
-			NativeAudio_LockOutput(); /* real on this path too -- harmless,
-			                              nothing else contends for it when
-			                              there is no worker thread */
-			NativeAudio_RenderFramesNoLock(scratch, NATIVE_AUDIO_VBLANK_FRAMES);
-			/* Full software mixer, so this path produces at the SPU rate with
-			 * volume already applied per sample -- unlike the worker's XA
-			 * parcels, which ride the channel at the source rate. Exactly one
-			 * of the two producers exists per process lifetime, so the sink
-			 * only ever sees one rate regime. */
-			N3DS_NdspSubmitMusicParcel(scratch, NATIVE_AUDIO_VBLANK_FRAMES, NATIVE_AUDIO_SAMPLE_RATE, 1.0f, 1.0f);
-			NativeAudio_HwVoiceMirrorNoLock();
-			NativeAudio_UnlockOutput();
+			/* Fallback: no worker thread secured (Old 3DS, or the Old-3DS
+			 * simulation). Runs the worker's own per-vblank job on the main
+			 * thread -- lifecycle + hardware-voice mirror, XA parcels at the
+			 * source rate, the first-play decode pump -- not the full
+			 * software mixer this path used to run (735 MixFrame calls a
+			 * vblank, ~3.8 ms each on an Old 3DS, for a parcel that was
+			 * silent apart from XA; see N3DS_AudioRunVBlankOnCaller). Takes
+			 * the render lock itself. */
+			N3DS_AudioRunVBlankOnCaller();
 		}
 	}
 	/* No CTR_INTERNAL stats-reporting block on this path: with output
