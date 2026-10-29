@@ -440,8 +440,10 @@ void NativeRenderQueue_Shutdown(void)
 		return;
 	}
 
+	/* Posted, not run synchronously: the wait for the STOP job is the timed
+	 * join below (a worker stuck on a lost GPU must not hang the exit). */
 	NativeRenderQueue_JobInit(&job, NATIVE_RENDER_JOB_STOP);
-	NativeRenderQueue_RunSync(&job);
+	NativeRenderQueue_Post(&job);
 	N3DS_RenderWorkerStopAndJoin();
 	s_workerUp = 0;
 }
