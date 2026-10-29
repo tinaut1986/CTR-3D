@@ -10,6 +10,9 @@
  *   SITE KEYS <A+B+LEFT|NONE> [frames]   hold 3DS buttons for N frames (default 1)
  *   SITE TOUCH <x> <y>        tap the bottom screen
  *   SITE MARK [text]          a marker line in the SD log, flushed
+ *   SITE SHOTR                debug/top-right.bmp, the right eye (3D slider up)
+ *   SITE PEEK <hex addr> <n>  hex of up to 256 bytes of this process's memory
+ *   SITE POKE <hex addr> <hex bytes>   write them (main thread, between frames)
  *
  * Anything that touches the game runs on the main thread (N3DS_DebugLinkPoll,
  * once per presented frame); the FTP thread waits for its result line. */

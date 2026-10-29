@@ -612,7 +612,7 @@ static void N3DS_FtpCmdStor(N3DS_FtpSession *s, const char *arg, int append)
 }
 
 #ifdef CTR_INTERNAL
-static char s_linkReply[480]; /* one FTP command at a time: no need for the stack */
+static char s_linkReply[660]; /* one FTP command at a time: no need for the stack */
 #endif
 
 static void N3DS_FtpCmdSite(N3DS_FtpSession *s, char *arg)
