@@ -631,12 +631,43 @@ force_inline u32 RaceFlag_StripeIndex(int quadY, int wide)
 #include <platform/native_model_gate.h>
 extern int g_dbg_flagLean;
 
+/*
+ * With the lean projection, the flag's stereo depth also skips the capture
+ * table: each vertex's remapped depth (the Store's own remap) is kept per
+ * column beside its SXY, and each quad hands its four to the walk through
+ * GTECapture_FlagParallaxTable -- no Stores here, no lookups there
+ * (native_gte_capture.c has the argument). dumpreq `flagpar`, default ON;
+ * needs `flaglean`. OFF = Stores and lookups as before.
+ */
+extern int g_dbg_flagPar;
+
+#define RACE_FLAG_SCREEN_POINTS (RACE_FLAG_SCREEN_ROWS * RACE_FLAG_SCREEN_POINTS_PER_ROW)
+
 /* One row: the three vertices the GTE path loads with CTR_GteLoadSV3WithPad,
- * projected, and their SXY stored where CTR_GteStoreSXY3 puts them. */
-force_inline void RaceFlag_ProjectRowLean(struct NativeModelGate *lean, const SVECTOR *pos, struct RaceFlagProjectedRow *out)
+ * projected, and their SXY stored where CTR_GteStoreSXY3 puts them. par: the
+ * row's three remapped depths for the parallax table (no Stores), or NULL to
+ * make the capture Stores as the GTE would. */
+force_inline void RaceFlag_ProjectRowLean(struct NativeModelGate *lean, const SVECTOR *pos, struct RaceFlagProjectedRow *out, u16 *par)
 {
-	NativeModelGate_RtptStore(lean, CTR_PackS16Pair(pos[0].vx, pos[0].vy), CTR_PackS16Pair(pos[0].vz, pos[0].pad), CTR_PackS16Pair(pos[1].vx, pos[1].vy),
-	                          CTR_PackS16Pair(pos[1].vz, pos[1].pad), CTR_PackS16Pair(pos[2].vx, pos[2].vy), CTR_PackS16Pair(pos[2].vz, pos[2].pad));
+	const u32 xy0 = CTR_PackS16Pair(pos[0].vx, pos[0].vy), z0 = CTR_PackS16Pair(pos[0].vz, pos[0].pad);
+	const u32 xy1 = CTR_PackS16Pair(pos[1].vx, pos[1].vy), z1 = CTR_PackS16Pair(pos[1].vz, pos[1].pad);
+	const u32 xy2 = CTR_PackS16Pair(pos[2].vx, pos[2].vy), z2 = CTR_PackS16Pair(pos[2].vz, pos[2].pad);
+
+#if CTR_NATIVE_GTE_CAPTURE
+	if (par != NULL)
+	{
+		NativeModelGate_Rtpt(lean, xy0, z0, xy1, z1, xy2, z2);
+		par[0] = GTECapture_FlagRemapDepth(lean->fifo.sz[1]);
+		par[1] = GTECapture_FlagRemapDepth(lean->fifo.sz[2]);
+		par[2] = GTECapture_FlagRemapDepth(lean->fifo.sz[3]);
+	}
+	else
+#else
+	(void)par;
+#endif
+	{
+		NativeModelGate_RtptStore(lean, xy0, z0, xy1, z1, xy2, z2);
+	}
 	CTR_GteStoreU32(&out->xy[0], lean->fifo.sxy[0]);
 	CTR_GteStoreU32(&out->xy[1], lean->fifo.sxy[1]);
 	CTR_GteStoreU32(&out->xy[2], lean->fifo.sxy[2]);
@@ -704,6 +735,16 @@ void RaceFlag_DrawSelf()
 	int flagWide = 0;
 	int flagLean = 0;
 	struct NativeModelGate flagGate;
+	/* Parallax table state (g_dbg_flagPar): per-column remapped depths, double
+	 * buffered like the scratch screen rows they sit beside, the write buffer's
+	 * per-quad slots and the quads written. */
+	int flagPar = 0;
+	u16 flagParCol[2][RACE_FLAG_SCREEN_POINTS];
+	u16 (*flagParTable)[4] = NULL;
+	u32 flagParCap = 0;
+	u32 flagParQuads = 0;
+	u16 *writePar = NULL;
+	u16 *readPar = NULL;
 #endif
 
 	if (sdata->RaceFlag_CanDraw == 0)
@@ -785,6 +826,14 @@ SKIP_LOADING_TEXT:
 	{
 		NativeModelGate_Load(&flagGate);
 	}
+#if CTR_NATIVE_GTE_CAPTURE
+	flagPar = flagLean && g_dbg_flagPar;
+	if (flagPar)
+	{
+		flagParTable = GTECapture_FlagParallaxTable();
+		flagParCap = GTECapture_FlagParallaxCapacity();
+	}
+#endif
 #endif
 
 	p = (POLY_G4 *)gGT->backBuffer->primMem.cursor;
@@ -801,6 +850,9 @@ SKIP_LOADING_TEXT:
 	// Reduces clock from ~150 to ~130
 	{
 		union RaceFlagScreenBuffer *writeScreen = &scratch->screen[toggle];
+#ifdef CTR_NATIVE
+		writePar = flagParCol[toggle];
+#endif
 		toggle = toggle ^ 1;
 
 		local[0] = data.checkerFlagVariables[0];
@@ -880,7 +932,7 @@ SKIP_LOADING_TEXT:
 #ifdef CTR_NATIVE
 			if (flagLean)
 			{
-				RaceFlag_ProjectRowLean(&flagGate, pos, &writeScreen->row[row]);
+				RaceFlag_ProjectRowLean(&flagGate, pos, &writeScreen->row[row], flagPar ? &writePar[row * RACE_FLAG_SCREEN_POINTS_PER_ROW] : NULL);
 				pos[0].vy += 0x11a;
 				pos[1].vy += 0x11a;
 				pos[2].vy += 0x11a;
@@ -908,6 +960,10 @@ SKIP_LOADING_TEXT:
 	for (column = 1; column < 36; column++)
 	{
 		union RaceFlagScreenBuffer *writeScreen = &scratch->screen[toggle];
+#ifdef CTR_NATIVE
+		writePar = flagParCol[toggle];
+		readPar = flagParCol[toggle ^ 1];
+#endif
 		toggle = toggle ^ 1;
 		union RaceFlagScreenBuffer *readScreen = &scratch->screen[toggle];
 
@@ -974,7 +1030,7 @@ SKIP_LOADING_TEXT:
 #ifdef CTR_NATIVE
 			if (flagLean)
 			{
-				RaceFlag_ProjectRowLean(&flagGate, pos, &writeScreen->row[row]);
+				RaceFlag_ProjectRowLean(&flagGate, pos, &writeScreen->row[row], flagPar ? &writePar[row * RACE_FLAG_SCREEN_POINTS_PER_ROW] : NULL);
 				pos[0].vy += 0x11a;
 				pos[1].vy += 0x11a;
 				pos[2].vy += 0x11a;
@@ -1097,6 +1153,24 @@ SKIP_LOADING_TEXT:
 					// prim/code
 					setPolyG4(p);
 
+#ifdef CTR_NATIVE
+					/* This quad's parallax slot, in packet-vertex order
+					 * (x0 = read0, x1 = write0, x2 = read1, x3 = write1). */
+					if (flagPar)
+					{
+						if (flagParQuads < flagParCap)
+						{
+							u16 *slot = flagParTable[flagParQuads];
+
+							slot[0] = readPar[pointIndex];
+							slot[1] = writePar[pointIndex];
+							slot[2] = readPar[pointIndex + 1];
+							slot[3] = writePar[pointIndex + 1];
+						}
+						flagParQuads++;
+					}
+#endif
+
 					// Prim/OT
 					// addPrim(ot, p); works but uses more instructions.
 					p->tag = CtrGpu_PackOTTag(*ot, 0x8000000);
@@ -1123,6 +1197,9 @@ SKIP_LOADING_TEXT:
 	 * packets and nothing else. */
 	GTECapture_SetStoreDepthRemap(0);
 	GTECapture_SetUIBandExemptRange(gGT->backBuffer->primMem.cursor, p);
+	/* A count past the table (cannot happen: 35 x 29 quads) registers 0, and
+	 * the frame's flag goes flat in stereo rather than reading strangers. */
+	GTECapture_SetFlagParallaxCount((flagPar && (flagParQuads <= flagParCap)) ? flagParQuads : 0u);
 #endif
 #ifdef CTR_NATIVE
 	if (flagLean)

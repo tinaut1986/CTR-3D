@@ -59,6 +59,9 @@ typedef struct
 
 #define GTE_CAPTURE_PAINTNEAR_MAX 4
 
+// The menu flag's quad count bound: 35 column pairs x 29 quads (RaceFlag_DrawSelf).
+#define GTE_CAPTURE_FLAGPAR_MAX 1024
+
 typedef struct
 {
 	GTECaptureEntry entries[GTE_CAPTURE_TABLE_SIZE];
@@ -99,6 +102,14 @@ typedef struct
 	// Slots behind a zero mtxStores count are stale from prior frames; the
 	// saturation slot (last id) holds only its most recent run's words.
 	u32 mtxWords[GTE_CAPTURE_MTX_IDS][8];
+	// FLAG PARALLAX TABLE (GTECapture_FlagParallaxTable): the menu flag's
+	// remapped depth per quad, in packet-vertex order, for the quads of the
+	// exempt range above -- quad k is the k-th POLY_G4 from exemptStart. 0
+	// quads = the flag projected through the capture Stores instead (or drew
+	// nothing). Same frame-behind travel rule as the exempt range; cleared by
+	// Clear. Appended last for the initializer below.
+	u16 flagPar[GTE_CAPTURE_FLAGPAR_MAX][4];
+	u32 flagParN;
 } GTECaptureBuffer;
 
 // Cost ablation. This switch removes both per-vertex calls without a
@@ -238,6 +249,7 @@ void GTECapture_Clear(void)
 	buf->mtxUsed = 0;
 	buf->exemptStart = NULL;
 	buf->exemptEnd = NULL;
+	buf->flagParN = 0;
 	buf->paintNearN = 0;
 	s_gteMtxShadowValid = 0;
 	s_gteMtxCurId = 0;
@@ -344,6 +356,14 @@ global_variable int s_gteCaptureDepthRemap;
 void GTECapture_SetStoreDepthRemap(int active)
 {
 	s_gteCaptureDepthRemap = active;
+}
+
+u16 GTECapture_FlagRemapDepth(u16 sz3)
+{
+	u32 t = ((u32)sz3 > (u32)GTE_FLAGREMAP_RAW_NEAR) ? ((u32)GTE_FLAGREMAP_OUT_NEAR + (((u32)sz3 - (u32)GTE_FLAGREMAP_RAW_NEAR) >> GTE_FLAGREMAP_SHIFT))
+	                                                 : (u32)GTE_FLAGREMAP_OUT_NEAR;
+
+	return (u16)t;
 }
 
 /*
@@ -794,10 +814,7 @@ void GTECapture_Store(s16 sx, s16 sy, s64 sxFull, s64 syFull, u16 sz3, s32 hOver
 	 * bracket below. The two brackets never nest. */
 	if (s_gteCaptureDepthRemap)
 	{
-		u32 t = ((u32)sz3 > (u32)GTE_FLAGREMAP_RAW_NEAR) ? ((u32)GTE_FLAGREMAP_OUT_NEAR + (((u32)sz3 - (u32)GTE_FLAGREMAP_RAW_NEAR) >> GTE_FLAGREMAP_SHIFT))
-		                                                 : (u32)GTE_FLAGREMAP_OUT_NEAR;
-
-		sz3 = (u16)t;
+		sz3 = GTECapture_FlagRemapDepth(sz3);
 	}
 
 	/* Instance depth-axis bracket (block comment above): put this store on the
@@ -1184,6 +1201,41 @@ void GTECapture_SetUIBandExemptRange(const void *start, const void *end)
 }
 
 /*
+ * FLAG PARALLAX TABLE. The flag's stereo depth used to reach the walk only
+ * through the capture table: ~1080 Stores a frame on the game thread and four
+ * lookups per quad in the walk (~4000), each a likely cache miss in a 1.5 MiB
+ * table, for values the flag had in hand when it projected the vertex. The
+ * flag now writes them here instead -- the remapped depth of each quad's four
+ * vertices in packet order (x0..x3), quad k = the k-th POLY_G4 of the exempt
+ * range -- and the parallax read takes them from the quad itself. Same values
+ * a capture hit returns (GTECapture_FlagRemapDepth is the Store's remap), minus
+ * the misses: a vertex whose slot another projection had taken, or which
+ * clamped off-screen, used to fall back flat; here every vertex has its own.
+ * The flag's vertices also stop evicting other content's entries.
+ *
+ * Game thread: RaceFlag_DrawSelf fills the write buffer's table and sets the
+ * count next to the exempt range. Walk: MarkOTNode points at the quad's slot.
+ */
+u16 (*GTECapture_FlagParallaxTable(void))[4]
+{
+	return s_gteCaptureBuf[s_gteCaptureWriteIdx].flagPar;
+}
+
+u32 GTECapture_FlagParallaxCapacity(void)
+{
+	return GTE_CAPTURE_FLAGPAR_MAX;
+}
+
+void GTECapture_SetFlagParallaxCount(u32 quads)
+{
+	s_gteCaptureBuf[s_gteCaptureWriteIdx].flagParN = (quads <= GTE_CAPTURE_FLAGPAR_MAX) ? quads : 0u;
+}
+
+/* The exempt node the walk is on and its parallax slot (NULL = not a table quad). */
+global_variable const POLY_G4 *s_gteCaptureFlagQuad;
+global_variable const u16 *s_gteCaptureFlagSlot;
+
+/*
  * Register one paint-on-top prim range for this frame (header comment on
  * g_dbg_paintOnTop). Game-thread only, same ownership as Store; the range
  * must be a [start, end) pair of gGT->backBuffer->primMem cursors bracketing
@@ -1209,6 +1261,7 @@ void GTECapture_BeginOTWalk(void)
 {
 	s_gteCaptureSuppress = 0;
 	s_gteCaptureExemptNode = 0;
+	s_gteCaptureFlagSlot = NULL;
 	s_gteCapturePaintNearNode = 0;
 }
 
@@ -1229,6 +1282,20 @@ void GTECapture_MarkOTNode(const void *node)
 	// band was never entered. Two pointer compares per node against a range
 	// that is NULL/NULL on any frame RaceFlag_DrawSelf did not register.
 	s_gteCaptureExemptNode = ((node >= buf->exemptStart) && (node < buf->exemptEnd));
+	s_gteCaptureFlagSlot = NULL;
+	if (s_gteCaptureExemptNode && (buf->flagParN != 0))
+	{
+		const u32 off = (u32)((const u8 *)node - (const u8 *)buf->exemptStart);
+		const u32 quad = off / (u32)sizeof(POLY_G4);
+
+		/* Every node of the range is one of the flag's POLY_G4s; the
+		 * alignment test keeps a stranger from reading a neighbour's slot. */
+		if ((quad < buf->flagParN) && ((quad * (u32)sizeof(POLY_G4)) == off))
+		{
+			s_gteCaptureFlagQuad = (const POLY_G4 *)node;
+			s_gteCaptureFlagSlot = buf->flagPar[quad];
+		}
+	}
 
 	// Paint-on-top ranges, same per-node discipline. paintNearN is 0 on any
 	// frame no member drew, so the loop body never runs then. The stored
@@ -1278,6 +1345,45 @@ int GTECapture_LookupSuppressed(void)
 int GTECapture_NodeExempt(void)
 {
 	return s_gteCaptureExemptNode;
+}
+
+int GTECapture_NodeFlagTable(void)
+{
+	return s_gteCaptureFlagSlot != NULL;
+}
+
+/* The table depth of the current flag quad's vertex at (sx, sy): matched
+ * against the quad's own four coordinates, so the caller's vertex order does
+ * not matter. 0 for a coordinate that is not one of them. */
+int GTECapture_NodeFlagDepth(s16 sx, s16 sy, u16 *outSz3)
+{
+	const POLY_G4 *q = s_gteCaptureFlagQuad;
+
+	if (s_gteCaptureFlagSlot == NULL)
+	{
+		return 0;
+	}
+	if ((q->x0 == sx) && (q->y0 == sy))
+	{
+		*outSz3 = s_gteCaptureFlagSlot[0];
+	}
+	else if ((q->x1 == sx) && (q->y1 == sy))
+	{
+		*outSz3 = s_gteCaptureFlagSlot[1];
+	}
+	else if ((q->x2 == sx) && (q->y2 == sy))
+	{
+		*outSz3 = s_gteCaptureFlagSlot[2];
+	}
+	else if ((q->x3 == sx) && (q->y3 == sy))
+	{
+		*outSz3 = s_gteCaptureFlagSlot[3];
+	}
+	else
+	{
+		return 0;
+	}
+	return 1;
 }
 
 /*

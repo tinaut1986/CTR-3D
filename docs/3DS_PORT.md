@@ -239,7 +239,11 @@ heap/linear use, grep them for the real peak per level):
   `[INSTPROF]` `gate=` counts gated projections; `proj` is their cost.
   The menu flag's 360 RTPT a frame take the same arithmetic
   (`NativeModelGate_RtptStore`, dumpreq `flaglean`, default on): same SXY and
-  the same capture Stores, without the op emulation.
+  the same capture Stores, without the op emulation. With `flagpar` (default
+  on) the flag makes no Stores at all: each quad hands the walk its four
+  remapped stereo depths through `GTECapture_FlagParallaxTable`, so the walk's
+  ~4000 parallax lookups per frame become reads of the quad's own slot (same
+  values as a capture hit, no misses or evictions).
 - The software GTE (`native_gte_core.c`) issues each constant op word through
   its own specialised copy (`GTE_Op*`, picked by the always-inlined doCOP2) and
   inlines the register moves; the arithmetic is PsyCross's, bit for bit.

@@ -2395,6 +2395,9 @@ internal void PacketDepth_NoteExtent(u16 stamp, u16 *lo, u16 *hi)
  */
 internal void PacketDepth_FillParallaxFromCapture(const s16 *xs, const s16 *ys, int n, u16 *perVertPar)
 {
+	/* A flag quad with its own parallax slot (GTECapture_FlagParallaxTable)
+	 * reads it instead of the table: the flag made no Stores for it. */
+	const int flagTable = GTECapture_NodeFlagTable();
 	int i;
 
 	for (i = 0; i < n; i++)
@@ -2402,7 +2405,7 @@ internal void PacketDepth_FillParallaxFromCapture(const s16 *xs, const s16 *ys, 
 		u16 sz3;
 		u8 mtxId;
 
-		if (GTECapture_LookupDepthEx(xs[i], ys[i], &sz3, &mtxId))
+		if (flagTable ? GTECapture_NodeFlagDepth(xs[i], ys[i], &sz3) : GTECapture_LookupDepthEx(xs[i], ys[i], &sz3, &mtxId))
 		{
 			perVertPar[i] = PacketDepth_ClampWorld(0xFFFFu - sz3); /* same SENSE INVERSION as the occlusion path */
 		}

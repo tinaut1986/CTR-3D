@@ -252,6 +252,16 @@ void GTECapture_SetUIBandExemptRange(const void *start, const void *end);
 // Walk-side query for the above -- see the definition for the two-channel
 // contract. Meaningful only while a walk is in progress.
 int GTECapture_NodeExempt(void);
+// The flag's own parallax table (definition comment): the remap the Store
+// applies, the write buffer's per-quad slots (4 depths in packet-vertex
+// order) and the quad count registered with the exempt range; walk side, is
+// the current node a table quad, and the depth of one of its vertices.
+u16 GTECapture_FlagRemapDepth(u16 sz3);
+u16 (*GTECapture_FlagParallaxTable(void))[4];
+u32 GTECapture_FlagParallaxCapacity(void);
+void GTECapture_SetFlagParallaxCount(u32 quads);
+int GTECapture_NodeFlagTable(void);
+int GTECapture_NodeFlagDepth(s16 sx, s16 sy, u16 *outSz3);
 
 // PAINT-ON-TOP models (the talking-mask hint heads). Retail parks these
 // instances inside hub geometry and its painter's algorithm carries them --

@@ -15,6 +15,14 @@
 int g_dbg_modelGate = 1;
 /* The menu flag's projection through NativeModelGate_RtptStore (RaceFlag.c). */
 int g_dbg_flagLean = 1;
+/* Its stereo depth through the capture's flag parallax table instead of Stores.
+ * Off by default in a de-snapping build: there the walk also reads the flag's
+ * sub-pixel fractions out of the Stores. */
+#if defined(CTR_NATIVE_VERTEX_DESNAP) && CTR_NATIVE_VERTEX_DESNAP
+int g_dbg_flagPar = 0;
+#else
+int g_dbg_flagPar = 1;
+#endif
 
 /* native_model_emit.c, later in the unity TU. */
 extern int g_dbg_modelDepthCheck;
