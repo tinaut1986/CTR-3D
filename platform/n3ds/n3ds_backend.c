@@ -3667,7 +3667,8 @@ void N3DS_BottomMapDraw_Begin(float left, float right, float top, float bottom)
 
 	/* Content rows are target x 0..211 (the panel's bottom edge is x = 0). */
 	C3D_SetViewport(0, 0, N3DS_BOTTOM_CONTENT_H, 320);
-	N3DS_BindPacketDrawState();
+	/* No N3DS_BindPacketDrawState here: Pass_Begin bound it and zeroed the
+	 * parallax vectors, which a rebind would put back. */
 	N3DS_BottomWindow(cx - hw, cx + hw, top, bottom);
 }
 
