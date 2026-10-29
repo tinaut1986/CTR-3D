@@ -59,6 +59,10 @@ CTR_STATIC_ASSERT(UI_WEAPON_BG_SHINE_TRANSPARENCY_BASE == 2);
 
 static const u32 UI_WEAPON_BG_SHINE_COLOR = 0xff0000u;
 
+// 60fps: the roulette icon of each driver, held for the in-between frame
+// (ModSDK UI_30_Weapon_DrawSelf keeps it in Driver padding instead)
+static int s_uiWeaponRouletteItem[8];
+
 // NOTE(aalhendi): ASM-verified NTSC-U 926 0x800507e0-0x80050af8.
 // Draw weapon and wumpa fruit in HUD
 void UI_Weapon_DrawSelf(s16 posX, s16 posY, s16 scale, struct Driver *d)
@@ -108,7 +112,8 @@ void UI_Weapon_DrawSelf(s16 posX, s16 posY, s16 scale, struct Driver *d)
 		}
 
 		// make weapon flicker
-		if (((d->noItemTimer) != 0) && ((gGT->timer & 1) == 0))
+		// 60fps: at the retail rate, 30 Hz frames (ModSDK UI_30 timer & FPS_DOUBLE(1))
+		if (((d->noItemTimer) != 0) && ((Fps60_Timer30() & 1) == 0))
 		{
 			return;
 		}
@@ -177,13 +182,26 @@ void UI_Weapon_DrawSelf(s16 posX, s16 posY, s16 scale, struct Driver *d)
 
 			// only change icon once per 2 frames,
 			// take advantage of unused padding
+			// 60fps: (ModSDK UI_30_Weapon_DrawSelf) new icon on FPS60_HALF_RATE
+			// frames only, the in-between frame repeats it
+			if (FPS60_HALF_RATE(gGT->timer))
+			{
+				// backup
+				s_uiWeaponRouletteItem[d->driverID & 7] = itemID;
+			}
+			else
+			{
+				// restore
+				itemID = s_uiWeaponRouletteItem[d->driverID & 7];
+			}
 		}
 
 		// if timer is not finished
 		if (d->PickupTimeboxHUD.cooldown != 0)
 		{
+			// 60fps: RB_Crate writes the cooldown doubled (ModSDK UI_30)
 			UI_Lerp2D_HUD(pos.v, d->PickupTimeboxHUD.startX, d->PickupTimeboxHUD.startY, (int)posX, (int)posY, d->PickupTimeboxHUD.cooldown,
-			              UI_WEAPON_ROULETTE_LERP_FRAMES);
+			              FPS_DOUBLE(UI_WEAPON_ROULETTE_LERP_FRAMES));
 
 			// subtract one from timer
 			d->PickupTimeboxHUD.cooldown--;
@@ -226,7 +244,8 @@ void UI_Weapon_DrawBG(s16 posX, s16 posY, s16 scale, struct Driver *d)
 	int scaleInt = (int)scale;
 
 	// wumpaShineTheta (given to sine)
-	sdata->wumpaShineTheta += UI_WEAPON_BG_SHINE_THETA_STEP;
+	// 60fps: half the step per frame (ModSDK UI_31_Weapon_DrawBG)
+	sdata->wumpaShineTheta += FPS_HALF(UI_WEAPON_BG_SHINE_THETA_STEP);
 
 	int shineScale = scaleInt * UI_WEAPON_BG_SHINE_SCALE_MUL >> UI_WEAPON_BG_SHINE_SCALE_SHIFT;
 

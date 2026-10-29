@@ -169,7 +169,8 @@ void VehPhysGeneral_PhysAngular(struct Thread *thread, struct Driver *driver)
 		                  terrain->turnResponseScale),
 		    8);
 
-		rotCurrW_interp = VehCalc_InterpBySpeed(rotCurrW_original, rate, 0);
+		// 60fps: per-frame interp step, halved (ModSDK VehPhysGeneral_0_PhysAngular.c)
+		rotCurrW_interp = VehCalc_InterpBySpeed(rotCurrW_original, FPS_HALF(rate), 0);
 
 		forwardDir = (s16)rotCurrW_interp;
 	}
@@ -187,7 +188,8 @@ void VehPhysGeneral_PhysAngular(struct Thread *thread, struct Driver *driver)
 			    CTR_MipsMulLo(CTR_MipsAddLo(driver->const_TurnInputDelay, CTR_MipsMulLo((s8)driver->turnConst, VEH_PHYS_ANGULAR_TURN_RESPONSE_ACCEL_SCALE)),
 			                  terrain->turnResponseScale),
 			    8);
-			rotCurrW_original = CTR_MipsAddLo(rotCurrW_original, rate);
+			// 60fps: per-frame steer ramp, halved (not in ModSDK, which only halved the coast interp above)
+			rotCurrW_original = CTR_MipsAddLo(rotCurrW_original, FPS_HALF(rate));
 
 			interpLessThanOriginal = rotCurrW_interp < rotCurrW_original;
 		LAB_8005fee4:
@@ -202,7 +204,8 @@ void VehPhysGeneral_PhysAngular(struct Thread *thread, struct Driver *driver)
 			    CTR_MipsMulLo(CTR_MipsAddLo(driver->const_TurnInputDelay, CTR_MipsMulLo((s8)driver->turnConst, VEH_PHYS_ANGULAR_TURN_RESPONSE_DECEL_SCALE)),
 			                  terrain->turnResponseScale),
 			    8);
-			rotCurrW_original = CTR_MipsSubLo(rotCurrW_original, rate);
+			// 60fps: per-frame steer ramp, halved (not in ModSDK)
+			rotCurrW_original = CTR_MipsSubLo(rotCurrW_original, FPS_HALF(rate));
 
 			interpLessThanOriginal = rotCurrW_original < rotCurrW_interp;
 			goto LAB_8005fee4;
@@ -304,7 +307,11 @@ void VehPhysGeneral_PhysAngular(struct Thread *thread, struct Driver *driver)
 
 	// spins camera from side of driver, to back of driver,
 	// when the drifting ends. "LerpToForwards"
-	driver->turnAngleLerpVel = VehPhysGeneral_LerpToForwards(driver, (int)driftAngleCurr_og, (int)forwardDir, classSpeed_halved);
+	// 60fps: per-frame lerp, on 30 Hz ticks only (ModSDK VehPhysGeneral_0_PhysAngular.c)
+	if (FPS60_HALF_RATE(sdata->gGT->timer))
+	{
+		driver->turnAngleLerpVel = VehPhysGeneral_LerpToForwards(driver, (int)driftAngleCurr_og, (int)forwardDir, classSpeed_halved);
+	}
 
 	classSpeed_halved = (int)(s16)driver->turnAngleLerpVel;
 
@@ -318,7 +325,9 @@ void VehPhysGeneral_PhysAngular(struct Thread *thread, struct Driver *driver)
 	turnResistMinBitshift = rotCurrW_original;
 	if ((VEH_PHYS_ANGULAR_STEER_ACCEL_COMPARE_SPEED < speedApprox) && ((actionsFlagSet & ACTION_TOUCH_GROUND) != 0))
 	{
-		turnResistMaxBitshift = VehCalc_SteerAccel(driver->numFramesSpentSteering, (int)driver->const_SteerAccel_Stage2_FirstFrame,
+		// 60fps: numFramesSpentSteering counts 60 Hz frames, the stage consts are 30 Hz frames
+		// (ModSDK VehPhysGeneral_0_PhysAngular.c)
+		turnResistMaxBitshift = VehCalc_SteerAccel(FPS_HALF(driver->numFramesSpentSteering), (int)driver->const_SteerAccel_Stage2_FirstFrame,
 		                                           (int)driver->const_SteerAccel_Stage2_FrameLength, (int)driver->const_SteerAccel_Stage4_FirstFrame,
 		                                           (int)driver->const_SteerAccel_Stage1_MinSteer, (int)driver->const_SteerAccel_Stage1_MaxSteer);
 		if (rotCurrW_original < 0)
@@ -388,11 +397,13 @@ void VehPhysGeneral_PhysAngular(struct Thread *thread, struct Driver *driver)
 				}
 				if (rotCurrW_interp < VEH_PHYS_ANGULAR_TURN_WOBBLE_MIN_DELTA)
 				{
-					turnResistMaxBitshift = VEH_PHYS_ANGULAR_TURN_WOBBLE_TIMER;
-					rotCurrW_original = VEH_PHYS_ANGULAR_TURN_WOBBLE_VELOCITY;
+					// 60fps: frame duration doubled, per-frame rate halved, like the
+					// same wobble in PowerSlide_PhysAngular (not in ModSDK here)
+					turnResistMaxBitshift = FPS_DOUBLE(VEH_PHYS_ANGULAR_TURN_WOBBLE_TIMER);
+					rotCurrW_original = FPS_HALF(VEH_PHYS_ANGULAR_TURN_WOBBLE_VELOCITY);
 					if (driftAngleCurr_Final < 0)
 					{
-						rotCurrW_original = -VEH_PHYS_ANGULAR_TURN_WOBBLE_VELOCITY;
+						rotCurrW_original = FPS_HALF(-VEH_PHYS_ANGULAR_TURN_WOBBLE_VELOCITY);
 					}
 				}
 			}
@@ -422,7 +433,8 @@ LAB_80060284:
 		{
 			rotCurrW_interp = CTR_MipsNegLo(rotCurrW_original);
 		}
-		rotCurrW_interp = VehCalc_InterpBySpeed(turnResistMax, rotCurrW_interp, 0);
+		// 60fps: per-frame interp step, halved (ModSDK VehPhysGeneral_0_PhysAngular.c)
+		rotCurrW_interp = VehCalc_InterpBySpeed(turnResistMax, FPS_HALF(rotCurrW_interp), 0);
 		forwardDir = (s16)rotCurrW_interp;
 	}
 	else

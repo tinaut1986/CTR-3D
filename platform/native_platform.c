@@ -1196,12 +1196,34 @@ int Platform_GetVBlankCount(void)
 	return s_nativeVBlankCount;
 }
 
+/* Emulated vblanks between the last two submits (Platform_FlipVBlanks). The
+ * game's 60 fps logic (game/MAIN/MainFps60.c) runs a frame at 60 Hz after a
+ * frame that took 1. Only the 3DS ever shows a frame for a single vblank. */
+global_variable int s_paceLastFlipVBlank = -1;
+global_variable int s_paceLastFrameVBlanks = 2;
+
+int Platform_LastFrameVBlanks(void)
+{
+#if defined(__3DS__)
+	return s_paceLastFrameVBlanks;
+#else
+	return 2;
+#endif
+}
+
 int Platform_FlipVBlanks(void)
 {
 	const u64 now = SDL_GetPerformanceCounter();
 	const u64 last = s_paceLastFlipCounter;
 	const u64 idle = s_paceIdleCounter;
 
+	if (s_paceLastFlipVBlank >= 0)
+	{
+		const int d = s_nativeVBlankCount - s_paceLastFlipVBlank;
+
+		s_paceLastFrameVBlanks = (d < 1) ? 1 : d;
+	}
+	s_paceLastFlipVBlank = s_nativeVBlankCount;
 	s_paceLastFlipCounter = now;
 	s_paceIdleCounter = 0;
 #if defined(__3DS__)
@@ -1214,7 +1236,7 @@ int Platform_FlipVBlanks(void)
 
 		N3DS_FramePaceNoteFrame((workUs > 0xFFFFFFFFull) ? 0xFFFFFFFFu : (unsigned)workUs);
 	}
-	return N3DS_FramePaceFlipVBlanks();
+	return N3DS_FramePaceNextFlip();
 #else
 	(void)last;
 	(void)idle;

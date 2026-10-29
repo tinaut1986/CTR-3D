@@ -488,7 +488,12 @@ void BOTS_UpdateGlobals(void)
 		sdata->bestHumanRank = worstRobotDriver;
 	}
 
-	sdata->aiCollisionDelayFrameCount++;
+	// 60fps: retail frames (15 s race-start AI collision delay), called every
+	// frame from MainFrame_GameLogic: count every other frame
+	if (FPS60_HALF_RATE(sdata->gGT->timer))
+	{
+		sdata->aiCollisionDelayFrameCount++;
+	}
 }
 
 // NOTE(aalhendi): ASM-verified NTSC-U 926 0x80013444-0x800135d8
@@ -844,14 +849,19 @@ void BOTS_ThTick_Drive(struct Thread *botThread)
 
 	botInstance->flags &= ~(SPLIT_LINE | REFLECTIVE);
 
-	if (botDriver->botData.weaponCooldown != 0)
+	// 60fps: weaponCooldown is in retail frames (written by BOTS_GotoStartingLine
+	// and the 30 Hz world's PickupBots_Update, read there) but counted down here
+	// at 60: count every other frame. ModSDK BOTS_14 doubles it at the write and
+	// AltMods/60fps/mods5.c doubles PickupBots' writes instead; one gate here
+	// keeps every writer at retail values whatever the mode.
+	if ((botDriver->botData.weaponCooldown != 0) && FPS60_HALF_RATE(gGT->timer))
 	{
 		botDriver->botData.weaponCooldown = (s16)CTR_MipsSubLo((u16)botDriver->botData.weaponCooldown, 1);
 	}
 
 	if (botDriver->pendingDamageType == 0)
 	{
-		if (((botDriver->actionsFlagSet & ACTION_RACE_FINISHED) == 0) && (botDriver->botData.weaponCooldown != 0))
+		if (((botDriver->actionsFlagSet & ACTION_RACE_FINISHED) == 0) && (botDriver->botData.weaponCooldown != 0) && FPS60_HALF_RATE(gGT->timer))
 		{
 			botDriver->botData.weaponCooldown = (s16)CTR_MipsSubLo((u16)botDriver->botData.weaponCooldown, 1);
 		}
@@ -945,7 +955,8 @@ void BOTS_ThTick_Drive(struct Thread *botThread)
 			}
 		}
 
-		botDriver->tireColorCycleTimer = (s16)CTR_MipsSubLo((u16)botDriver->tireColorCycleTimer, tireColorStep);
+		// 60fps: half the per-frame step, like the player's (VehPhysProc)
+		botDriver->tireColorCycleTimer = (s16)CTR_MipsSubLo((u16)botDriver->tireColorCycleTimer, FPS_HALF(tireColorStep));
 	}
 UpdateTireColorTimer:
 
@@ -1455,9 +1466,12 @@ UpdateTireColorTimer:
 
 			struct Terrain *botTerrain = botDriver->terrainMeta1; // iVar15
 
+			// 60fps: per-frame speed steps below (friction, acceleration, throttle,
+			// slope, decel-to-target) are halved: speedLinear is a velocity, the
+			// position integrates it with elapsedTimeMS (ModSDK ran this asm unpatched)
 			botDriver->botData.aiPhysics.speedLinear =
 			    CTR_MipsSubLo(botDriver->botData.aiPhysics.speedLinear,
-			                  CTR_MipsSra(CTR_MipsMulLo(botDriver->const_PedalFriction_Forward, botTerrain->botFrictionScale), 8)); // iVar4
+			                  FPS_HALF(CTR_MipsSra(CTR_MipsMulLo(botDriver->const_PedalFriction_Forward, botTerrain->botFrictionScale), 8))); // iVar4
 
 			if (botDriver->botData.aiPhysics.speedLinear < 0)
 			{
@@ -1490,18 +1504,25 @@ UpdateTireColorTimer:
 
 					if (botDriver->botData.botAccel != 0)
 					{
-						botDriver->botData.botAccel--;
+						// 60fps: start-line acceleration delay in retail frames
+						// (BOTS_GotoStartingLine), count every other frame
+						if (FPS60_HALF_RATE(gGT->timer))
+						{
+							botDriver->botData.botAccel--;
+						}
 						botVelocity = CTR_MipsSra(CTR_MipsMulLo(botVelocity, CTR_MipsSubLo(0x100, CTR_MipsMulLo(sdata->AI_AccelFrameSteps,
 						                                                                                        sdata->accelerateOrder[botDriver->driverID]))),
 						                          8);
 					}
 
-					botDriver->botData.aiPhysics.speedLinear = CTR_MipsAddLo(botDriver->botData.aiPhysics.speedLinear, botVelocity);
+					// 60fps: half the per-frame acceleration
+					botDriver->botData.aiPhysics.speedLinear = CTR_MipsAddLo(botDriver->botData.aiPhysics.speedLinear, FPS_HALF(botVelocity));
 				}
 			}
 			else
 			{
-				botVelocity = CTR_MipsSra(botDriver->botData.aiPhysics.speedLinear, 1);
+				// 60fps: halve the speed per 30 Hz frame: x181/256 (1/sqrt 2) per frame
+				botVelocity = FPS60 ? CTR_MipsSra(CTR_MipsMulLo(botDriver->botData.aiPhysics.speedLinear, 181), 8) : CTR_MipsSra(botDriver->botData.aiPhysics.speedLinear, 1);
 
 				if (botDriver->botData.aiPhysics.speedLinear < velocityAccountingForTerrain)
 				{
@@ -1545,8 +1566,9 @@ UpdateTireColorTimer:
 				{
 					botDriver->botData.aiPhysics.turboMeter = 0;
 
+					// 60fps: half the per-frame braking
 					botDriver->botData.aiPhysics.speedLinear =
-					    CTR_MipsSubLo(botDriver->botData.aiPhysics.speedLinear, CTR_MipsAddLo(100, botDriver->const_Accel_ClassStat));
+					    CTR_MipsSubLo(botDriver->botData.aiPhysics.speedLinear, FPS_HALF(CTR_MipsAddLo(100, botDriver->const_Accel_ClassStat)));
 				}
 			}
 
@@ -1559,9 +1581,11 @@ UpdateTireColorTimer:
 					u32 var = (u32)navFrameCurr->rot[3];
 					int sinOfAngle = MATH_Sin(CTR_MipsSll(var, 4));
 
+					// 60fps: gravity 900 -> 850 like the player's (VehPhysForce, ModSDK
+					// AltMods/60fps/mods5.c lowers metaPhys gravity, bots included)
 					botDriver->botData.aiPhysics.speedLinear =
 					    CTR_MipsSubLo(botDriver->botData.aiPhysics.speedLinear,
-					                  CTR_MipsSra(CTR_MipsMulLo(botDriver->const_Gravity, sinOfAngle), 0xc)); // force on a slope due to gravity
+					                  FPS_HALF(CTR_MipsSra(CTR_MipsMulLo(FPS60 ? ((botDriver->const_Gravity * 17) / 18) : botDriver->const_Gravity, sinOfAngle), 0xc))); // force on a slope due to gravity
 				}
 
 				botDriver->fireSpeed = velocityAccountingForTerrain;
@@ -1589,7 +1613,9 @@ UpdateTireColorTimer:
 
 		botDriver->botData.aiPhysics.speedLinear = 0;
 
-		if (botDriver->botData.ai_progress_cooldown != 0)
+		// 60fps: retail frames (10 / 1 / 0x3c, also from BOTS_ChangeState, which
+		// 30 Hz weapons can call): count every other frame
+		if ((botDriver->botData.ai_progress_cooldown != 0) && FPS60_HALF_RATE(gGT->timer))
 		{
 			botDriver->botData.ai_progress_cooldown--;
 		}
@@ -1605,14 +1631,17 @@ UpdateTireColorTimer:
 		botDriver->botData.botFlags |= BOT_FLAG_MOON_GRAVITY;
 	}
 
+	// 60fps: gravity 900 -> 850 like the player's (VehPhysForce, ModSDK
+	// AltMods/60fps/mods5.c lowers metaPhys gravity, bots included)
 	int gravity;
+	int classGravity = FPS60 ? ((botDriver->const_Gravity * 17) / 18) : botDriver->const_Gravity;
 	if ((botDriver->botData.botFlags & BOT_FLAG_MOON_GRAVITY) == 0)
 	{
-		gravity = botDriver->const_Gravity;
+		gravity = classGravity;
 	}
 	else
 	{
-		gravity = CTR_MipsDiv(CTR_MipsMulLo(botDriver->const_Gravity, 41), 100);
+		gravity = CTR_MipsDiv(CTR_MipsMulLo(classGravity, 41), 100);
 	}
 
 	botDriver->botData.aiPhysics.speedY =
@@ -2224,11 +2253,12 @@ UpdateTireColorTimer:
 		botDriver->jump_LandingBoost = (s16)CTR_MipsAddLo((u16)botDriver->jump_LandingBoost, elapsedMilliseconds);
 	}
 
-	int iVar4_lifetime_3 = 0x18;
+	// 60fps: per-frame step of mulDrift toward driftTarget, halved
+	int iVar4_lifetime_3 = FPS_HALF(0x18);
 
 	if (botDriver->botData.aiPhysics.driftTarget != 0)
 	{
-		iVar4_lifetime_3 = 0x60;
+		iVar4_lifetime_3 = FPS_HALF(0x60);
 	}
 
 	s16 iVar3_lifetime_2 = (s16)CTR_MipsSubLo((u16)botDriver->botData.aiPhysics.mulDrift, iVar4_lifetime_3);
@@ -2260,7 +2290,11 @@ UpdateTireColorTimer:
 		s16 sVar7 = botDriver->botData.aiDamageState;
 		if (sVar7 == BOTS_DAMAGE_STATE_BLAST)
 		{
-			botDriver->botData.aiPhysics.rotXZ = (s16)CTR_MipsSubLo((u16)botDriver->botData.aiPhysics.rotXZ, 1);
+			// 60fps: per-frame tumble step, every other frame
+			if (FPS60_HALF_RATE(gGT->timer))
+			{
+				botDriver->botData.aiPhysics.rotXZ = (s16)CTR_MipsSubLo((u16)botDriver->botData.aiPhysics.rotXZ, 1);
+			}
 		}
 		else
 		{
@@ -2268,10 +2302,13 @@ UpdateTireColorTimer:
 			{
 				if (sVar7 == BOTS_DAMAGE_STATE_SPIN)
 				{
+					// 60fps: spin (0x300 from BOTS_ChangeState) decays by half
+					// the step and turns half as much per frame: same length
+					// and total turn per second
 					u16 squishCooldownMaybe = (u16)botDriver->botData.aiPhysics.squishCooldown;
-					int alsoSquishCooldownMaybe = CTR_MipsSubLo(botDriver->botData.aiPhysics.squishCooldown, 0xc);
+					int alsoSquishCooldownMaybe = CTR_MipsSubLo(botDriver->botData.aiPhysics.squishCooldown, FPS_HALF(0xc));
 					botDriver->botData.aiPhysics.squishCooldown = alsoSquishCooldownMaybe;
-					botDriver->botData.aiPhysics.mulDrift = (s16)CTR_MipsAddLo((u16)botDriver->botData.aiPhysics.mulDrift, squishCooldownMaybe);
+					botDriver->botData.aiPhysics.mulDrift = (s16)CTR_MipsAddLo((u16)botDriver->botData.aiPhysics.mulDrift, FPS_HALF(squishCooldownMaybe));
 					if (alsoSquishCooldownMaybe < 0x100)
 					{
 						botDriver->botData.aiPhysics.squishCooldown = 0;
@@ -2287,10 +2324,11 @@ UpdateTireColorTimer:
 			{
 				if (sVar7 == BOTS_DAMAGE_STATE_SQUISH)
 				{
+					// 60fps: as the spin above
 					u16 sVar7 = (u16)botDriver->botData.aiPhysics.squishCooldown;
-					int iVar4 = CTR_MipsSubLo(botDriver->botData.aiPhysics.squishCooldown, 0xc);
+					int iVar4 = CTR_MipsSubLo(botDriver->botData.aiPhysics.squishCooldown, FPS_HALF(0xc));
 					botDriver->botData.aiPhysics.squishCooldown = iVar4;
-					botDriver->botData.aiPhysics.mulDrift = (s16)CTR_MipsAddLo((u16)botDriver->botData.aiPhysics.mulDrift, sVar7);
+					botDriver->botData.aiPhysics.mulDrift = (s16)CTR_MipsAddLo((u16)botDriver->botData.aiPhysics.mulDrift, FPS_HALF(sVar7));
 					if (iVar4 < 0x200)
 					{
 						botDriver->botData.aiPhysics.squishCooldown = 0;
@@ -2444,22 +2482,23 @@ UpdateTireColorTimer:
 
 		other_uVar8 = CTR_MipsSubLo(CTR_MipsSll(other_uVar8, 1), botDriver->turnAngleCurr) & 0xfff;
 
-		b32 bVar1 = other_uVar8 < 0x21;
+		// 60fps: turn rate limit per frame 0x20 -> 0x10
+		b32 bVar1 = other_uVar8 < (FPS_HALF(0x20) + 1);
 		if (0x7ff < other_uVar8)
 		{
 			other_uVar8 = CTR_MipsSubLo(other_uVar8, 0x1000);
-			bVar1 = other_uVar8 < 0x21;
+			bVar1 = other_uVar8 < (FPS_HALF(0x20) + 1);
 		}
 		if (bVar1)
 		{
-			if (other_uVar8 < -0x20)
+			if (other_uVar8 < -FPS_HALF(0x20))
 			{
-				other_uVar8 = -0x20;
+				other_uVar8 = -FPS_HALF(0x20);
 			}
 		}
 		else
 		{
-			other_uVar8 = 0x20;
+			other_uVar8 = FPS_HALF(0x20);
 		}
 		other_uVar8 = (s16)CTR_MipsAddLo((u16)botDriver->turnAngleCurr, other_uVar8);
 		botDriver->turnAngleCurr = other_uVar8;
@@ -2528,7 +2567,8 @@ UpdateTireColorTimer:
 		{
 			if (botDriver->thCloud != NULL)
 			{
-				badnessRecieveTimer = CTR_MipsSll(gGT->timer, 2);
+				// 60fps: same wiggle speed per second (ModSDK has no C for this, asm)
+				badnessRecieveTimer = CTR_MipsSll(gGT->timer, FPS_LEFTSHIFT(2));
 
 				goto badEffectKartWiggle;
 			}
@@ -2746,7 +2786,8 @@ FinishHazardTimerUpdate:
 		camRot |= 0xf000;
 	}
 
-	botDriver->botData.ai_rotY_608 = (s16)CTR_MipsAddLo((u16)botDriver->botData.ai_rotY_608, CTR_MipsSra(camRot, 3));
+	// 60fps: per-frame 1/8 approach -> 1/16
+	botDriver->botData.ai_rotY_608 = (s16)CTR_MipsAddLo((u16)botDriver->botData.ai_rotY_608, CTR_MipsSra(camRot, FPS_RIGHTSHIFT(3)));
 	botDriver->botData.ai_rotY_608 &= 0xfff;
 
 	if (botThread->modelIndex == DYNAMIC_PLAYER)
@@ -3066,6 +3107,8 @@ void BOTS_GotoStartingLine(struct Driver *d)
 	d->botData.botAccel = CTR_MipsMulLo(accelDuration, accel);
 
 	// cooldown before next weapon
+	// 60fps: not doubled (ModSDK BOTS_14 FPS_DOUBLE), BOTS_ThTick_Drive counts
+	// it at half rate instead
 	int rng = RngDeadCoed(&sdata->advRng);
 	d->botData.weaponCooldown = (s16)CTR_MipsAddLo(CTR_MipsSra(rng, 8) & 0xff, 300);
 }

@@ -880,8 +880,12 @@ internal void NativePerf_Report3DSWindow(void)
 	}
 	/* Frame cap / AUTO 3D state and the frame WORK the policy sees
 	 * (n3ds_backend.h's frame-pace block). */
-	N3DS_FramePaceFormat(out, (int)sizeof(out));
-	N3DS_DebugLog(out);
+	{
+		char pace[384]; /* the 60 fps speed fields made it wider than `out` */
+
+		N3DS_FramePaceFormat(pace, (int)sizeof(pace));
+		N3DS_DebugLog(pace);
+	}
 
 	/* Only when the effect was live: quiet windows would otherwise pay an SD
 	 * log line each to report zeros, and the absence of the line IS the null

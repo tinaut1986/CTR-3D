@@ -63,7 +63,9 @@ int RB_Fruit_ThCollide(struct Thread *fruitTh, struct Thread *driverTh, void *fu
 
 		driver->PickupWumpaHUD.startX = pb->rect.x + posScreen[0];
 		driver->PickupWumpaHUD.startY = pb->rect.y + posScreen[1] - 0x14;
-		driver->PickupWumpaHUD.cooldown = 5;
+		// 60fps: HUD lerp frames, counted down by UI_RenderFrame (60 Hz world);
+		// same field/consumer as ModSDK 231_061_068_RB_Crate.c FPS_DOUBLE(5)
+		driver->PickupWumpaHUD.cooldown = FPS_DOUBLE(5);
 		driver->PickupWumpaHUD.numCollected++;
 	}
 

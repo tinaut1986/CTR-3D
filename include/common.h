@@ -12,6 +12,7 @@
 #include <prim.h>
 
 #include <game_layouts.h>
+#include <ctr_fps60.h>
 
 #if defined(CTR_NATIVE)
 #include <platform.h>

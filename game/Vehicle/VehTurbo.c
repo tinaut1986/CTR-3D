@@ -272,7 +272,11 @@ void VehTurbo_ThTick(struct Thread *turboThread)
 	// STATIC_TURBO_EFFECT7
 	turbo->inst->model = gGT->modelPtr[(((int)turbo->fireAnimIndex + TURBO_SECONDARY_MODEL_FRAME_OFFSET) & TURBO_ANIM_FRAME_MASK) + STATIC_TURBO_EFFECT];
 
-	turbo->fireAnimIndex++;
+	// 60fps: the 8-model flame cycle advances on 30 Hz ticks (ModSDK VehTurbo_2_ThTick.c)
+	if (FPS60_HALF_RATE(gGT->timer))
+	{
+		turbo->fireAnimIndex++;
+	}
 
 	// if eight or higher, back to zero
 	if (turbo->fireAnimIndex >= TURBO_ANIM_FRAME_COUNT)
@@ -324,7 +328,8 @@ void VehTurbo_ThTick(struct Thread *turboThread)
 		                   HowlSfx_Pack(HOWL_SFX_LR_CENTER, fireAudioDistort, fireSfxVolume, echo));
 
 		// manipulate turbo audio distort to change sound each frame
-		if (turbo->fireAudioDistort < TURBO_AUDIO_DISTORT_INCREMENT_LIMIT)
+		// 60fps: per-frame ramp, on 30 Hz ticks only (not in ModSDK)
+		if ((turbo->fireAudioDistort < TURBO_AUDIO_DISTORT_INCREMENT_LIMIT) && FPS60_HALF_RATE(gGT->timer))
 		{
 			turbo->fireAudioDistort++;
 		}
@@ -356,14 +361,16 @@ void VehTurbo_ThTick(struct Thread *turboThread)
 			if (turbo->fireDisappearCountdown == 0)
 			{
 				// increase transparency
-				instance->alphaScale += TURBO_FADE_FAST_STEP;
-				turbo->inst->alphaScale += TURBO_FADE_FAST_STEP;
+				// 60fps: per-frame fade step, halved (not in ModSDK)
+				instance->alphaScale += FPS_HALF(TURBO_FADE_FAST_STEP);
+				turbo->inst->alphaScale += FPS_HALF(TURBO_FADE_FAST_STEP);
 			}
 			else
 			{
 				// increase transparency
-				instance->alphaScale += TURBO_FADE_SLOW_STEP;
-				turbo->inst->alphaScale += TURBO_FADE_SLOW_STEP;
+				// 60fps: per-frame fade step, halved (not in ModSDK)
+				instance->alphaScale += FPS_HALF(TURBO_FADE_SLOW_STEP);
+				turbo->inst->alphaScale += FPS_HALF(TURBO_FADE_SLOW_STEP);
 			}
 		}
 		else

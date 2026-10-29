@@ -161,11 +161,68 @@ CTR_STATIC_ASSERT(VEH_EMITTER_JOG_AIR_TURN_NEGATIVE == 0x12);
 CTR_STATIC_ASSERT(VEH_EMITTER_JOG_AIR_TURN_POSITIVE == 0x22);
 CTR_STATIC_ASSERT(VEH_EMITTER_JOG_AIR_DURATION == 0x20);
 
+// 60fps: ModSDK AltMods/60fps/mods5.c BoolCheckExhaust. At 30 the exhaust
+// passes VehEmitter_ShouldSkipExhaust every frame (1P), every 2nd (2P) or 4th
+// (3P/4P, bots) frame; at 60 additionally fail every other window, so puffs
+// spawn at the 30 fps rate (the particle itself is then never thinned by
+// Particle_Init, see g_fps60ForceParticle below).
+static int VehEmitter_Fps60_BoolCheckExhaust(struct Driver *d)
+{
+	struct GameTracker *gGT = sdata->gGT;
+	int numPlyr = gGT->numPlyrCurrGame;
+	int timer = gGT->timer;
+
+	// human
+	if (d->driverID < numPlyr)
+	{
+		if (numPlyr == 1)
+		{
+			if ((timer & 1) != 0)
+			{
+				return 0;
+			}
+		}
+		else if (numPlyr == 2)
+		{
+			if ((timer & 2) != 0)
+			{
+				return 0;
+			}
+		}
+
+		// 3p/4p
+		else
+		{
+			if ((timer & 4) != 0)
+			{
+				return 0;
+			}
+		}
+	}
+
+	// AI
+	else
+	{
+		if ((timer & 4) != 0)
+		{
+			return 0;
+		}
+	}
+
+	return 1;
+}
+
 // NOTE(aalhendi): ASM-verified NTSC-U 926 0x80059100-0x80059344.
 struct Particle *VehEmitter_Exhaust(struct Driver *d, VECTOR *exhaustPos, VECTOR *exhaustVel)
 {
 	struct GameTracker *gGT = sdata->gGT;
 	struct Instance *dInst = d->instSelf;
+
+	// 60fps: spawn exhaust at the 30 fps rate (ModSDK VehEmitter_0_Exhaust.c)
+	if (FPS60 && (VehEmitter_Fps60_BoolCheckExhaust(d) == 0))
+	{
+		return 0;
+	}
 
 	if (d->invisibleTimer != 0)
 	{
@@ -208,7 +265,13 @@ struct Particle *VehEmitter_Exhaust(struct Driver *d, VECTOR *exhaustPos, VECTOR
 		emSet = &data.emSet_Exhaust_Water[0];
 	}
 
+	// 60fps: already rate-limited above, do not let Particle_Init thin it
+	// (ModSDK VehEmitter_0_Exhaust.c sdata->UnusedPadding1)
+	g_fps60ForceParticle = 1;
+
 	struct Particle *p = Particle_Init(0, gGT->iconGroup[exhaustType], emSet);
+
+	g_fps60ForceParticle = 0;
 
 	if (p == NULL)
 	{
@@ -401,7 +464,8 @@ void VehEmitter_Sparks_Wall(struct Driver *d, struct ParticleEmitter *emSet)
 	}
 
 	// must have speed, or gas pedal, for vibration
-	if (((d->fireSpeed != 0) || (speedAbs > VEH_EMITTER_WALL_SPARK_MIN_SPEED)) && (d->frameAgainstWall < VEH_EMITTER_WALL_RUMBLE_FRAME_LIMIT))
+	// 60fps: frameAgainstWall counts 60 Hz frames (not in ModSDK)
+	if (((d->fireSpeed != 0) || (speedAbs > VEH_EMITTER_WALL_SPARK_MIN_SPEED)) && (d->frameAgainstWall < FPS_DOUBLE(VEH_EMITTER_WALL_RUMBLE_FRAME_LIMIT)))
 	{
 		// both gamepad vibration
 		GAMEPAD_ShockFreq(d, VEH_EMITTER_WALL_RUMBLE_FRAMES, 0);
@@ -632,6 +696,14 @@ static void VehEmitter_MudSplash(struct Driver *d)
 	struct GameTracker *gGT = sdata->gGT;
 	int count = ((d->actionsFlagSet & ACTION_STARTED_TOUCH_GROUND) == 0) ? VEH_EMITTER_MUD_SPLASH_NORMAL_COUNT : VEH_EMITTER_MUD_SPLASH_LANDING_COUNT;
 
+	// 60fps: the landing splash is a one-shot burst, Particle_Init must not
+	// thin it; the 1-per-frame trail is thinned as usual (not in ModSDK)
+	int forceParticle = (count == VEH_EMITTER_MUD_SPLASH_LANDING_COUNT);
+	if (forceParticle)
+	{
+		g_fps60ForceParticle = 1;
+	}
+
 	for (; count != 0; count--)
 	{
 		struct Particle *p = Particle_Init(0, gGT->iconGroup[VEH_EMITTER_MUD_SPLASH_ICON], &data.emSet_MudSplash[0]);
@@ -649,6 +721,11 @@ static void VehEmitter_MudSplash(struct Driver *d)
 		p->axis[2].startVal += (int)p->axis[2].velocity * VEH_EMITTER_MUD_SPLASH_VELOCITY_SCALE;
 		p->axis[0].accel -= p->axis[0].velocity >> VEH_EMITTER_MUD_SPLASH_VELOCITY_SHIFT;
 		p->axis[2].accel -= p->axis[2].velocity >> VEH_EMITTER_MUD_SPLASH_VELOCITY_SHIFT;
+	}
+
+	if (forceParticle)
+	{
+		g_fps60ForceParticle = 0;
 	}
 }
 
@@ -686,7 +763,12 @@ static void VehEmitter_TerrainEffects(struct Thread *thread, struct Driver *d, s
 		if (absJump > VEH_EMITTER_LANDING_SPARK_MIN_JUMP)
 		{
 			VehEmitter_SetRotTransMatrix(m);
+
+			// 60fps: one-shot landing burst, Particle_Init must not thin it
+			// (ModSDK mods7.c NewParticleInit notes this site as wanted)
+			g_fps60ForceParticle = 1;
 			VehEmitter_Sparks_Ground(d, &data.emSet_GroundSparks[0]);
+			g_fps60ForceParticle = 0;
 		}
 	}
 
@@ -933,8 +1015,16 @@ void VehEmitter_DriverMain(struct Thread *thread, struct Driver *d)
 	TerrainFlags terrainFlags = terrain->flags;
 	int absSpeedApprox = d->speedApprox;
 
-	d->skidmarkEnableFlags = (d->skidmarkEnableFlags & DRIVER_SKIDMARK_HISTORY_MASK) << DRIVER_SKIDMARK_HISTORY_SHIFT;
-	d->skidmarkFrameIndex = (d->skidmarkFrameIndex - 1) & DRIVER_SKIDMARK_FRAME_INDEX_MASK;
+	// 60fps: the 8-slot skidmark ring advances on 30 Hz ticks only, so
+	// skids keep their retail length (ModSDK VehPhysProc_14_PowerSlide_Init.c
+	// Hook60_DriverMain). The enable-flag history is shifted together with
+	// the slot index so the two stay in step; on the skipped frame the
+	// current slot (and its flag nibble) is simply rewritten.
+	if (FPS60_HALF_RATE(sdata->gGT->timer))
+	{
+		d->skidmarkEnableFlags = (d->skidmarkEnableFlags & DRIVER_SKIDMARK_HISTORY_MASK) << DRIVER_SKIDMARK_HISTORY_SHIFT;
+		d->skidmarkFrameIndex = (d->skidmarkFrameIndex - 1) & DRIVER_SKIDMARK_FRAME_INDEX_MASK;
+	}
 
 	if (absSpeedApprox < 0)
 	{
@@ -991,7 +1081,9 @@ void VehEmitter_DriverMain(struct Thread *thread, struct Driver *d)
 			return;
 		}
 
-		int jogValue = ((sdata->gGT->timer & VEH_EMITTER_JOG_WOBBLE_TIMER_MASK) == 0) ? VEH_EMITTER_JOG_GROUND : VEH_EMITTER_JOG_WOBBLE_ALT;
+		// 60fps: alternate on 30 Hz ticks (not in ModSDK)
+		int jogTimer = FPS60 ? Fps60_Timer30() : (int)sdata->gGT->timer;
+		int jogValue = ((jogTimer & VEH_EMITTER_JOG_WOBBLE_TIMER_MASK) == 0) ? VEH_EMITTER_JOG_GROUND : VEH_EMITTER_JOG_WOBBLE_ALT;
 		GAMEPAD_JogCon2(d, jogValue, VEH_EMITTER_JOG_WOBBLE_DURATION);
 		return;
 	}

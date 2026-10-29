@@ -101,7 +101,9 @@ struct ChannelStats *Channel_AllocSlot_AntiSpam(s16 soundID, u8 boolUseAntiSpam,
 
 				// if started within 10 frames, cancel old and start new,
 				// otherwise you'll allocate too many sounds and overflow
-				if (duration < 10)
+				// 60fps: frameTimer_MainFrame_ResetDB counts displayed frames,
+				// 20 of them at 60 (ModSDK h74_Channel_AllocSlot_AntiSpam)
+				if (duration < FPS_DOUBLE(10))
 				{
 					Channel_DestroySelf(curr);
 				}

@@ -65,6 +65,13 @@ void RB_Explosion_InitPotion(struct Instance *inst)
 		shatterInst->matrix.t[i] = inst->matrix.t[i];
 	}
 
+	// 60fps: one-shot burst; also emitted from the 60 Hz world (potion
+	// dropped straight into a hitbox, VehPickupItem -> RB_GenericMine_ThDestroy),
+	// so Particle_Init must not thin it (ModSDK mods7.c NewParticleInit
+	// "workaround for RB_Explosion_InitPotion"). No effect in the 30 Hz world.
+	int prevForceParticle = g_fps60ForceParticle;
+	g_fps60ForceParticle = 1;
+
 	// particles for potion shatter
 	for (int i = 0; i < 5; i++)
 	{
@@ -98,6 +105,8 @@ void RB_Explosion_InitPotion(struct Instance *inst)
 
 		p->funcPtr = Particle_FuncPtr_PotionShatter;
 	}
+
+	g_fps60ForceParticle = prevForceParticle;
 
 	RB_Potion_OnShatter_TeethSearch(inst);
 	return;
