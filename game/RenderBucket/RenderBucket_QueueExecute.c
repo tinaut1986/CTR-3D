@@ -479,6 +479,15 @@ enum
 	RENDER_BUCKET_TEX_WORD2_OFFSET = offsetof(struct TextureLayout, u2) - offsetof(struct TextureLayout, u0),
 };
 
+/*
+ * Per-vertex decode helpers, forced inline: the delta decoder calls the bit
+ * reader three or six times per vertex (once per component and stream), and
+ * out of line each call cost more in register saves and argument moves on
+ * the ARM11 than the bit extraction itself. CTR_NATIVE's force_inline is
+ * only a hint, so this one is explicit.
+ */
+#define RB_DECODE_INLINE static inline __attribute__((always_inline))
+
 static u32 RenderBucket_ReadPackedWord(const void *src)
 {
 	const u8 *bytes = (const u8 *)src;
@@ -536,13 +545,13 @@ static struct InstDrawPerPlayer *RenderBucket_InstancePlayerIdpp(struct Instance
 	return (struct InstDrawPerPlayer *)(void *)((u8 *)instPlayerBase + sizeof(struct Instance));
 }
 
-static int RenderBucket_SignExtendBits(u32 value, int bits)
+RB_DECODE_INLINE int RenderBucket_SignExtendBits(u32 value, int bits)
 {
 	int shift = 32 - bits;
 	return (s32)(value << shift) >> shift;
 }
 
-static int RenderBucket_GetSignedBits(const u8 *vertData, int *bitIndex, int bits)
+RB_DECODE_INLINE int RenderBucket_GetSignedBits(const u8 *vertData, int *bitIndex, int bits)
 {
 	int const b = *bitIndex >> 5;
 	int const e = 32 - bits;
@@ -2499,7 +2508,7 @@ static void RenderBucket_ApplyColorOnlyCommand(struct RenderBucketDrawContext *c
 	ctx->tempColor[3] = colorB;
 }
 
-static int RenderBucket_ReadDeltaComponentFromStream(const u8 *vertData, int *bitIndex, u8 bits, int temporalBase, int *accum)
+RB_DECODE_INLINE int RenderBucket_ReadDeltaComponentFromStream(const u8 *vertData, int *bitIndex, u8 bits, int temporalBase, int *accum)
 {
 	int value = RenderBucket_GetSignedBits(vertData, bitIndex, bits + 1);
 
@@ -2515,12 +2524,12 @@ static int RenderBucket_ReadDeltaComponentFromStream(const u8 *vertData, int *bi
 	return *accum;
 }
 
-static int RenderBucket_ReadDeltaComponent(struct RenderBucketDrawContext *ctx, u8 bits, int temporalBase, int *accum)
+RB_DECODE_INLINE int RenderBucket_ReadDeltaComponent(struct RenderBucketDrawContext *ctx, u8 bits, int temporalBase, int *accum)
 {
 	return RenderBucket_ReadDeltaComponentFromStream((const u8 *)ctx->vertData, &ctx->bitIndex, bits, temporalBase, accum);
 }
 
-static void RenderBucket_ReadNextFrameDeltaComponent(struct RenderBucketDrawContext *ctx, u8 bits, int temporalBase, int *currAccum, int *nextAccum)
+RB_DECODE_INLINE void RenderBucket_ReadNextFrameDeltaComponent(struct RenderBucketDrawContext *ctx, u8 bits, int temporalBase, int *currAccum, int *nextAccum)
 {
 	RenderBucket_ReadDeltaComponentFromStream((const u8 *)ctx->vertData, &ctx->bitIndex, bits, temporalBase, currAccum);
 	RenderBucket_ReadDeltaComponentFromStream((const u8 *)ctx->nextVertData, &ctx->nextBitIndex, bits, temporalBase, nextAccum);
