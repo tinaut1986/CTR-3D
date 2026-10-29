@@ -999,9 +999,49 @@ internal void Native_EnsureVBlankTarget(void)
 #define NATIVE_VOICE_FILL_STEP_SECTORS 8
 #define NATIVE_VOICE_FILL_MIN_US       9000
 
+/*
+ * Measured step cost (Old-3DS class, g_dbg_voiceFillPace, dumpreq `vcpace`,
+ * default on). On the Old 3DS a step's SD read is slow and varies a lot (the
+ * card, the FS session shared with the log flush): with a fixed 9 ms window a
+ * step that took longer ran the frame past its vblank target, and the frame
+ * then waited for the NEXT vblank -- 20 fps menus showed 4-vblank frames
+ * (avgTotalUs 58.6 ms against the 50 ms cap). The window is now the larger of
+ * 9 ms and the worst recent step plus a margin; the worst decays by 1/16 per
+ * wait so one slow read does not park the fill for good. A New 3DS keeps the
+ * fixed window. [VFILL] reports steps, worst/avg step and overruns.
+ */
+#define NATIVE_VOICE_FILL_MARGIN_US 2000
+int g_dbg_voiceFillPace = 1;
+global_variable u32 s_voiceFillWorstUs = 0; /* decaying worst step cost */
+global_variable u32 s_vfSteps = 0;
+global_variable u32 s_vfOverruns = 0;
+global_variable u32 s_vfMaxUs = 0;
+global_variable u64 s_vfTotalUs = 0;
+global_variable u32 s_vfDeferred = 0; /* waits that had time for the fixed window but not the measured one */
+
+int N3DS_FramePaceOldClass(void);
+
 internal int Native_VoiceFillAllowed(void)
 {
 	return NativeAudio_VoiceCacheBackgroundPending() && (sdata != NULL) && (sdata->Loading.stage == LOAD_IDLE);
+}
+
+/* [VFILL] window line (native_perf.c, after [PACE]); resets the window. Empty
+ * string when the window ran no step and none was deferred. */
+void Native_VoiceFillFormat(char *out, int outSize)
+{
+	out[0] = '\0';
+	if ((s_vfSteps != 0) || (s_vfDeferred != 0))
+	{
+		snprintf(out, (size_t)outSize, "[VFILL] steps=%u avgUs=%u maxUs=%u overruns=%u deferred=%u windowUs=%u pace=%d", (unsigned)s_vfSteps,
+		         (unsigned)((s_vfSteps != 0) ? (s_vfTotalUs / s_vfSteps) : 0u), (unsigned)s_vfMaxUs, (unsigned)s_vfOverruns, (unsigned)s_vfDeferred,
+		         (unsigned)s_voiceFillWorstUs, g_dbg_voiceFillPace);
+	}
+	s_vfSteps = 0;
+	s_vfOverruns = 0;
+	s_vfMaxUs = 0;
+	s_vfTotalUs = 0;
+	s_vfDeferred = 0;
 }
 #endif
 
@@ -1030,7 +1070,20 @@ internal void Native_WaitUntilVBlankTargetBody(void)
 	const u64 freq = SDL_GetPerformanceFrequency();
 	const u64 spinWindow = Native_CounterFromMicroseconds(freq, NATIVE_VSYNC_SPIN_US);
 #if defined(__3DS__)
-	const u64 voiceFillWindow = Native_CounterFromMicroseconds(freq, NATIVE_VOICE_FILL_MIN_US);
+	const u64 voiceFillMinWindow = Native_CounterFromMicroseconds(freq, NATIVE_VOICE_FILL_MIN_US);
+	u64 voiceFillWindow = voiceFillMinWindow;
+	const int voiceFillPaced = g_dbg_voiceFillPace && N3DS_FramePaceOldClass();
+
+	if (voiceFillPaced)
+	{
+		const u32 needUs = s_voiceFillWorstUs + NATIVE_VOICE_FILL_MARGIN_US;
+
+		if (needUs > NATIVE_VOICE_FILL_MIN_US)
+		{
+			voiceFillWindow = Native_CounterFromMicroseconds(freq, needUs);
+		}
+		s_voiceFillWorstUs -= s_voiceFillWorstUs / 16u;
+	}
 #endif
 
 	NativePerf_BeginScope(NATIVE_PERF_BUCKET_VSYNC_WAIT);
@@ -1050,12 +1103,35 @@ internal void Native_WaitUntilVBlankTargetBody(void)
 #if defined(__3DS__)
 		if ((remaining > voiceFillWindow) && Native_VoiceFillAllowed())
 		{
+			u64 stepEnd;
+			u32 stepUs;
+
 			NativePerf_EndScope(NATIVE_PERF_BUCKET_VSYNC_WAIT);
 			NativePerf_BeginScope(NATIVE_PERF_BUCKET_VOICE_CACHE_FILL);
 			NativeAudio_VoiceCacheBackgroundStep(NATIVE_VOICE_FILL_STEP_SECTORS);
 			NativePerf_EndScope(NATIVE_PERF_BUCKET_VOICE_CACHE_FILL);
 			NativePerf_BeginScope(NATIVE_PERF_BUCKET_VSYNC_WAIT);
+
+			stepEnd = SDL_GetPerformanceCounter();
+			stepUs = (u32)(((stepEnd - now) * 1000000ull) / freq);
+			s_vfSteps++;
+			s_vfTotalUs += stepUs;
+			s_vfMaxUs = (stepUs > s_vfMaxUs) ? stepUs : s_vfMaxUs;
+			s_vfOverruns += (stepEnd >= s_nextVBlankCounter) ? 1u : 0u;
+			if (voiceFillPaced)
+			{
+				const u32 needUs = ((stepUs > s_voiceFillWorstUs) ? stepUs : s_voiceFillWorstUs) + NATIVE_VOICE_FILL_MARGIN_US;
+
+				s_voiceFillWorstUs = (stepUs > s_voiceFillWorstUs) ? stepUs : s_voiceFillWorstUs;
+				voiceFillWindow = Native_CounterFromMicroseconds(freq, (needUs > NATIVE_VOICE_FILL_MIN_US) ? needUs : NATIVE_VOICE_FILL_MIN_US);
+			}
 			continue;
+		}
+		if (voiceFillPaced && (remaining > voiceFillMinWindow) && (voiceFillWindow > voiceFillMinWindow) && Native_VoiceFillAllowed())
+		{
+			/* Once per wait: the next pass is past this branch's window. */
+			s_vfDeferred++;
+			voiceFillWindow = (u64)-1;
 		}
 #endif
 		if (remaining <= spinWindow)

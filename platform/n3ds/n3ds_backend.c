@@ -6154,6 +6154,28 @@ unsigned int N3DS_ReadButtons(void)
 					N3DS_DebugLog(g_dbg_modelGate ? "[CTR-3DS] model gate: ON (no software GTE for native-model triangles)"
 					                              : "[CTR-3DS] model gate: off (software GTE per triangle)");
 				}
+				else if (strncmp(word, "vcstop", 6) == 0)
+				{
+					extern int g_dbg_voiceFillStopFull;
+
+					/* Background voice-cache fill stops reading once the
+					 * budget is full (native_audio.c). Off: every wanted file
+					 * is still read, for the count memo only. A/B for
+					 * voice_cache_fill_ms and disc_read_main_ms. */
+					g_dbg_voiceFillStopFull ^= 1;
+					N3DS_DebugLog(g_dbg_voiceFillStopFull ? "[CTR-3DS] voice fill: stops when the cache is full"
+					                                      : "[CTR-3DS] voice fill: reads every file (count memo) after full");
+				}
+				else if (strncmp(word, "vcpace", 6) == 0)
+				{
+					extern int g_dbg_voiceFillPace;
+
+					/* Old-3DS class: a fill step starts only when the measured
+					 * worst step fits before the vblank target (native_platform.c).
+					 * A/B for [VFILL] overruns and [PERF] avgTotalUs. */
+					g_dbg_voiceFillPace ^= 1;
+					N3DS_DebugLog(g_dbg_voiceFillPace ? "[CTR-3DS] voice fill pace: measured window" : "[CTR-3DS] voice fill pace: fixed 9 ms window");
+				}
 				else if (strncmp(word, "flagpar", 7) == 0)
 				{
 					extern int g_dbg_flagPar;

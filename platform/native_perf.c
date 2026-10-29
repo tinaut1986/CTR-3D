@@ -886,6 +886,18 @@ internal void NativePerf_Report3DSWindow(void)
 		N3DS_FramePaceFormat(pace, (int)sizeof(pace));
 		N3DS_DebugLog(pace);
 	}
+	/* Background voice-cache fill in the pacer's waits (native_platform.c):
+	 * only in windows that ran or deferred a step. */
+	{
+		extern void Native_VoiceFillFormat(char *out, int outSize);
+		char vfill[160];
+
+		Native_VoiceFillFormat(vfill, (int)sizeof(vfill));
+		if (vfill[0] != '\0')
+		{
+			N3DS_DebugLog(vfill);
+		}
+	}
 
 	/* Only when the effect was live: quiet windows would otherwise pay an SD
 	 * log line each to report zeros, and the absence of the line IS the null
