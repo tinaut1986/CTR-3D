@@ -8,6 +8,11 @@ ports with the same release scheme (`../zelda-tmc-3ds`, `../mzm`, `../sm-3ds`,
 `../legend-of-doom-3ds`, `../RSDKv5-Decompilation`): this file and the release and
 updater code are copied from `../zelda-tmc-3ds`. When in doubt, do what it does.
 
+## Current state
+
+Latest handoff: `docs/handoff-2026-10-29.md` (branches, what is verified on
+hardware, last measurements, pending list). Read it before starting work.
+
 ## Language
 
 - Chat with the owner in **Spanish (castellano)**.
@@ -160,7 +165,14 @@ export DEVKITPRO=/opt/devkitpro DEVKITARM=/opt/devkitpro/devkitARM
 ./build3ds.sh                    # debug config (CTR_INTERNAL on) -> build-3ds/, 3DSX + CIA
 ./build3ds.sh --release          # production config (CTR_INTERNAL off) -> build-3ds-release/
 ./build3ds.sh --install 192.168.1.50   # build, send the CIA to the running game, install, relaunch
+./build3ds.sh --o3ds-sim         # also ctr3d-o3dssim.cia: Old-3DS simulation (title 0x5A2C4, legacy 80MB, 268 MHz)
 ```
+
+Off a `release/*` branch the version reads `0.0.0-dev`, and AM refuses it over an
+installed 0.1.0 as a downgrade (`install write failed (d8e08027)`): build with
+`CTR_VERSION=0.1.0`. `SITE INSTALL` only accepts the running title's CIA (the sim
+CIA over the sim title, the normal one over the normal). The consoles' IPs change
+(DHCP); `.3ds_ftp_ip` remembers the last one.
 
 Both configs always contain the updater. `makerom` and `bannertool` are committed
 in `platform/n3ds/tools/bin/` (from `../zelda-tmc-3ds`), which is also how CI gets
