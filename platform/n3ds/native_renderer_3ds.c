@@ -41,6 +41,7 @@
 #include <platform/native_renderer.h>
 
 #include "n3ds_backend.h"
+#include "n3ds_bottomui.h"
 
 /*
  * PSX VRAM mirror: 1024x512 16-bit. native_renderer.c owns this on the host and
@@ -436,14 +437,10 @@ int g_dbg_mapBoth = 1;
  * the leg itself. */
 global_variable unsigned long s_mbTopCopyTris = 0;
 /*
- * Bottom-console visibility (dumpreq 'stats', default OFF -- release posture).
- * Gates every painter that writes glyphs into the bottom framebuffer: the
- * stats drip (N3DS_StatsDripRow) and Platform_Log's stdout echo
- * (native_log.c), both through N3DS_ConsolePaintAllowed. Composition, the
- * [PERF]/SD sinks and the netload stderr mirror are untouched -- only the
- * PANEL goes quiet. Boot text stays visible until the first present
- * (N3DS_GfxPresent wipes and arms the quiet then), so an asset error that
- * aborts before the game runs is still readable on the screen.
+ * Stats rows to the bottom UI's log view (dumpreq 'stats', default OFF -- release
+ * posture). The libctru console this used to gate is gone; with it off the
+ * stats block is still composed (the [PERF]/SD sinks and the netload stderr
+ * mirror are untouched), only the log-view echo of its rows is skipped.
  */
 int g_dbg_statsConsole = 0;
 /* Last measured fps x10 (the stats block's own 64-frame window number),
@@ -3367,8 +3364,14 @@ internal void N3DS_DrawBottomMapPass(void)
 	 * surface, and with this pass owning the panel every frame it effectively
 	 * never paints again. */
 	fpsActive = (s_btmfSegCount > 0) && s_btmfFrameHasBox && g_dbg_btmMap;
-	active = mapActive || fpsActive;
-	if (active)
+	/* The bottom screen belongs to the UI (n3ds_bottomui.c); the minimap and the
+	 * FPS overlay are the MAPA tab's content. A race map existing is reported
+	 * to the UI (it brings MAPA up once per race); they are DRAWN only while
+	 * that tab is the selected one -- their segments were already peeled off the
+	 * top screen at record time, so on another tab they are simply not shown. */
+	N3DS_BottomUi_MapLive(mapActive);
+	active = (mapActive || fpsActive) && N3DS_BottomUi_MapTabActive();
+	if (N3DS_BottomPass_Wanted(active) && N3DS_BottomPass_Begin())
 	{
 		const int dspW = (s_projectionDispW > 0) ? s_projectionDispW : 512;
 		const int dspH = (s_projectionDispH > 0) ? s_projectionDispH : 216;
@@ -3460,12 +3463,13 @@ internal void N3DS_DrawBottomMapPass(void)
 			}
 		}
 
-		if (N3DS_BottomMapDraw_Begin((float)wl, (float)wr, (float)wt, (float)wb))
+		if (active)
 		{
 			int lastDoubling = -1;
 			int lastDepthWrite = -1;
 			int i;
 
+			N3DS_BottomMapDraw_Begin((float)wl, (float)wr, (float)wt, (float)wb);
 			for (i = 0; i < s_btmmSegCount; i++)
 			{
 				const N3DS_MergeSegment *seg = &s_btmmSegs[i];
@@ -3496,10 +3500,12 @@ internal void N3DS_DrawBottomMapPass(void)
 				 * than the map's, so it wins the depth test over the map
 				 * pixels it overlays. */
 				const float fscale = 1.0f;
+				/* Height scaled for the content viewport (the tab bar takes
+				 * the rest of the panel), so a pixel stays square. */
 				const float fw = (float)dspW / fscale;
-				const float fh = (float)dspH / fscale;
+				const float fh = ((float)dspH / fscale) * ((float)N3DS_BOTTOM_CONTENT_H / 240.0f);
 				const float fl = (float)s_btmfFrameBox[2] - fw + (6.0f * fw / 320.0f);
-				const float ft = (float)s_btmfFrameBox[1] - (4.0f * fh / 240.0f);
+				const float ft = (float)s_btmfFrameBox[1] - (4.0f * fh / (float)N3DS_BOTTOM_CONTENT_H);
 
 				s_btmfWinDbg[0] = (short)fl;
 				s_btmfWinDbg[1] = (short)ft;
@@ -3526,20 +3532,23 @@ internal void N3DS_DrawBottomMapPass(void)
 					N3DS_C3DDrawTriangles(seg->baseVertex, seg->vertCount / 3);
 				}
 			}
-			N3DS_BottomMapDraw_End();
 			/* This pass touched doubling/depth-write/blend behind the
 			 * frame memos; force the next frame's first consumer to
 			 * reassert, same rule as the UI pass above. */
 			s_mergeDepthWriteState = -1;
 		}
-		else
-		{
-			/* No bottom target (allocation failed, logged by the backend):
-			 * stop retagging so the map returns to the top screen instead
-			 * of vanishing. */
-			g_dbg_btmMap = 0;
-			active = 0;
-		}
+		N3DS_BottomPass_End();
+		/* The UI quad also set doubling/depth-write/blend and the texture. */
+		s_mergeDepthWriteState = -1;
+		s_runUntextured = -1;
+	}
+	else if (active)
+	{
+		/* No bottom target/texture (allocation failed, logged by the backend):
+		 * stop retagging so the map returns to the top screen instead of
+		 * vanishing. */
+		g_dbg_btmMap = 0;
+		active = 0;
 	}
 
 	if (active != s_btmmWasActive)
@@ -4164,6 +4173,7 @@ int NativeRenderer_InitialiseRender(char *windowName, int width, int height, int
 	if (!N3DS_C3DInit())
 	{
 		N3DS_DebugLog("[CTR-3DS] citro3d init FAILED");
+		N3DS_ShowFatalGfxScreen("citro3d init failed (out of linear memory?)");
 		return 0;
 	}
 
@@ -4729,22 +4739,23 @@ internal void N3DS_StatsEmitRow(const char *text)
 
 internal void N3DS_StatsDripRow(void)
 {
+	/* One row per frame, only with the stats toggle (dumpreq 'stats') on, and
+	 * only when the row changed: it lands in the bottom UI's log view (and the
+	 * stream/SD log through N3DS_DebugLog's own callers) rather than a console
+	 * that no longer exists. */
+	static char s_shown[N3DS_STATS_ROWS][N3DS_STATS_COLS];
 	const int r = s_statsCursor;
 
-	/* Consolidated console-visibility gate (map owns the panel / stats console
-	 * off / boot text still up) -- see g_dbg_statsConsole. Glyphs land in the
-	 * shared framebuffer at print time, so this must be gated at the painter,
-	 * not at present. Composition and the log mirror continue regardless. */
-	if (!N3DS_ConsolePaintAllowed())
+	if (!g_dbg_statsConsole)
 	{
 		return;
 	}
-
 	s_statsCursor = (s_statsCursor + 1) % N3DS_STATS_ROWS;
-	/* Unconditional, not diffed -- repainting an unchanged row is what makes
-	 * this self-cleaning. Rows the block never filled are blank by static
-	 * init, so they scrub to spaces rather than keeping stale text. */
-	printf("\x1b[%d;1H%-40.40s", r + 1, s_statsPending[r]);
+	if (strncmp(s_shown[r], s_statsPending[r], N3DS_STATS_COLS - 1) != 0)
+	{
+		memcpy(s_shown[r], s_statsPending[r], N3DS_STATS_COLS);
+		N3DS_BottomUi_LogLine(s_statsPending[r]);
+	}
 }
 
 /*
@@ -5679,9 +5690,34 @@ void NativeRenderer_SwapWindow(void)
 		}
 	}
 
-	/* One row of the bottom screen, every frame -- see N3DS_StatsDripRow.
-	 * Sits here, just before the present that pushes the console framebuffer,
-	 * so the row is on screen the same frame it is drawn. */
+	/* Bottom-screen UI (n3ds_bottomui.c): per presented frame it records the
+	 * frame time, reaps the FTP thread and decides whether a repaint is due.
+	 * The game-side numbers it cannot see (the UI TU has no game headers) are
+	 * handed over here. Cheap: a ring write and a few compares. */
+	{
+		struct N3DS_BottomUiGameInfo gi;
+
+		memset(&gi, 0, sizeof(gi));
+		gi.drawCalls = (unsigned int)s_drawCallCount;
+		gi.mergeVerts = (unsigned int)(s_mergeVertsOpaque + s_mergeVertsBlend);
+		gi.levelID = NativePerf_CurrentLevelID();
+		gi.gameMode = (sdata->gGT != NULL) ? sdata->gGT->gameMode1 : 0;
+		gi.mainState = (int)sdata->mainGameState;
+#ifdef CTR_INTERNAL
+		gi.perfValid = (s_perfConsoleTotalUs > 0);
+		gi.perfTotalUs = s_perfConsoleTotalUs;
+		gi.perfWorkUs = s_perfConsoleWorkUs;
+		gi.perfWorstUs = s_perfConsoleWorstUs;
+		gi.bucketName[0] = s_perfConsoleName[0];
+		gi.bucketName[1] = s_perfConsoleName[1];
+		gi.bucketUs[0] = s_perfConsoleUs[0];
+		gi.bucketUs[1] = s_perfConsoleUs[1];
+#endif
+		N3DS_BottomUi_Frame(&gi);
+	}
+
+	/* The stats block no longer has a console to drip into; its rows go to the
+	 * UI's log view. */
 	N3DS_StatsDripRow();
 
 	NativePerf_BeginScope(NATIVE_PERF_BUCKET_N3DS_GFX_PRESENT);
@@ -5800,6 +5836,14 @@ void NativeRenderer_PresentVRAMRect(int displayX, int displayY, int displayW, in
 
 	if ((displayW <= 0) || (displayH <= 0))
 	{
+		return;
+	}
+
+	/* A present issued with no citro3d frame open (renderer not up yet, or the
+	 * frame already ended) would panic the GPU command buffer: skip it loudly. */
+	if (!N3DS_C3DFrameOpen())
+	{
+		N3DS_C3DNoteDrawOutsideFrame("PresentVRAMRect");
 		return;
 	}
 

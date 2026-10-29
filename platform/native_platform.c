@@ -601,6 +601,14 @@ void Platform_Shutdown(void)
 
 	s_platformInitialized = 0;
 
+#ifdef __3DS__
+	// Exit order (the relaunch after SITE INSTALL crashed in ndsp when threads
+	// and services outlived each other): settings saved and the FTP thread
+	// joined first; then the render worker, the audio worker + ndsp, citro3d
+	// (frame sync, Fini) and gfx; socExit last (atexit, n3ds_backend.c).
+	N3DS_ExitBegin();
+#endif
+
 	// Drain and join the render worker before anything below tears down what
 	// its jobs touch. Posts STOP synchronously; no-op if it never came up.
 	NativeRenderQueue_Shutdown();
@@ -675,7 +683,38 @@ void Platform_EndScene(void)
 	NativePerf_BeginScope(NATIVE_PERF_BUCKET_PLATFORM_END_SCENE);
 	s_platformBeginScene = 0;
 
+#ifdef __3DS__
+	/* citro3d: the present is GPU work and must land inside the frame, i.e.
+	 * BEFORE the frame is ended (it records into the stereo journal and the
+	 * merge barrier first, see NativeRenderer_PresentVRAMRect). Ended first, its
+	 * draw hits libctru's NULL command buffer. */
+	if (s_pinnedVramDisplayFrames > 0)
+	{
+		NativeRenderer_DiscardFramebufferReadback();
+		if (s_pinnedVramDisplayCustomRect)
+		{
+			NativeRenderer_PresentVRAMRect(s_pinnedVramDisplayX, s_pinnedVramDisplayY, s_pinnedVramDisplayW, s_pinnedVramDisplayH);
+		}
+		else
+		{
+			NativeRenderer_PresentVRAMDisplay();
+		}
+	}
 	NativeRenderer_EndScene();
+	if (s_pinnedVramDisplayFrames > 0)
+	{
+		NativeRenderer_SwapWindow();
+		s_pinnedVramDisplayFrames--;
+		if (s_pinnedVramDisplayFrames <= 0)
+		{
+			s_pinnedVramDisplayCustomRect = 0;
+		}
+		NativePerf_EndScope(NATIVE_PERF_BUCKET_PLATFORM_END_SCENE);
+		return;
+	}
+#else
+	NativeRenderer_EndScene();
+#endif
 
 	if (s_pinnedVramDisplayFrames > 0)
 	{

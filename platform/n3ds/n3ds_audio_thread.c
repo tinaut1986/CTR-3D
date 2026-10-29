@@ -390,12 +390,21 @@ static void N3DS_NdspSinkShutdown(void)
 	{
 		int v;
 
+		/* Silence every channel and let the DSP apply it (its sync thread runs
+		 * about every 5 ms) BEFORE ndspExit: the DSP and libctru's ndsp thread
+		 * must not be reading channel state while the exit unmaps it (the
+		 * data abort in ndspThreadMain -> ndspiReadChnState on a relaunch). */
 		for (v = 0; v < N3DS_HW_CHANNEL_COUNT; v++)
 		{
 			ndspChnWaveBufClear(v);
+			ndspChnReset(v);
 		}
 		ndspChnWaveBufClear(N3DS_NDSP_CHANNEL);
+		ndspChnReset(N3DS_NDSP_CHANNEL);
+		svcSleepThread(30 * 1000 * 1000LL);
+		N3DS_ExitLog("ndsp channels reset");
 		ndspExit();
+		N3DS_ExitLog("ndsp released");
 	}
 	if (s_ndspPcm != NULL)
 	{
@@ -1498,6 +1507,7 @@ void N3DS_AudioThreadStopAndJoin(void)
 		s_audioThreadShouldStop = 1;
 		svcSignalEvent(s_audioWakeHandle);
 		threadJoin(s_audioThread, U64_MAX); /* documented infinite-wait sentinel */
+		N3DS_ExitLog("audio worker joined");
 		threadFree(s_audioThread);          /* valid only because detached=false at creation */
 		s_audioThread = NULL;
 		s_audioThreadRunning = 0;

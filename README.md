@@ -29,7 +29,7 @@ The goal is a game that could pass for a retail 3DS port: faithful to the origin
 
 1. Download the zip from the Releases page and extract it onto the root of your SD card. It mirrors the card's layout, so the game lands at `/3ds/ctr_native/ctr_native.3dsx`.
 2. Copy your disc image to `/3ds/ctr_native/assets/ctr-u.bin`. The `assets` folder contains a text file marking the spot.
-3. Launch it from the Homebrew Launcher, where it appears as CTR 3D.
+3. Launch it from the Homebrew Launcher, where it appears as CTR 3D, or install the CIA with FBI and start it from the HOME menu. Data always lives in `/3ds/ctr_native/`.
 
 Saves are written to `/3ds/ctr_native/memcards/`, in the same files the PC port uses, so progress can be copied between console and PC.
 
@@ -63,7 +63,7 @@ The main menu has an **OPTIONS** entry with four toggles: PAL PENTA (Penta Pengu
 
 Open an issue on the repository's Issues page. The bug-report form asks for what it needs: console model, Luma3DS version, SD card make and size, the version string shown under the game's name in the Homebrew Launcher, and what you were doing.
 
-To attach a log, create an empty file named `enable-log.txt` next to `ctr_native.3dsx`, launch the game, reproduce the problem, then attach `/ctr3ds.log` from the SD card root. Logging costs a small stutter every couple of seconds, so delete `enable-log.txt` afterwards.
+To attach a log, create an empty file named `enable-log.txt` in `/3ds/ctr_native/`, launch the game, reproduce the problem, then attach `/ctr3ds.log` from the SD card root. Logging costs a small stutter every couple of seconds, so delete `enable-log.txt` afterwards.
 
 ## Changes from the original game
 
@@ -94,7 +94,7 @@ cmake -S . -B build-3ds -DCMAKE_TOOLCHAIN_FILE=$DEVKITPRO/cmake/3DS.cmake -DCMAK
 cmake --build build-3ds
 ```
 
-Output: `build-3ds/ctr_native.3dsx`. That build includes the internal debug surface; add `-DCTR_INTERNAL=OFF` to the configure line to build what the release ships.
+Or just `./build3ds.sh`, which configures if needed and builds both outputs: `build-3ds/ctr_native.3dsx` and the installable `build-3ds/cia/ctr3d.cia` (needs `makerom` and `bannertool`; see `package-cia.sh` for where it looks). The CIA is the preferred way to run it: it gets the New 3DS's full app memory (SystemModeExt 178MB), a .3dsx only gets the launching title's. `./build3ds.sh --install <3DS IP>` sends the CIA to the running game over FTP and installs it. That build includes the internal debug surface (FTP on by default, Debug tab); add `-DCTR_INTERNAL=OFF` to the configure line to build what the release ships (FTP only when an empty `dev-ftp.txt` is in `/3ds/ctr_native/`).
 
 On Windows, run both commands from devkitPro's MSYS2 shell using the `msys` `cmake` and `make` packages, not the mingw ones. From plain Git Bash the cross-compiler fails with a temporary-file error.
 

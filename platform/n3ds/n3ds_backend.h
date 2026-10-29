@@ -40,8 +40,10 @@ void N3DS_GfxInit(void);
  * libctru, which the unity TU cannot see. */
 void N3DS_ShowFatalAssetScreen(const char *assetDir);
 void N3DS_GfxExit(void);
-/* Push the current framebuffer to the screen. Does NOT wait for vblank --
- * frame pacing belongs to VSync() in the platform layer. */
+/* citro3d failed to start: top-screen explanation with the memory numbers, wait for
+ * START, exit. Does not return. */
+void N3DS_ShowFatalGfxScreen(const char *what);
+/* Per-frame present hook: a no-op now (citro3d presents both screens). */
 void N3DS_GfxPresent(void);
 
 /* -------------------------------------------------------------- render --- */
@@ -248,6 +250,11 @@ int N3DS_StereoSkyPadX(void);
  * skip drawing in that case, not draw from a stale/wrong offset. */
 int N3DS_C3DAppendVertices(const N3DS_Vertex *vertices, int count);
 void N3DS_C3DDrawTriangles(int startVertex, int triangleCount);
+/* Nonzero inside a C3D_FrameBegin/End bracket. Draws outside one would panic
+ * libctru's GPU command buffer (NULL after FrameEnd); sites that issue GPU work
+ * outside the walk check this and report through NoteDrawOutsideFrame. */
+int N3DS_C3DFrameOpen(void);
+void N3DS_C3DNoteDrawOutsideFrame(const char *site);
 /* Highest vertex count reached in any single frame so far. Reported in the
  * stats block: if this ever approaches N3DS_MAX_FRAME_VERTICES the budget
  * above is too small for real content and geometry is about to disappear. */
@@ -562,51 +569,56 @@ void N3DS_SetTopContentFullWidth(int fullWidth);
  */
 int N3DS_CopyDisplayedTopFrame(unsigned char *dstRGB, int dstW, int dstH);
 
-/* ------------------------------------------------ bottom-screen minimap --- */
-/* Second-screen pass for the in-race minimap (renderer's
- * N3DS_DrawBottomMapPass, dumpreq 'btmmap'). Begin lazily creates the bottom
- * render target (non-fatal: returns 0 when unavailable and the caller must
- * skip -- same boots-without-it contract as the stereo right eye), switches
- * drawing onto it for the rest of the frame, sets a full-panel viewport,
- * re-asserts the frame's depth policy, binds the packet draw state, and
- * uploads an ortho window of [left..right] x [top..bottom] PSX units (Y-down,
- * top < bottom) -- the magnification IS the window, no vertex is touched. It
- * also suppresses the debug console's bottom-screen painting for a few
- * presents (the console resumes by itself once the pass goes quiet). End
- * restores the stored top-screen projection: N3DS_C3DBeginFrame re-uploads
- * the STORED matrix every frame and N3DS_C3DSetProjection only rebuilds it on
- * a display-mode change, so leaving the window matrix in place would project
- * every following top frame through the map window. Call strictly between
- * N3DS_StereoRenderRightEye and N3DS_C3DEndFrame. The parallax uniform is
- * left as the last eye set it, deliberately: every routed primitive carries a
- * UI-band stamp, which the shader's own band mask flattens to zero shift. */
-int N3DS_BottomMapDraw_Begin(float left, float right, float top, float bottom);
-/* Re-aim the window between Begin and End (the FPS overlay's smaller window
- * after the map's). Uniform sequencing is safe mid-frame: citro3d records the
- * dirty uniform into the command list at the next draw, the same pattern the
- * per-instance model uploads rely on. */
+/* -------------------------------------------- bottom screen (the pass) --- */
+/* The bottom screen's single presenter once the game renders: a citro3d
+ * target filling the BGR8 framebuffer that n3ds_bottomui.c fixed at boot (see
+ * its header for the ownership story). The renderer's N3DS_DrawBottomMapPass
+ * runs, once per frame, strictly between N3DS_StereoRenderRightEye and
+ * N3DS_C3DEndFrame:
+ *   if (N3DS_BottomPass_Wanted(mapDrawing)) {
+ *     if (N3DS_BottomPass_Begin()) {       // clear + the UI picture (tab bar)
+ *       [MAPA tab: N3DS_BottomMapDraw_Begin(window) ... draws ...
+ *        N3DS_BottomMapDraw_SetWindow(fps window) ... draws]
+ *       N3DS_BottomPass_End();             // restores the top-screen projection
+ *     } } 
+ * Begin returns 0 when the target/texture could not be allocated (non-fatal:
+ * the boot picture stays and the caller must skip). MapDraw_Begin takes the
+ * window fitted to the map for the whole 320x240 panel and confines drawing
+ * to the content area under the tab bar (N3DS_BOTTOM_CONTENT_H rows), widening
+ * the window to keep proportions; SetWindow re-aims it mid-pass (the FPS
+ * overlay), the caller scaling its window height by CONTENT_H/240. End restores
+ * the stored projection: N3DS_C3DBeginFrame re-uploads the STORED matrix every
+ * frame, so leaving a window matrix in place would project every following top
+ * frame through it. */
+int N3DS_BottomPass_Wanted(int mapDrawing);
+int N3DS_BottomPass_Begin(void);
+void N3DS_BottomMapDraw_Begin(float left, float right, float top, float bottom);
 void N3DS_BottomMapDraw_SetWindow(float left, float right, float top, float bottom);
-void N3DS_BottomMapDraw_End(void);
-/* Nonzero while the map pass holds the bottom panel. The stats drip painter
- * must check this and hold off: console glyphs land in the shared framebuffer
- * at PRINT time, so the present-side flush/swap suppression alone cannot stop
- * text from scribbling over the map. Stats composition and the log mirror
- * continue; only the console painting pauses, and the drip's own row rotation
- * scrubs the map's pixels back off within one sweep after release. */
-int N3DS_BottomMapOwnsScreen(void);
-/* The single console-visibility answer for every glyph painter (the stats
- * drip and Platform_Log's stdout echo): false while the map owns the panel,
- * false once the game is presenting unless the stats console is toggled on
- * (dumpreq 'stats'), true during boot so pre-game errors stay readable. */
-int N3DS_ConsolePaintAllowed(void);
-/* One console row for a pre-game hold's progress, claimed under the boot text
- * already on the panel and repainted in place -- no clear, no scroll, no SD
- * write and no netload send. Each call blits that row's glyph cells into the
- * column-major rotated console framebuffer, so call it only when the text
- * changes. Deliberately outside N3DS_ConsolePaintAllowed; see the definition.
- * Clear blanks the row and releases it. */
+void N3DS_BottomPass_End(void);
+/* The pre-game "label NN%" progress (NativeLog_BootStatus): shown on the
+ * bottom UI's Status tab. Clear removes it. */
 void N3DS_ConsoleStatusLine(const char *text);
 void N3DS_ConsoleStatusClear(void);
+/* A log line for the bottom UI's Debug log view (any thread, cheap). */
+void N3DS_BottomUi_LogLine(const char *text);
+
+/* ------------------------------------------------------------ app data --- */
+/* The app's fixed data directory on the SD card: assets/, memcards/, update/,
+ * the settings file and the flag files all live here, identically for a .3dsx
+ * and an installed CIA (the old "beside the .3dsx" lookup depended on the
+ * launcher's working directory, which a CIA does not have). */
+#define N3DS_APP_DIR "sdmc:/3ds/ctr_native"
+/* Settings file "key=value" (ctr3d.cfg in the app dir): ftp, btmmap, stereo,
+ * cpu804. Set writes the file at once (a UI tap, never a frame path). */
+int N3DS_ConfigGet(const char *key, int def);
+void N3DS_ConfigSet(const char *key, int value);
+void N3DS_ConfigFlush(void);
+/* Exit sequence (Platform_Shutdown, 3DS): ExitBegin first, then the services in
+ * reverse order of start; every step is logged and flushed. */
+void N3DS_ExitBegin(void);
+void N3DS_ExitLog(const char *step);
+/* New 3DS 804MHz clock-up on/off (no-op on Old 3DS); persisted by the caller. */
+void N3DS_SetSpeedup(int on);
 
 /* ---------------------------------------------------------------- input --- */
 
@@ -648,6 +660,11 @@ void N3DS_EarlyInit(void);
  * instead of needing an SD pull. */
 int N3DS_NetloadStreamActive(void);
 
+/* Brings up the process's single socket service (one soc:u session, one 1 MiB
+ * buffer) if it is not up yet; shared by the 3dslink stream and the FTP server.
+ * Main thread, before the worker threads start. Nonzero when sockets work. */
+int N3DS_NetEnsureSoc(void);
+
 /* Nonzero while the SD-card log sink is enabled (g_dbg_sdLog; SELECT+R or
  * dumpreq `sdlog`, default off). Platform_Log's file sink honours the same
  * switch as N3DS_DebugLog's, so one control governs every SD write this build
@@ -675,6 +692,16 @@ void N3DS_DebugSetVRAMForDump(const void *vram, unsigned int bytes, const unsign
  * Reported on screen so runaway allocation is visible as it happens. */
 unsigned long N3DS_HeapUsedBytes(void);
 unsigned long N3DS_LinearFreeBytes(void);
+
+/* Read-only state for the bottom-screen UI (n3ds_bottomui.c). */
+int N3DS_StereoFrameActive(void);   /* this frame rendered both eyes */
+float N3DS_StereoSliderState(void); /* physical 3D slider, 0..1 */
+int N3DS_SpeedupEnabled(void);      /* New3DS 804MHz clock-up requested */
+#ifdef CTR_INTERNAL
+/* Queue one dumpreq word (e.g. "stereo") from the bottom UI; runs through the
+ * same token chain as sdmc:/dumpreq.txt on the next N3DS_ReadButtons. */
+void N3DS_QueueDumpReq(const char *word);
+#endif
 
 /* ------------------------------------------------------------------ app --- */
 /* Zero once the user has closed the applet (HOME/power), meaning the process

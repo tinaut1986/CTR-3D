@@ -129,7 +129,35 @@ Rules the hardware enforces and emulators do not:
   polled on the first frame and every 64 frames after (`stereo`, `drawmerge`,
   `sdlog`, ...), SELECT chords, `[PERF]` scope windows, screenshots and probes.
   OFF strips all of it from the binary and changes no default.
-- In any build, an empty `enable-log.txt` beside the `.3dsx` turns on the SD log
+- Bottom screen (`platform/n3ds/n3ds_bottomui.c`, always on, from the first
+  frame): graphics mode, no libctru console on it. Tabs ESTADO / MAPA /
+  OPCIONES / ACTUALIZADOR (English on non-Spanish consoles: STATUS / MAP /
+  OPTIONS / UPDATER), plus one DEBUG tab (PERF sparkline + memory, ACTIONS = the
+  dumpreq buttons and the FTP toggle, LOG) with `CTR_INTERNAL`. There is no
+  Achievements tab: the port has no achievement system. Why one owner matters:
+  `consoleInit(GFX_BOTTOM)` silently sets RGB565 + single buffering, so the old
+  console, a 24-bit CPU painter and the minimap's display transfer were three
+  writers in two formats on one buffer. Now `N3DS_GfxInit` fixes BGR8 + double
+  buffering once, and from the first GPU frame the citro3d bottom target is the
+  only presenter: the UI is a CPU-drawn 320x240 picture uploaded as a 512x256
+  RGBA5551 texture and drawn as one quad; the minimap (MAPA tab) is drawn over
+  it in the content area under the tab bar. Before the first GPU frame the same
+  picture is blitted on the CPU. It repaints only on change; idle it costs nothing.
+  Log text goes to the DEBUG > LOG view, the SD log and the 3dslink stream.
+  Settings (ftp, btmmap, stereo, cpu804) persist in `ctr3d.cfg` in the app dir.
+- App data lives in `sdmc:/3ds/ctr_native/` (assets/, memcards/, update/,
+  ctr3d.cfg, enable-log.txt, dev-ftp.txt) for a .3dsx and an installed CIA alike.
+- FTP (`n3ds_ftp.c`, port 5000, one low-priority thread on core 3, else 2):
+  `CTR_INTERNAL` builds serve the whole SD card by default (toggle in DEBUG >
+  ACTIONS); production builds serve nothing unless `dev-ftp.txt` exists, then only
+  `/3ds/ctr_native/update` and `SITE INSTALL` (CANCEL on the Updater tab).
+  `./build3ds.sh --install <ip>` uploads and installs the CIA; the game warns on
+  the bottom screen (upload %, install %, 10 s countdown) and restarts into it.
+- CIA: `./build3ds.sh` builds the .3dsx and `build-3ds/cia/ctr3d.cia`
+  (`package-cia.sh`; title ID 0x0004000005A2C300, SystemModeExt 178MB on New 3DS,
+  SystemMode 64MB legacy = all an Old 3DS app gets). Old 3DS blockers: that 64MB
+  region, and the FTP thread/render worker need New 3DS cores 2/3.
+- In any build, an empty `enable-log.txt` in `sdmc:/3ds/ctr_native/` turns on the SD log
   at `sdmc:/ctr3ds.log`. It is flushed on a timer, because a flush per line
   stalls the game on the card's latency.
 - Frame-rate claims count only from a wall clock on hardware: the `[PERF]`

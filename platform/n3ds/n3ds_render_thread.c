@@ -85,6 +85,7 @@ void N3DS_RenderWorkerStopAndJoin(void)
 	}
 
 	threadJoin(s_renderThread, U64_MAX);
+	N3DS_ExitLog("render worker joined");
 	threadFree(s_renderThread);
 	s_renderThread = NULL;
 	s_workerUp = 0;
