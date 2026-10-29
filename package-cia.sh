@@ -2,7 +2,11 @@
 # Build an installable CIA (FBI) from the 3DS build tree.
 # Usage: ./package-cia.sh [build-dir]   (default: build-3ds)
 # Needs makerom + bannertool: via MAKEROM / BANNERTOOL, on PATH, in $DEVKITPRO/tools/bin,
-# in ./tools/bin, or in the sibling zelda-tmc-3ds checkout (platform/3ds/tools/bin).
+# in platform/n3ds/tools/bin (committed there, copied from ../zelda-tmc-3ds like its CI does), or in
+# the sibling zelda-tmc-3ds checkout (platform/3ds/tools/bin).
+# The CIA carries the code only (no romfs, no game data: the assets stay on the SD card). Its
+# version fields are the build's X.Y.Z (platform/n3ds/tools/version.sh; CTR_VERSION overrides);
+# the file is written as ctr3d.cia and as ctr3d-vX.Y.Z.cia (the name the updater expects).
 # Normally run by ./build3ds.sh (which builds the .3dsx too).
 # APP_SYSTEM_MODE_EXT=124MB|178MB picks the New 3DS app memory mode (default 178MB).
 # APP_SYSTEM_MODE=64MB|72MB|80MB|96MB is the legacy (Old 3DS/2DS) mode (default 64MB).
@@ -19,6 +23,8 @@ DEVKITPRO="${DEVKITPRO:-/opt/devkitpro}"
 ELF="${BUILD}/ctr_native.elf"
 SMDH="${BUILD}/ctr_native.smdh"
 OUT="${BUILD}/cia"
+VERSION="$(sh platform/n3ds/tools/version.sh)"
+IFS=. read -r V_MAJOR V_MINOR V_MICRO <<< "$(printf '%s' "${VERSION}" | sed -E 's/^([0-9]+)\.([0-9]+)\.([0-9]+).*/\1.\2.\3/')"
 CIA_NAME="ctr3d"
 if [[ "${O3DS_SIM:-0}" == "1" ]]; then
     APP_SYSTEM_MODE_EXT="Legacy"
@@ -30,7 +36,7 @@ if [[ "${O3DS_SIM:-0}" == "1" ]]; then
     APP_TITLE="CTR 3D O3DS SIM"
     CIA_NAME="ctr3d-o3dssim"
 fi
-APP_SYSTEM_MODE_EXT="${APP_SYSTEM_MODE_EXT:-178MB}"
+export APP_SYSTEM_MODE_EXT="${APP_SYSTEM_MODE_EXT:-178MB}"
 APP_SYSTEM_MODE="${APP_SYSTEM_MODE:-64MB}"
 APP_CPU_SPEED="${APP_CPU_SPEED:-804MHz}"
 APP_L2_CACHE="${APP_L2_CACHE:-true}"
@@ -43,7 +49,7 @@ find_tool() {
     if [[ -n "${var}" && -x "${var}" ]]; then echo "${var}"; return; fi
     command -v "${name}" 2>/dev/null && return
     local dir
-    for dir in "${DEVKITPRO}/tools/bin" "tools/bin" "../zelda-tmc-3ds/platform/3ds/tools/bin"; do
+    for dir in "${DEVKITPRO}/tools/bin" "platform/n3ds/tools/bin" "tools/bin" "../zelda-tmc-3ds/platform/3ds/tools/bin"; do
         if [[ -x "${dir}/${name}" ]]; then echo "${dir}/${name}"; return; fi
     done
 }
@@ -75,5 +81,11 @@ fi
     -DAPP_SYSTEM_MODE="${APP_SYSTEM_MODE}" -DAPP_CPU_SPEED="${APP_CPU_SPEED}" -DAPP_L2_CACHE="${APP_L2_CACHE}" \
     -DAPP_UNIQUE_ID="${APP_UNIQUE_ID}" -DAPP_PRODUCT_CODE="${APP_PRODUCT_CODE}" -DAPP_TITLE="${APP_TITLE}" \
     -elf "${ELF}" -rsf platform/n3ds/cia/ctr3d.rsf -exefslogo -target t \
-    -icon "${SMDH}" -banner "${OUT}/banner.bnr" -major 1 -minor 0 -micro 0
-echo "Built ${OUT}/${CIA_NAME}.cia (SystemModeExt ${APP_SYSTEM_MODE_EXT}, SystemMode ${APP_SYSTEM_MODE}, ${APP_CPU_SPEED}, L2 ${APP_L2_CACHE}, UniqueId ${APP_UNIQUE_ID})"
+    -icon "${SMDH}" -banner "${OUT}/banner.bnr" -major "${V_MAJOR}" -minor "${V_MINOR}" -micro "${V_MICRO}"
+if [[ "${CIA_NAME}" == "ctr3d" ]]; then
+    # Only the normal CIA gets the versioned copy the updater expects; the simulation CIA is dev-only.
+    cp "${OUT}/ctr3d.cia" "${OUT}/ctr3d-v${VERSION}.cia"
+    echo "Built ${OUT}/ctr3d.cia = ${OUT}/ctr3d-v${VERSION}.cia (version ${VERSION}, SystemModeExt ${APP_SYSTEM_MODE_EXT}, SystemMode ${APP_SYSTEM_MODE}, ${APP_CPU_SPEED}, L2 ${APP_L2_CACHE})"
+else
+    echo "Built ${OUT}/${CIA_NAME}.cia (version ${VERSION}, SystemModeExt ${APP_SYSTEM_MODE_EXT}, SystemMode ${APP_SYSTEM_MODE}, ${APP_CPU_SPEED}, L2 ${APP_L2_CACHE}, UniqueId ${APP_UNIQUE_ID})"
+fi

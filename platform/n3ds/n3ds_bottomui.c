@@ -39,6 +39,8 @@
 #include "n3ds_backend.h"
 #include "n3ds_bottomui.h"
 #include "n3ds_ftp.h"
+#include "update_manifest.h"
+#include "updater.h"
 
 #define UI_W 320
 #define UI_H 240
@@ -105,6 +107,19 @@ static int s_pressBtn = -1;
 static int s_pressFrames = 0;
 static int s_isNew3DS = -1;
 static unsigned s_ftpSig = 0;
+/* In-game updater page (updater.h). The release notes are word-wrapped once on
+ * the game thread when a check finishes (Update_FormatNotes keeps a 12 KB buffer
+ * on the stack, too much for the render worker that paints), then only drawn. */
+#define NOTE_LINES 384
+#define NOTE_ROWS 6
+static unsigned s_updRev = 0;
+static int s_updState = -1;
+static int s_updNew = 0; /* a newer build was found: the tab says so */
+static char s_noteRaw[12289];
+static char s_noteLines[NOTE_LINES][43];
+static unsigned s_noteCount = 0;
+static unsigned s_noteScroll = 0;
+static unsigned s_frameCount = 0;
 static char s_status[48];
 static char s_logRing[LOG_LINES][LOG_COLS + 1];
 static volatile unsigned s_logHead = 0;
@@ -299,7 +314,7 @@ static const char *ui_tab_name(int id)
 	case TAB_STATUS: return TR("STATUS", "ESTADO");
 	case TAB_MAP: return TR("MAP", "MAPA");
 	case TAB_OPTIONS: return TR("OPTIONS", "OPCIONES");
-	case TAB_UPDATER: return TR("UPDATER", "ACTUALIZ");
+	case TAB_UPDATER: return s_updNew ? TR("UPDATE!", "NUEVA!") : TR("UPDATER", "ACTUALIZ");
 	default: return "DEBUG";
 	}
 }
@@ -353,13 +368,38 @@ static void ui_act_rect(int i, int *x, int *y, int *w, int *h)
 }
 #endif
 
-/* The Updater page's CANCEL button (install-only server). */
+/* The Updater page's CANCEL button (install-only FTP server), bottom right. */
 static void ui_cancel_rect(int *x, int *y, int *w, int *h)
 {
-	*x = 90;
-	*y = CONTENT_Y + 96;
-	*w = 140;
-	*h = 36;
+	*x = 232;
+	*y = CONTENT_Y + 172;
+	*w = 82;
+	*h = 26;
+}
+
+/* Updater page widgets: channel and auto-check toggles, the action button, the
+ * notes viewport with its scroll buttons. */
+enum
+{
+	UPD_CHANNEL = 0,
+	UPD_AUTO,
+	UPD_ACTION,
+	UPD_UP,
+	UPD_DOWN,
+	UPD_COUNT
+};
+#define UPD_BTN_BASE 110
+
+static void ui_upd_rect(int i, int *x, int *y, int *w, int *h)
+{
+	switch (i)
+	{
+	case UPD_CHANNEL: *x = 6; *y = CONTENT_Y + 22; *w = 151; *h = 22; break;
+	case UPD_AUTO: *x = 163; *y = CONTENT_Y + 22; *w = 151; *h = 22; break;
+	case UPD_ACTION: *x = 6; *y = CONTENT_Y + 48; *w = 308; *h = 24; break;
+	case UPD_UP: *x = 270; *y = CONTENT_Y + 104; *w = 44; *h = 32; break;
+	default: *x = 270; *y = CONTENT_Y + 140; *w = 44; *h = 32; break;
+	}
 }
 
 /* ------------------------------------------------------------------ helpers --- */
@@ -599,41 +639,134 @@ static void ui_draw_bar(int x, int y, int w, int h, unsigned long long done, uns
 
 static void ui_draw_updater(void)
 {
-	char c[80];
-	int y = CONTENT_Y + 8;
-	const int st = N3DS_FtpStatus();
+	char c[96];
+	UpdateStatus st;
+	int x, y, w, h, i;
+	const int busy = Updater_Busy();
+	const int ftp = N3DS_FtpStatus();
 
-	ui_text(6, y, 2, COL_ACCENT, TR("UPDATER", "ACTUALIZADOR"));
-	y += 22;
-	if (st == N3DS_FTP_STATUS_LISTENING)
+	Updater_GetStatus(&st);
+	ui_text(6, CONTENT_Y + 4, 2, COL_ACCENT, TR("UPDATER", "ACTUALIZADOR"));
+	ui_text(314 - ui_text_w(1, CTR_NATIVE_VERSION), CONTENT_Y + 8, 1, COL_LABEL, CTR_NATIVE_VERSION);
+
+	/* Channel and auto-check toggles. */
+	ui_upd_rect(UPD_CHANNEL, &x, &y, &w, &h);
+	ui_button(x, y, w, h, busy ? COL_PANEL : COL_BTN_ACT, (s_pressBtn == UPD_BTN_BASE + UPD_CHANNEL));
+	ui_text_c(x + (w / 2), y + 7, 1, COL_TEXT, st.betas ? TR("CHANNEL: + BETAS", "CANAL: + BETAS") : TR("CHANNEL: STABLE", "CANAL: ESTABLE"));
+	ui_upd_rect(UPD_AUTO, &x, &y, &w, &h);
 	{
-		ui_text(6, y, 1, COL_LABEL, N3DS_FtpInstallOnly() ? TR("INSTALL SERVER AT", "SERVIDOR DE INSTALACION EN")
-		                                                  : TR("FTP SERVER AT", "SERVIDOR FTP EN"));
-		ui_ftp_address(c, sizeof(c));
-		ui_text_c(UI_W / 2, y + 14, 2, COL_GOOD, c);
-		ui_text(6, y + 40, 1, COL_LABEL, TR("SEND A .CIA TO /3DS/CTR_NATIVE/UPDATE/", "ENVIA UN .CIA A /3DS/CTR_NATIVE/UPDATE/"));
-		ui_text(6, y + 51, 1, COL_LABEL, TR("THEN SITE INSTALL <PATH>", "Y LUEGO SITE INSTALL <RUTA>"));
-		if (N3DS_FtpInstallOnly())
-		{
-			int x, by, w, h;
+		const int on = Updater_AutoCheckEnabled();
 
-			ui_cancel_rect(&x, &by, &w, &h);
-			ui_button(x, by, w, h, COL_BTN_OFF, (s_pressBtn == 100));
-			ui_text_c(x + (w / 2), by + 11, 2, COL_TEXT, TR("CANCEL", "CANCELAR"));
+		ui_button(x, y, w, h, on ? COL_BTN_ON : COL_BTN_OFF, (s_pressBtn == UPD_BTN_BASE + UPD_AUTO));
+		snprintf(c, sizeof(c), "%s %s", TR("AUTO CHECK:", "AUTO BUSCAR:"), ui_onoff(on));
+		ui_text_c(x + (w / 2), y + 7, 1, COL_TEXT, c);
+	}
+
+	/* The action button follows the state. */
+	{
+		const char *label = TR("CHECK FOR UPDATES", "BUSCAR ACTUALIZACION");
+		u16 col = COL_BTN_ACT;
+
+		if (st.state == UPDATE_CHECKING)
+		{
+			label = TR("CHECKING...", "BUSCANDO...");
+			col = COL_PANEL;
+		}
+		else if (st.state == UPDATE_AVAILABLE)
+		{
+			label = TR("DOWNLOAD AND INSTALL", "DESCARGAR E INSTALAR");
+			col = COL_BTN_ON;
+		}
+		else if (st.state == UPDATE_DOWNLOADING)
+		{
+			label = TR("CANCEL DOWNLOAD", "CANCELAR DESCARGA");
+			col = COL_BTN_OFF;
+		}
+		else if ((st.state == UPDATE_VERIFYING) || (st.state == UPDATE_INSTALLING))
+		{
+			label = TR("INSTALLING...", "INSTALANDO...");
+			col = COL_PANEL;
+		}
+		else if (st.state == UPDATE_DONE)
+		{
+			label = TR("RESTARTING...", "REINICIANDO...");
+			col = COL_PANEL;
+		}
+		ui_upd_rect(UPD_ACTION, &x, &y, &w, &h);
+		ui_button(x, y, w, h, col, (s_pressBtn == UPD_BTN_BASE + UPD_ACTION));
+		ui_text_c(x + (w / 2), y + 5, 2, COL_TEXT, label);
+	}
+
+	/* Status line, found version and progress. */
+	y = CONTENT_Y + 78;
+	{
+		u16 col = (st.state == UPDATE_ERROR) ? COL_BAD : (st.state == UPDATE_AVAILABLE || st.state == UPDATE_DONE) ? COL_GOOD : COL_TEXT;
+
+		ui_text(6, y, 1, col, st.message[0] ? st.message : TR("PRESS CHECK FOR UPDATES", "PULSA BUSCAR ACTUALIZACION"));
+		if (st.version[0] != '\0')
+		{
+			snprintf(c, sizeof(c), "%s", st.version);
+			ui_text(314 - ui_text_w(1, c), y, 1, COL_ACCENT, c);
 		}
 	}
-	else if (st == N3DS_FTP_STATUS_OFF)
+	if ((st.state == UPDATE_DOWNLOADING) || (st.state == UPDATE_VERIFYING) || (st.state == UPDATE_INSTALLING))
 	{
-		ui_text(6, y, 1, COL_LABEL, TR("NO FTP RUNNING. TO INSTALL A NEW CIA", "SIN FTP. PARA INSTALAR UN CIA NUEVO"));
-		ui_text(6, y + 11, 1, COL_LABEL, TR("PUT AN EMPTY dev-ftp.txt IN", "PON UN dev-ftp.txt VACIO EN"));
-		ui_text(6, y + 22, 1, COL_TEXT, "SDMC:/3DS/CTR_NATIVE/");
-		ui_text(6, y + 33, 1, COL_LABEL, TR("AND START THE GAME AGAIN.", "Y VUELVE A ABRIR EL JUEGO."));
+		ui_draw_bar(6, CONTENT_Y + 90, 308, 9, st.progress, 100, COL_GOOD);
+	}
+	else if (Updater_CannotInstall())
+	{
+		ui_text(6, CONTENT_Y + 91, 1, COL_WARN, TR("RUN THE INSTALLED CIA TO UPDATE", "USA EL CIA INSTALADO PARA ACTUALIZAR"));
+	}
+
+	/* Release notes (the newer releases of the channel, or the whole changelog when up to date). */
+	if (s_noteCount > 0)
+	{
+		for (i = 0; i < NOTE_ROWS; i++)
+		{
+			const unsigned line = s_noteScroll + (unsigned)i;
+
+			if (line < s_noteCount)
+			{
+				ui_text(6, CONTENT_Y + 104 + (i * 11), 1, COL_LABEL, s_noteLines[line]);
+			}
+		}
+		if (s_noteCount > NOTE_ROWS)
+		{
+			ui_upd_rect(UPD_UP, &x, &y, &w, &h);
+			ui_button(x, y, w, h, COL_TAB_OFF, (s_pressBtn == UPD_BTN_BASE + UPD_UP));
+			ui_text_c(x + (w / 2), y + 12, 1, COL_TEXT, "UP");
+			ui_upd_rect(UPD_DOWN, &x, &y, &w, &h);
+			ui_button(x, y, w, h, COL_TAB_OFF, (s_pressBtn == UPD_BTN_BASE + UPD_DOWN));
+			ui_text_c(x + (w / 2), y + 12, 1, COL_TEXT, "DOWN");
+		}
+	}
+
+	/* The FTP side (developers): address while it listens, CANCEL in install-only mode. */
+	y = CONTENT_Y + 172;
+	if (ftp == N3DS_FTP_STATUS_LISTENING)
+	{
+		char a[48];
+
+		ui_ftp_address(a, sizeof(a));
+		snprintf(c, sizeof(c), "%s %s", N3DS_FtpInstallOnly() ? TR("INSTALL SERVER", "SERVIDOR INSTALACION") : "FTP", a);
+		ui_text(6, y, 1, COL_GOOD, c);
+		ui_text(6, y + 11, 1, COL_LABEL, TR("SEND A .CIA, THEN SITE INSTALL <PATH>", "ENVIA UN .CIA Y SITE INSTALL <RUTA>"));
+		if (N3DS_FtpInstallOnly())
+		{
+			ui_cancel_rect(&x, &y, &w, &h);
+			ui_button(x, y, w, h, COL_BTN_OFF, (s_pressBtn == 100));
+			ui_text_c(x + (w / 2), y + 9, 1, COL_TEXT, TR("CANCEL FTP", "CANCELAR FTP"));
+		}
+	}
+	else if (ftp == N3DS_FTP_STATUS_OFF)
+	{
+		ui_text(6, y, 1, COL_LABEL, TR("DEV INSTALL OVER FTP: PUT AN EMPTY", "INSTALAR POR FTP: PON UN"));
+		ui_text(6, y + 11, 1, COL_LABEL, TR("dev-ftp.txt IN SDMC:/3DS/CTR_NATIVE/", "dev-ftp.txt EN SDMC:/3DS/CTR_NATIVE/"));
 	}
 	else
 	{
-		ui_kv(y, "FTP", ui_ftp_state_text(st), COL_WARN);
+		ui_kv(y, "FTP", ui_ftp_state_text(ftp), COL_WARN);
 	}
-	ui_text(6, UI_H - BANNER_H - 12, 1, COL_LABEL, "CTR 3D " CTR_NATIVE_VERSION "  TITLE 0005A2C3");
 }
 
 #ifdef CTR_INTERNAL
@@ -990,6 +1123,50 @@ static void ui_press_option(int i)
 	s_pressFrames = 8;
 }
 
+static void ui_press_updater(int i)
+{
+	UpdateStatus st;
+
+	Updater_GetStatus(&st);
+	switch (i)
+	{
+	case UPD_CHANNEL:
+		if (!Updater_Busy())
+		{
+			Updater_SetBetas(!st.betas); /* saves the choice and checks again */
+		}
+		break;
+	case UPD_AUTO:
+		Updater_SetAutoCheck(!Updater_AutoCheckEnabled());
+		break;
+	case UPD_ACTION:
+		if (st.state == UPDATE_AVAILABLE)
+		{
+			Updater_Download();
+		}
+		else if (st.state == UPDATE_DOWNLOADING)
+		{
+			Updater_Cancel(); /* later steps (verify, install) are not interrupted */
+		}
+		else if (!Updater_Busy() && (st.state != UPDATE_DONE))
+		{
+			Updater_Check();
+		}
+		break;
+	case UPD_UP:
+		s_noteScroll = (s_noteScroll > 3U) ? (s_noteScroll - 3U) : 0U;
+		break;
+	default:
+		if (s_noteCount > NOTE_ROWS)
+		{
+			s_noteScroll = (s_noteScroll + 3U <= s_noteCount - NOTE_ROWS) ? (s_noteScroll + 3U) : (s_noteCount - NOTE_ROWS);
+		}
+		break;
+	}
+	s_pressBtn = UPD_BTN_BASE + i;
+	s_pressFrames = 8;
+}
+
 #ifdef CTR_INTERNAL
 static void ui_press_action(int i)
 {
@@ -1086,6 +1263,18 @@ void N3DS_BottomUi_Touch(void)
 		}
 		break;
 	case TAB_UPDATER:
+		for (i = 0; i < UPD_COUNT; i++)
+		{
+			int x, y, w, h;
+
+			ui_upd_rect(i, &x, &y, &w, &h);
+			if (ui_in(t.px, t.py, x, y, w, h))
+			{
+				ui_press_updater(i);
+				s_dirty = 1;
+				return;
+			}
+		}
 		if (N3DS_FtpInstallOnly())
 		{
 			int x, y, w, h;
@@ -1163,6 +1352,41 @@ void N3DS_BottomUi_Init(void)
 	ui_cpu_present();
 }
 
+/* Game thread, once per frame: repaint when the updater's status changed, load the
+ * release notes when a check ends, run the check the player asked for at boot. */
+static void ui_updater_poll(void)
+{
+	UpdateStatus st;
+
+	if (++s_frameCount == 300U)
+	{
+		Updater_AutoCheck();
+	}
+	Updater_GetStatus(&st);
+	if (st.revision != s_updRev)
+	{
+		s_updRev = st.revision;
+		s_dirty = 1;
+	}
+	if ((int)st.state != s_updState)
+	{
+		s_updState = (int)st.state;
+		s_updNew = (st.state == UPDATE_AVAILABLE);
+		if ((st.state == UPDATE_AVAILABLE) || (st.state == UPDATE_CURRENT))
+		{
+			(void)Updater_GetNotes(s_noteRaw, sizeof(s_noteRaw));
+			s_noteCount = Update_FormatNotes(s_noteRaw, s_noteLines, NOTE_LINES);
+			s_noteScroll = 0;
+		}
+		else if (st.state == UPDATE_CHECKING)
+		{
+			s_noteCount = 0;
+			s_noteScroll = 0;
+		}
+		s_dirty = 1;
+	}
+}
+
 void N3DS_BottomUi_Frame(const struct N3DS_BottomUiGameInfo *gi)
 {
 	const u64 now = svcGetSystemTick();
@@ -1182,6 +1406,7 @@ void N3DS_BottomUi_Frame(const struct N3DS_BottomUiGameInfo *gi)
 		s_gi = *gi;
 	}
 	N3DS_FtpPoll();
+	ui_updater_poll();
 
 	if (s_lastFrameTick != 0)
 	{

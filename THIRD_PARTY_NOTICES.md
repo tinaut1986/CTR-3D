@@ -144,3 +144,20 @@ freely, subject to the following restrictions:
 2. Altered source versions must be plainly marked as such, and must not be
    misrepresented as being the original software.
 3. This notice may not be removed or altered from any source distribution.
+
+## In-game updater (3DS): libcurl, mbedTLS, Jansson, Mozilla CA bundle
+
+The 3DS build's updater (`platform/n3ds/update/`) links these libraries, built
+for the 3DS from the pinned sources listed in
+`platform/n3ds/update/deps/sources.json` (the devkitPro patches are in the same
+folder; their licenses are `LICENSE-curl.txt`, `LICENSE-mbedTLS.txt` and
+`LICENSE-Jansson.txt` there):
+
+- libcurl 8.4.0 (curl license)
+- mbedTLS 2.28.8 (Apache-2.0)
+- Jansson 2.14 (MIT)
+
+`platform/n3ds/update/update_ca.pem` is the Mozilla CA certificate bundle from
+<https://curl.se/ca/cacert.pem> (MPL-2.0), linked into the binary so the updater
+can verify GitHub's certificates. The updater and release code are adapted from
+the author's zelda-tmc-3ds port.

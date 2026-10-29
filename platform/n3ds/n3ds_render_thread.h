@@ -22,6 +22,9 @@ int N3DS_RenderWorkerStart(void (*workerMain)(void));
  * would otherwise never return). No-op if the worker never came up. */
 void N3DS_RenderWorkerStopAndJoin(void);
 
+/* 1 iff StopAndJoin timed out and the worker is still running. */
+int N3DS_RenderWorkerStuck(void);
+
 /* 1 iff the calling thread is the render worker itself. Lets shared entry
  * points fence when called from the game thread but pass straight through
  * when the worker re-enters them while executing a job. */

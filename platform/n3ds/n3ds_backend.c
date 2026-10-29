@@ -17,6 +17,7 @@
 #include "n3ds_beat.h"
 #include "n3ds_bottomui.h"
 #include "n3ds_ftp.h"
+#include "updater.h"
 #include "n3ds_render_thread.h" /* N3DS_RenderWorkerIsSelf -- which thread the frame-begin guard is running on */
 #include "ctr_shbin.h"
 #ifdef CTR_NATIVE_TRACK_RENDERER
@@ -95,9 +96,18 @@ void N3DS_SetSdLogEnabled(int enabled)
 	g_dbg_sdLog = (enabled != 0);
 }
 
+/* GPU state shared with the exit path; see N3DS_GpuAptHook. */
+static volatile int s_frameOpen; /* defined with its users below */
+static volatile int s_gpuHold;   /* suspended: no new frame */
+static volatile int s_gpuGone;   /* the system closed the app: the GPU is not ours */
+static volatile int s_beginActive;
+
 static void N3DS_NetloadStreamExit(void)
 {
-	if ((s_socBuffer != NULL) && !N3DS_FtpActive())
+	/* Not after the system closed the app (HOME -> Close): socExit never
+	 * returned there with a client connected in the owner's other ports; the
+	 * kernel closes the session with the process. */
+	if ((s_socBuffer != NULL) && !N3DS_FtpActive() && !Updater_Active() && !s_gpuGone)
 	{
 		socExit();
 	}
@@ -454,6 +464,9 @@ void N3DS_EarlyInit(void)
 	/* FTP: debug builds on by default, production only with dev-ftp.txt (see
 	 * n3ds_ftp.h). */
 	N3DS_FtpBoot();
+	/* The in-game updater: loads its channel; nothing starts until the player asks
+	 * (or AUTO CHECK on the first frame). */
+	Updater_Init();
 }
 
 /* Last SD-log flush, in system ticks. Per-LINE fflush stalls gameplay
@@ -842,10 +855,39 @@ void N3DS_GfxInit(void)
 	}
 }
 
+static void N3DS_GfxExitThread(void *arg)
+{
+	(void)arg;
+	gfxExit();
+}
+
 void N3DS_GfxExit(void)
 {
-	gfxExit();
-	N3DS_ExitLog("gfx released");
+	Thread t;
+
+	if (!s_gpuGone)
+	{
+		gfxExit();
+		N3DS_ExitLog("gfx released");
+		return;
+	}
+
+	/* After HOME -> Close: on a thread with a timeout, as the citro3d teardown. */
+	t = threadCreate(N3DS_GfxExitThread, NULL, 16 * 1024, 0x30, -2, false);
+	if (t == NULL)
+	{
+		N3DS_ExitLog("gfx exit thread failed, left as is");
+		return;
+	}
+	if (threadJoin(t, 1000000000ULL) == 0)
+	{
+		threadFree(t);
+		N3DS_ExitLog("gfx released");
+	}
+	else
+	{
+		N3DS_ExitLog("gfx exit timed out, left as is");
+	}
 }
 
 /* Obsolete since the bottom screen stopped being CPU-drawn every frame (the old
@@ -1633,6 +1675,81 @@ static void N3DS_BindPacketDrawState(void)
 	N3DS_StereoUploadUniform(s_uLocStereoUi, (const float(*)[4])s_stereoVecUi);
 }
 
+/*
+ * HOME and the GPU. HOME takes the GPU away from a suspended application; a
+ * frame still in flight is then never acknowledged and every wait on
+ * citro3d's queue (C3D_FrameBegin, C3D_FrameSync, C3D_RenderTargetDelete,
+ * C3D_Fini) never returns -- "Closing software" forever after HOME -> Close.
+ * Same cure as the owner's sm-3ds port (9aaf03c, b968eb4):
+ *  - an APT suspend hook drains the queue with an empty frame while the app
+ *    still has the GPU (APT calls hooks before libctru's own), and holds new
+ *    frames back until the app is restored (s_gpuHold);
+ *  - when the app is then closed (aptMainLoop false) s_gpuGone makes every
+ *    later frame begin give up, so no thread waits on a dead GPU and the
+ *    citro3d teardown runs on a thread with a timeout (N3DS_C3DExit).
+ */
+static int s_c3dUp;
+static aptHookCookie s_aptCookie;
+
+static void N3DS_GpuDrainThread(void *arg)
+{
+	(void)arg;
+	if (C3D_FrameBegin(0))
+	{
+		C3D_FrameEnd(0);
+	}
+}
+
+static void N3DS_GpuAptHook(APT_HookType type, void *param)
+{
+	Thread t;
+	int waited;
+
+	(void)param;
+	if (!s_c3dUp)
+	{
+		return;
+	}
+	if ((type == APTHOOK_ONRESTORE) || (type == APTHOOK_ONWAKEUP))
+	{
+		s_gpuHold = 0;
+		return;
+	}
+	if ((type != APTHOOK_ONSUSPEND) && (type != APTHOOK_ONSLEEP))
+	{
+		return;
+	}
+
+	N3DS_ExitLog("hook: suspend, draining the GPU queue");
+	s_gpuHold = 1;
+	__sync_synchronize();
+	/* A frame being built (render worker) finishes: the GPU is still ours. */
+	for (waited = 0; (s_frameOpen || s_beginActive) && (waited < 500); waited++)
+	{
+		svcSleepThread(1000 * 1000LL);
+	}
+	if (s_frameOpen || s_beginActive)
+	{
+		N3DS_ExitLog("hook: a frame stayed open, queue not drained");
+		return;
+	}
+	t = threadCreate(N3DS_GpuDrainThread, NULL, 16 * 1024, 0x30, -2, false);
+	if (t == NULL)
+	{
+		N3DS_ExitLog("hook: drain thread failed");
+		return;
+	}
+	if (threadJoin(t, 500000000ULL) == 0)
+	{
+		threadFree(t);
+		N3DS_ExitLog("hook: GPU queue drained");
+	}
+	else
+	{
+		N3DS_ExitLog("hook: drain timed out");
+	}
+}
+
 /* Pulsed by N3DS_GxPulseCallback whenever GSP reports a P3D (command list
  * done) or PPF (display transfer done) completion -- the two events that
  * advance citro3d's bound GX queue. RESET_STICKY: a pulse that lands between
@@ -1673,17 +1790,39 @@ static int N3DS_BeatCurrentThreadId(void)
  * return -- see n3ds_beat.h for why that has to be a single set/clear pair,
  * not a mark per retry.
  */
-static void N3DS_GuardedFrameBegin(u8 wantSyncDraw)
+static int N3DS_GuardedFrameBegin(u8 wantSyncDraw)
 {
 	int beatThread;
 	u64 startTick;
 	u64 nextGateMs;
 	unsigned int recoverN;
 
+	/* No frame once the system took the GPU (HOME's close) and none while the
+	 * app is suspended (the APT hook is draining the queue): see
+	 * N3DS_GpuAptHook. s_beginActive/s_gpuHold are a handshake with the hook
+	 * -- either it sees a begin in progress and waits, or this sees the hold. */
+	for (;;)
+	{
+		s_beginActive = 1;
+		__sync_synchronize();
+		if (s_gpuGone)
+		{
+			s_beginActive = 0;
+			return 0;
+		}
+		if (!s_gpuHold)
+		{
+			break;
+		}
+		s_beginActive = 0;
+		svcSleepThread(5 * 1000 * 1000LL);
+	}
+
 	if (!g_dbg_gxGuard)
 	{
 		C3D_FrameBegin(wantSyncDraw ? C3D_FRAME_SYNCDRAW : 0);
-		return;
+		s_beginActive = 0;
+		return 1;
 	}
 
 	beatThread = N3DS_BeatCurrentThreadId();
@@ -1722,6 +1861,13 @@ static void N3DS_GuardedFrameBegin(u8 wantSyncDraw)
 		{
 			break;
 		}
+		if (s_gpuGone)
+		{
+			/* HOME's close: the queue will never finish. Give up the frame. */
+			s_beginActive = 0;
+			N3DS_BeatMark(beatThread, N3DS_BEAT_WHERE_OK);
+			return 0;
+		}
 
 		waitedMs = ((svcGetSystemTick() - startTick) * 1000ull) / SYSCLOCK_ARM11;
 		if (waitedMs >= nextGateMs)
@@ -1756,7 +1902,9 @@ static void N3DS_GuardedFrameBegin(u8 wantSyncDraw)
 		LightEvent_WaitTimeout(&s_gxPulseEvent, 4 * 1000 * 1000);
 	}
 
+	s_beginActive = 0;
 	N3DS_BeatMark(beatThread, N3DS_BEAT_WHERE_OK);
+	return 1;
 }
 
 int N3DS_C3DInit(void)
@@ -1773,6 +1921,8 @@ int N3DS_C3DInit(void)
 	{
 		return 0;
 	}
+	s_c3dUp = 1;
+	aptHook(&s_aptCookie, N3DS_GpuAptHook, NULL);
 
 	/*
 	 * Arm the gxguard wake source (see g_dbg_gxGuard's comment) before
@@ -2025,7 +2175,7 @@ void N3DS_ExitLog(const char *step)
 }
 
 /* First thing of the exit sequence (Platform_Shutdown): settings to disk, the
- * FTP thread joined and its sockets closed, so nothing network-side outlives
+ * FTP and updater threads joined and its sockets closed, so nothing network-side outlives
  * the services under it. The relaunch after SITE INSTALL and a normal quit
  * both come through here. */
 void N3DS_ExitBegin(void)
@@ -2035,24 +2185,13 @@ void N3DS_ExitBegin(void)
 	N3DS_ExitLog("settings saved");
 	N3DS_FtpShutdown();
 	N3DS_ExitLog("ftp stopped");
+	Updater_Shutdown();
+	N3DS_ExitLog("updater stopped");
 }
 
-void N3DS_C3DExit(void)
+static void N3DS_C3DTeardown(void)
 {
 	int i;
-
-	/* Nothing may still be queued on the GPU when its textures, targets and
-	 * the command buffer go: close a frame left open (a quit mid-walk), then
-	 * wait for the queue to drain. C3D_FrameSync also covers the display
-	 * transfers of both screens. */
-	if (s_frameOpen)
-	{
-		s_frameOpen = 0;
-		C3D_FrameEnd(0);
-		N3DS_ExitLog("open frame closed");
-	}
-	C3D_FrameSync();
-	N3DS_ExitLog("gpu idle");
 
 #ifdef CTR_NATIVE_TRACK_RENDERER
 	N3DS_TrackGeom_Free();
@@ -2111,6 +2250,72 @@ void N3DS_C3DExit(void)
 	N3DS_ExitLog("gpu resources freed");
 	C3D_Fini();
 	N3DS_ExitLog("citro3d finalised");
+}
+
+static void N3DS_C3DTeardownThread(void *arg)
+{
+	(void)arg;
+	N3DS_C3DTeardown();
+}
+
+/*
+ * Two sequences, by exit reason:
+ *  - our own exit (in-game quit, the FTP relaunch): the GPU is ours, so a frame
+ *    left open is closed, the queue is synced and everything is freed in place
+ *    (unchanged; the relaunch after SITE INSTALL depends on it).
+ *  - the system closed the app (HOME -> Close, s_gpuGone): the queue was drained
+ *    by the suspend hook while the GPU was ours, no frame has run since; the
+ *    teardown runs on a thread with a 1 s timeout (sm-3ds 9aaf03c), never
+ *    FrameSync (it waits for a GPU that is gone). If the render worker is still
+ *    stuck citro3d is left as is: freeing its memory under it would crash.
+ */
+void N3DS_C3DExit(void)
+{
+	Thread t;
+
+	s_c3dUp = 0;
+	aptUnhook(&s_aptCookie);
+
+	if (!s_gpuGone)
+	{
+		/* Nothing may still be queued on the GPU when its textures, targets and
+		 * the command buffer go: close a frame left open (a quit mid-walk), then
+		 * wait for the queue to drain. C3D_FrameSync also covers the display
+		 * transfers of both screens. */
+		if (s_frameOpen)
+		{
+			s_frameOpen = 0;
+			C3D_FrameEnd(0);
+			N3DS_ExitLog("open frame closed");
+		}
+		C3D_FrameSync();
+		N3DS_ExitLog("gpu idle");
+		N3DS_C3DTeardown();
+		return;
+	}
+
+	if (N3DS_RenderWorkerStuck())
+	{
+		N3DS_ExitLog("citro3d left as is (render worker stuck)");
+		return;
+	}
+	s_frameOpen = 0;
+	t = threadCreate(N3DS_C3DTeardownThread, NULL, 32 * 1024, 0x30, -2, false);
+	if (t == NULL)
+	{
+		N3DS_ExitLog("citro3d teardown thread failed, left as is");
+		return;
+	}
+	/* A timeout comes back as a positive code: only 0 is the thread ended. */
+	if (threadJoin(t, 1000000000ULL) == 0)
+	{
+		threadFree(t);
+		N3DS_ExitLog("citro3d teardown thread joined");
+	}
+	else
+	{
+		N3DS_ExitLog("citro3d teardown timed out, left as is");
+	}
 }
 
 /*
@@ -2259,7 +2464,12 @@ void N3DS_C3DBeginFrame(void)
 	N3DS_StereoLatchFrame();
 
 	N3DS_FrameTrace("[CTR-3DS] FrameBegin: enter (SYNCDRAW wait)");
-	N3DS_GuardedFrameBegin(g_dbg_frameSync ? 1 : 0);
+	if (!N3DS_GuardedFrameBegin(g_dbg_frameSync ? 1 : 0))
+	{
+		/* The GPU is gone (closing from HOME): this frame is skipped; every
+		 * draw site checks s_frameOpen, and EndFrame passes. */
+		return;
+	}
 	N3DS_FrameTrace("[CTR-3DS] FrameBegin: returned");
 	s_frameOpen = 1;
 	/* Depth clears to FAR. Mtx_OrthoTilt maps LARGER vertex z to SMALLER
@@ -2362,6 +2572,10 @@ void N3DS_C3DEndFrame(void)
 	 * libctru version that blocks here is not a silent hole in the coverage. */
 	const int beatThread = N3DS_BeatCurrentThreadId();
 
+	if (!s_frameOpen)
+	{
+		return;
+	}
 	N3DS_FrameTrace("[CTR-3DS] FrameEnd: enter (submit)");
 	N3DS_BeatMark(beatThread, N3DS_BEAT_WHERE_FRAMEEND);
 	s_frameOpen = 0;
@@ -3415,6 +3629,10 @@ void N3DS_TrackDraw_Leaf(int firstIndex, int indexCount, float otIndexLo, float 
 	}
 
 	indexBase = (const u16 *)s_trackIndexPtr + firstIndex;
+	if (!s_frameOpen)
+	{
+		return;
+	}
 	C3D_DrawElements(GPU_TRIANGLES, indexCount, C3D_UNSIGNED_SHORT, indexBase);
 }
 
@@ -3707,6 +3925,10 @@ void N3DS_ModelDraw_Run(int startVertex, int triangleCount, int atlasIndex, int 
 		N3DS_ModelDraw_SetTextured(0);
 	}
 
+	if (!s_frameOpen)
+	{
+		return;
+	}
 	C3D_DrawArrays(GPU_TRIANGLES, startVertex, triangleCount * 3);
 }
 
@@ -4012,7 +4234,7 @@ void N3DS_StereoRenderRightEye(void)
 	int lastDoubling = -1;
 	int lastDepthWrite = 1;
 
-	if (!s_stereoFrameActive || (s_renderTargetRight == NULL))
+	if (!s_stereoFrameActive || (s_renderTargetRight == NULL) || !s_frameOpen)
 	{
 		return;
 	}
@@ -6362,5 +6584,17 @@ int N3DS_MainLoopActive(void)
 	{
 		return 0;
 	}
-	return aptMainLoop() ? 1 : 0;
+	if (!aptMainLoop())
+	{
+		/* The system is closing the app (HOME -> Close, power): the GPU is no
+		 * longer ours. Not one more frame may wait for it (see s_gpuGone). */
+		if (!s_gpuGone)
+		{
+			s_gpuGone = 1;
+			__sync_synchronize();
+			N3DS_ExitLog("quit event from the system (GPU gone)");
+		}
+		return 0;
+	}
+	return 1;
 }

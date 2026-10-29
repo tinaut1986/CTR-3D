@@ -5,7 +5,41 @@ include(CheckCCompilerFlag)
 set(CMAKE_C_STANDARD 99)
 set(CMAKE_C_STANDARD_REQUIRED ON)
 set(CMAKE_C_EXTENSIONS ON)
-set(CTR_NATIVE_VERSION "beta 1.0")
+# Version: derived from git by platform/n3ds/tools/version.sh (an exact vX.Y.Z tag
+# gives X.Y.Z; anything on release/vX.Y.Z gives X.Y.Z-dev.N+hash). CTR_VERSION
+# overrides it (the release workflow passes the tag's number). CTR_CHANNEL=beta|
+# release is set by the release workflow and baked into the binary: a beta shows
+# "X.Y.Z BETA" and the updater offers it the stable X.Y.Z; empty for local builds.
+# CTR_NATIVE_VERSION stays the human label ("0.1.0 BETA") the log, SMDH and
+# bottom screen print; CTR_PORT_VERSION (plain number) and CTR_PORT_IS_BETA go to
+# the generated ctr_version.h the updater uses.
+set(CTR_VERSION "" CACHE STRING "Version override (X.Y.Z); empty = derive from git")
+set(CTR_CHANNEL "" CACHE STRING "Release channel baked into the binary: beta, release or empty")
+if(CTR_VERSION STREQUAL "")
+    execute_process(
+        COMMAND sh "${CMAKE_SOURCE_DIR}/platform/n3ds/tools/version.sh"
+        OUTPUT_VARIABLE CTR_PORT_VERSION
+        OUTPUT_STRIP_TRAILING_WHITESPACE
+        ERROR_QUIET)
+else()
+    set(CTR_PORT_VERSION "${CTR_VERSION}")
+endif()
+if(NOT CTR_PORT_VERSION)
+    set(CTR_PORT_VERSION "0.0.0-dev")
+endif()
+if(CTR_CHANNEL STREQUAL "beta")
+    set(CTR_PORT_IS_BETA 1)
+    set(CTR_NATIVE_VERSION "${CTR_PORT_VERSION} BETA")
+else()
+    set(CTR_PORT_IS_BETA 0)
+    set(CTR_NATIVE_VERSION "${CTR_PORT_VERSION}")
+endif()
+set(CTR_PORT_VERSION_LABEL "${CTR_NATIVE_VERSION}")
+set(CTR_GENERATED_DIR "${CMAKE_BINARY_DIR}/generated")
+file(MAKE_DIRECTORY "${CTR_GENERATED_DIR}")
+# configure_file leaves the header alone when its text is unchanged.
+configure_file("${CMAKE_SOURCE_DIR}/platform/n3ds/ctr_version.h.in" "${CTR_GENERATED_DIR}/ctr_version.h" @ONLY)
+message(STATUS "CTR 3D ${CTR_NATIVE_VERSION}")
 set(CTR_NATIVE_AUTHOR "CTR 3D" CACHE STRING "Author shown under the icon in the Homebrew Launcher (SMDH publisher field)")
 
 # Host builds target x86-32 with SSE. On the 3DS the devkitPro platform module
@@ -125,6 +159,9 @@ if(NINTENDO_3DS)
     list(APPEND CTR_NATIVE_SOURCES platform/n3ds/n3ds_ftp.c)
     list(APPEND CTR_NATIVE_SOURCES platform/n3ds/n3ds_heap.c)
     list(APPEND CTR_NATIVE_SOURCES platform/n3ds/n3ds_bottomui.c)
+    list(APPEND CTR_NATIVE_SOURCES platform/n3ds/n3ds_ciainstall.c)
+    list(APPEND CTR_NATIVE_SOURCES platform/n3ds/update/updater.c)
+    list(APPEND CTR_NATIVE_SOURCES platform/n3ds/update/update_manifest.c)
 endif()
 
 add_executable(ctr_native ${CTR_NATIVE_SOURCES})
@@ -134,8 +171,12 @@ if(NINTENDO_3DS)
     # default short enums. Nothing enum-typed crosses n3ds_backend.h -- it
     # exposes only plain scalars -- so this file can match libctru's ABI while
     # the game TU keeps the 4-byte enums its struct layouts require.
-    set_source_files_properties(platform/n3ds/n3ds_backend.c platform/n3ds/n3ds_audio_thread.c platform/n3ds/n3ds_render_thread.c platform/n3ds/n3ds_beat.c platform/n3ds/n3ds_ftp.c platform/n3ds/n3ds_heap.c platform/n3ds/n3ds_bottomui.c
+    set_source_files_properties(platform/n3ds/n3ds_backend.c platform/n3ds/n3ds_audio_thread.c platform/n3ds/n3ds_render_thread.c platform/n3ds/n3ds_beat.c platform/n3ds/n3ds_ftp.c platform/n3ds/n3ds_heap.c platform/n3ds/n3ds_bottomui.c platform/n3ds/n3ds_ciainstall.c
+        platform/n3ds/update/updater.c platform/n3ds/update/update_manifest.c
         PROPERTIES COMPILE_OPTIONS "-fshort-enums")
+    # The updater files link libcurl, mbedTLS and jansson, all built with the ARM EABI
+    # default; jansson's json_t embeds an enum, so a 4-byte-enum TU would read it wrong.
+    # Same rule as above: nothing enum-typed crosses into the game TU.
 endif()
 # The developer debug surface. OFF strips it from the binary entirely, so a
 # shipped build carries no dumpreq parser, no SELECT chords and no probe
@@ -628,7 +669,31 @@ if(NINTENDO_3DS)
 
     # citro3d before ctru: the linker resolves left to right and citro3d pulls
     # symbols out of ctru.
-    target_link_libraries(ctr_native citro3d ctru)
+    # The in-game updater (platform/n3ds/update/): libcurl + mbedTLS + jansson for
+    # api.github.com (the console's own TLS cannot talk to GitHub). They come from the
+    # devkitPro portlibs when those carry jansson, else from the pinned build that
+    # build3ds.sh makes with platform/n3ds/tools/build_update_deps.py (UPDATE_DEPS_ROOT).
+    # The CA bundle is linked into the binary (bin2s), so the CIA needs no romfs.
+    set(UPDATE_DEPS_ROOT "$ENV{DEVKITPRO}/portlibs/3ds" CACHE PATH "3DS updater dependencies (curl, mbedtls, jansson)")
+    set(CTR_UPDATE_CA_PEM "${CMAKE_CURRENT_SOURCE_DIR}/platform/n3ds/update/update_ca.pem")
+    add_custom_command(
+        OUTPUT "${CTR_N3DS_SHADER_GEN}/update_ca.S" "${CTR_N3DS_SHADER_GEN}/update_ca.h"
+        COMMAND ${CMAKE_COMMAND} -E make_directory "${CTR_N3DS_SHADER_GEN}"
+        COMMAND ${DKP_BIN2S} -a ${DKP_BIN2S_ALIGNMENT} -H "${CTR_N3DS_SHADER_GEN}/update_ca.h"
+                "${CTR_UPDATE_CA_PEM}" > "${CTR_N3DS_SHADER_GEN}/update_ca.S"
+        DEPENDS "${CTR_UPDATE_CA_PEM}"
+        COMMENT "bin2s: embedding update_ca.pem"
+    )
+    set_source_files_properties("${CTR_N3DS_SHADER_GEN}/update_ca.S" PROPERTIES LANGUAGE ASM)
+    target_sources(ctr_native PRIVATE "${CTR_N3DS_SHADER_GEN}/update_ca.S")
+    target_include_directories(ctr_native PRIVATE
+        "${CTR_N3DS_SHADER_GEN}" "${CTR_GENERATED_DIR}" "${CMAKE_SOURCE_DIR}/platform/n3ds" "${CMAKE_SOURCE_DIR}/platform/n3ds/update" "${UPDATE_DEPS_ROOT}/include")
+    target_link_directories(ctr_native PRIVATE "${UPDATE_DEPS_ROOT}/lib")
+    # The devkitPro curl needs zlib; the pinned minimal build does not (the link is harmless).
+    find_library(CTR_UPDATE_ZLIB NAMES z PATHS "${UPDATE_DEPS_ROOT}/lib" "$ENV{DEVKITPRO}/portlibs/3ds/lib" NO_DEFAULT_PATH)
+    # citro3d before ctru: the linker resolves left to right and citro3d pulls
+    # symbols out of ctru. The updater libraries sit between: they pull from ctru too.
+    target_link_libraries(ctr_native citro3d curl jansson mbedtls mbedx509 mbedcrypto ${CTR_UPDATE_ZLIB} ctru m)
     ctr_generate_smdh(ctr_native.smdh
         NAME "CTR 3D"
         DESCRIPTION "Crash Team Racing for New 3DS ${CTR_NATIVE_VERSION}"

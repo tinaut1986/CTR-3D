@@ -15,7 +15,7 @@ for arg in "$@"; do
             ;;
     esac
 done
-VERSION="${VERSION:-beta-1.0}"
+VERSION="${VERSION:-$(sh "$(dirname "$0")/platform/n3ds/tools/version.sh")}"
 VERSION_LABEL="${VERSION//-/ }" # filename form uses dashes; prose uses spaces
 
 DIST_DIR="${DIST_DIR:-dist}"
