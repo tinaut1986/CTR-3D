@@ -54,6 +54,11 @@ void N3DS_BottomUi_Init(void);
 /* Main thread, from N3DS_ReadButtons: the touch poll. */
 void N3DS_BottomUi_Touch(void);
 
+/* Debug link: the bottom panel as it is painted (320x240 BGR, row-major); 0 when
+ * there is no picture yet. And the mean frame time of the last 120 frames. */
+int N3DS_BottomUi_Snapshot(unsigned char *bgr);
+unsigned N3DS_BottomUi_AvgFrameUs(void);
+
 /* Main thread, once per presented frame (renderer SwapWindow): frame-time
  * history, live-number refresh scheduling, FTP reaping. */
 void N3DS_BottomUi_Frame(const struct N3DS_BottomUiGameInfo *gi);

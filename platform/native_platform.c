@@ -1267,6 +1267,15 @@ int VSync(int mode)
 	return s_nativeVBlankCount;
 }
 
+/* The retail game state for the debug link (n3ds_debuglink.c). */
+void N3DS_DebugGameState(int *level, unsigned *mode, int *mainState, int *loadStage)
+{
+	*level = NativePerf_CurrentLevelID();
+	*mode = ((sdata != NULL) && (sdata->gGT != NULL)) ? (unsigned)sdata->gGT->gameMode1 : 0u;
+	*mainState = (sdata != NULL) ? (int)sdata->mainGameState : -1;
+	*loadStage = (sdata != NULL) ? (int)sdata->Loading.stage : -1;
+}
+
 int Platform_GetVBlankCount(void)
 {
 	return s_nativeVBlankCount;

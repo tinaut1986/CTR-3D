@@ -35,6 +35,8 @@
  */
 #include <3ds.h>
 
+#include "n3ds_debuglink.h"
+
 #include <arpa/inet.h>
 #include <dirent.h>
 #include <errno.h>
@@ -620,6 +622,10 @@ static void N3DS_FtpCmdStor(N3DS_FtpSession *s, const char *arg, int append)
 	N3DS_FtpReply(s, ok ? "226 Done." : "451 Transfer failed.");
 }
 
+#ifdef CTR_INTERNAL
+static char s_linkReply[660]; /* one FTP command at a time: no need for the stack */
+#endif
+
 static void N3DS_FtpCmdSite(N3DS_FtpSession *s, char *arg)
 {
 	char *path = strchr(arg, ' ');
@@ -674,6 +680,12 @@ static void N3DS_FtpCmdSite(N3DS_FtpSession *s, char *arg)
 	{
 		N3DS_FtpReply(s, "501 SITE INSTALL <path to a .cia of this game>");
 	}
+#ifdef CTR_INTERNAL
+	else if ((path != NULL) ? N3DS_DebugLinkCommand(arg, path, s_linkReply, sizeof(s_linkReply)) : N3DS_DebugLinkCommand(arg, "", s_linkReply, sizeof(s_linkReply)))
+	{
+		N3DS_FtpReply(s, "%s", s_linkReply);
+	}
+#endif
 	else
 	{
 		N3DS_FtpReply(s, "504 Unknown SITE command.");

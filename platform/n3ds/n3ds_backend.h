@@ -701,6 +701,11 @@ void N3DS_DebugLog(const char *msg);
 /* Immediate SD commit of the buffered log (freeze/stall evidence). */
 void N3DS_LogFlushNow(void);
 
+/* The retail game state the debug link reports (SITE STATE): level id, gameMode1,
+ * mainGameState and the loading stage. Defined in platform/native_platform.c, the
+ * game side of this boundary; plain scalars only. */
+void N3DS_DebugGameState(int *level, unsigned *mode, int *mainState, int *loadStage);
+
 /* Points stderr at that same debug channel. Call before anything that can fail,
  * so early startup errors are visible even though the screen console does not
  * exist until the renderer initialises. */

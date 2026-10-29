@@ -38,6 +38,7 @@
 
 #include "n3ds_backend.h"
 #include "n3ds_bottomui.h"
+#include "n3ds_debuglink.h"
 #include "n3ds_ftp.h"
 #include "update_manifest.h"
 #include "updater.h"
@@ -470,6 +471,38 @@ static u32 ui_ring_recent_avg(int n)
 		sum += s_ring[(s_ringHead - i + (UI_RING * 2)) % UI_RING];
 	}
 	return (k > 0) ? (u32)(sum / (unsigned)k) : 0;
+}
+
+int N3DS_BottomUi_Snapshot(unsigned char *bgr)
+{
+	int x, y;
+
+	if (!s_frameSeen)
+	{
+		return 0;
+	}
+	for (y = 0; y < UI_H; y++)
+	{
+		for (x = 0; x < UI_W; x++)
+		{
+			const u16 p = s_pix[(y * UI_W) + x];
+			const u32 r = (p >> 11) & 31U, g = (p >> 6) & 31U, b = (p >> 1) & 31U;
+			unsigned char *o = bgr + (((size_t)y * UI_W + (size_t)x) * 3U);
+
+			o[0] = (unsigned char)((b << 3) | (b >> 2));
+			o[1] = (unsigned char)((g << 3) | (g >> 2));
+			o[2] = (unsigned char)((r << 3) | (r >> 2));
+		}
+	}
+	return 1;
+}
+
+unsigned N3DS_BottomUi_AvgFrameUs(void)
+{
+	u32 mn, mx, av;
+
+	ui_ring_stats(&mn, &mx, &av);
+	return av;
 }
 
 static u16 ui_time_col(u32 us)
@@ -1301,12 +1334,28 @@ void N3DS_BottomUi_Touch(void)
 	touchPosition t;
 	int ids[TAB_COUNT];
 	int n, i;
+#ifdef CTR_INTERNAL
+	int tx = 0, ty = 0;
+	const int injected = N3DS_DebugLinkTouch(&tx, &ty);
+#else
+	const int injected = 0;
+#endif
 
-	if (!(hidKeysDown() & KEY_TOUCH))
+	if (!injected && !(hidKeysDown() & KEY_TOUCH))
 	{
 		return;
 	}
-	hidTouchRead(&t);
+	if (injected)
+	{
+#ifdef CTR_INTERNAL
+		t.px = (u16)tx;
+		t.py = (u16)ty;
+#endif
+	}
+	else
+	{
+		hidTouchRead(&t);
+	}
 
 	if (t.py < TAB_H)
 	{
@@ -1486,6 +1535,9 @@ void N3DS_BottomUi_Frame(const struct N3DS_BottomUiGameInfo *gi)
 	}
 	N3DS_FtpPoll();
 	ui_updater_poll();
+#ifdef CTR_INTERNAL
+	N3DS_DebugLinkPoll();
+#endif
 
 	if (s_lastFrameTick != 0)
 	{

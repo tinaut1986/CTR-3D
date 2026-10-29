@@ -160,6 +160,7 @@ if(NINTENDO_3DS)
     list(APPEND CTR_NATIVE_SOURCES platform/n3ds/n3ds_heap.c)
     list(APPEND CTR_NATIVE_SOURCES platform/n3ds/n3ds_bottomui.c)
     list(APPEND CTR_NATIVE_SOURCES platform/n3ds/n3ds_ciainstall.c)
+    list(APPEND CTR_NATIVE_SOURCES platform/n3ds/n3ds_debuglink.c)
     list(APPEND CTR_NATIVE_SOURCES platform/n3ds/update/updater.c)
     list(APPEND CTR_NATIVE_SOURCES platform/n3ds/update/update_manifest.c)
 endif()
@@ -171,7 +172,7 @@ if(NINTENDO_3DS)
     # default short enums. Nothing enum-typed crosses n3ds_backend.h -- it
     # exposes only plain scalars -- so this file can match libctru's ABI while
     # the game TU keeps the 4-byte enums its struct layouts require.
-    set_source_files_properties(platform/n3ds/n3ds_backend.c platform/n3ds/n3ds_audio_thread.c platform/n3ds/n3ds_render_thread.c platform/n3ds/n3ds_beat.c platform/n3ds/n3ds_ftp.c platform/n3ds/n3ds_heap.c platform/n3ds/n3ds_bottomui.c platform/n3ds/n3ds_ciainstall.c
+    set_source_files_properties(platform/n3ds/n3ds_backend.c platform/n3ds/n3ds_audio_thread.c platform/n3ds/n3ds_render_thread.c platform/n3ds/n3ds_beat.c platform/n3ds/n3ds_ftp.c platform/n3ds/n3ds_heap.c platform/n3ds/n3ds_bottomui.c platform/n3ds/n3ds_ciainstall.c platform/n3ds/n3ds_debuglink.c
         platform/n3ds/update/updater.c platform/n3ds/update/update_manifest.c
         PROPERTIES COMPILE_OPTIONS "-fshort-enums")
     # The updater files link libcurl, mbedTLS and jansson, all built with the ARM EABI
