@@ -13,11 +13,14 @@
 # tag with two components.
 #
 # No leading "v": the updater, the file names and the SMDH all add their own.
-# CTR3D_VERSION in the environment overrides everything.
+# CTR3D_VERSION (or CTR_VERSION, the name CMakeLists.txt and build3ds.sh use) in the
+# environment overrides everything, so the CIA's version fields and the binary's label
+# always agree (a CIA built as 0.0.0 over an installed 0.1.0 is a downgrade AM refuses).
 set -eu
 
-if [ -n "${CTR3D_VERSION:-}" ]; then
-  echo "${CTR3D_VERSION#v}"
+OVERRIDE="${CTR3D_VERSION:-${CTR_VERSION:-}}"
+if [ -n "${OVERRIDE}" ]; then
+  echo "${OVERRIDE#v}"
   exit 0
 fi
 
