@@ -534,7 +534,11 @@ void DrawFinalLap(struct GameTracker *gGT)
 		// and by doing this, "FINAL LAP" draws under the character icons instead
 		DecalFont_DrawLineOT(sdata->lngStrings[LNG_FINAL_LAP], resultPos.x, resultPos.y, FONT_BIG, (JUSTIFY_CENTER | ORANGE), pb->ptrOT);
 
-		sdata->finalLapTextTimer[i]--;
+		// 60fps: 90 retail frames at any rate (drawn every frame).
+		if (FPS60_HALF_RATE(gGT->timer))
+		{
+			sdata->finalLapTextTimer[i]--;
+		}
 	}
 
 #if defined(CTR_NATIVE) && CTR_NATIVE_GTE_CAPTURE

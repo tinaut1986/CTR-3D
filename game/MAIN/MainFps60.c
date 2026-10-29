@@ -1,4 +1,7 @@
 #include <common.h>
+#if defined(CTR_NATIVE) && defined(CTR_INTERNAL)
+#include <platform/native_log.h>
+#endif
 
 /*
  * Runtime 60 fps game logic: the frame's mode and the 30 Hz world's clock.
@@ -122,6 +125,60 @@ void Fps60_BeginFrame(struct GameTracker *gGT)
 #endif
 }
 
+#if defined(CTR_NATIVE) && defined(CTR_INTERNAL)
+/*
+ * [FPS60] lap line (SD log, once per lap of player 1): the race clock (time
+ * based, so it matches real time at any rate unless frames ran over 64 ms),
+ * the real time from the emulated vblanks, how much of the lap ran at 60 and
+ * the frame-counted speed (half ticks per vblank, 100% = retail speed), plus
+ * the top kart speed. Same driving at 30 and at 60 should give the same lap
+ * times and the same top speed; a 60 Hz physics bug shows up as a different
+ * top speed or consistently faster/slower laps.
+ */
+static void Fps60_LapLog(struct GameTracker *gGT)
+{
+	static int s_lap = -1;
+	static int s_lapVbl;
+	static int s_lapClock;
+	static int s_lapTopSpeed;
+	static struct Fps60Stats s_lapStats;
+	struct Driver *d = gGT->drivers[0];
+	const int vbl = Platform_GetVBlankCount();
+
+	if ((d == NULL) || (gGT->elapsedEventTime < s_lapClock) || (s_lap < 0) || ((int)d->lapIndex < s_lap))
+	{
+		s_lap = (d != NULL) ? d->lapIndex : -1;
+		s_lapVbl = vbl;
+		s_lapClock = gGT->elapsedEventTime;
+		s_lapTopSpeed = 0;
+		s_lapStats = g_fps60Stats;
+		return;
+	}
+
+	if (d->speedApprox > s_lapTopSpeed)
+	{
+		s_lapTopSpeed = d->speedApprox;
+	}
+
+	if ((int)d->lapIndex != s_lap)
+	{
+		const unsigned frames = g_fps60Stats.logicFrames - s_lapStats.logicFrames;
+		const unsigned at60 = g_fps60Stats.frames60 - s_lapStats.frames60;
+		const unsigned half = g_fps60Stats.halfTicks - s_lapStats.halfTicks;
+		const int dv = vbl - s_lapVbl;
+
+		Platform_LogInstrument("[FPS60] lap %d: race clock %d, real %d ms, logic frames %u (at 60: %u), speed %u%%, top kart speed %d\n", s_lap + 1,
+		                       gGT->elapsedEventTime - s_lapClock, (dv * 1000) / 60, frames, at60, (dv > 0) ? (half * 100u) / (unsigned)dv : 0u,
+		                       s_lapTopSpeed);
+		s_lap = d->lapIndex;
+		s_lapVbl = vbl;
+		s_lapClock = gGT->elapsedEventTime;
+		s_lapTopSpeed = 0;
+		s_lapStats = g_fps60Stats;
+	}
+}
+#endif
+
 void Fps60_AfterTimerTick(struct GameTracker *gGT)
 {
 	int elapsed = gGT->elapsedTimeMS;
@@ -149,6 +206,9 @@ void Fps60_AfterTimerTick(struct GameTracker *gGT)
 	g_fps60Stats.halfTicks += g_fps60 ? 1u : 2u;
 	g_fps60Stats.frames60 += g_fps60 ? 1u : 0u;
 	g_fps60Stats.ticks30 += g_fps60Full ? 1u : 0u;
+#endif
+#if defined(CTR_NATIVE) && defined(CTR_INTERNAL)
+	Fps60_LapLog(gGT);
 #endif
 }
 
