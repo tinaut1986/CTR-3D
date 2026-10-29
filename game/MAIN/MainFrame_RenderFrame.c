@@ -1805,7 +1805,9 @@ void RenderSubmit(struct GameTracker *gGT)
 
 #if defined(CTR_NATIVE)
 
-	sdata->vsyncTillFlip = 2;
+	// NOTE: 2 everywhere but the 3DS frame cap, which can ask for 3 (20fps)
+	// on an Old 3DS -- see Platform_FlipVBlanks.
+	sdata->vsyncTillFlip = Platform_FlipVBlanks();
 
 	// Native still renders immediately through PsyCross, so keep the host GPU's
 	// active draw/display envs in step with the retail DB selected this frame.

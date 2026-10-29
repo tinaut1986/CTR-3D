@@ -1005,7 +1005,27 @@ internal int Native_VoiceFillAllowed(void)
 }
 #endif
 
+/*
+ * Frame-pace bookkeeping (3DS, see n3ds_backend.h's frame-pace block): the
+ * performance-counter time spent inside Native_WaitUntilVBlankTarget since the
+ * last flip -- sleeping, spinning, or filling the voice cache in time the frame
+ * would have slept -- and when that flip was. Platform_FlipVBlanks turns the
+ * pair into the frame's WORK. Two counter reads per wait.
+ */
+global_variable u64 s_paceIdleCounter = 0;
+global_variable u64 s_paceLastFlipCounter = 0;
+
+internal void Native_WaitUntilVBlankTargetBody(void);
+
 internal void Native_WaitUntilVBlankTarget(void)
+{
+	const u64 t0 = SDL_GetPerformanceCounter();
+
+	Native_WaitUntilVBlankTargetBody();
+	s_paceIdleCounter += SDL_GetPerformanceCounter() - t0;
+}
+
+internal void Native_WaitUntilVBlankTargetBody(void)
 {
 	const u64 freq = SDL_GetPerformanceFrequency();
 	const u64 spinWindow = Native_CounterFromMicroseconds(freq, NATIVE_VSYNC_SPIN_US);
@@ -1174,6 +1194,32 @@ int VSync(int mode)
 int Platform_GetVBlankCount(void)
 {
 	return s_nativeVBlankCount;
+}
+
+int Platform_FlipVBlanks(void)
+{
+	const u64 now = SDL_GetPerformanceCounter();
+	const u64 last = s_paceLastFlipCounter;
+	const u64 idle = s_paceIdleCounter;
+
+	s_paceLastFlipCounter = now;
+	s_paceIdleCounter = 0;
+#if defined(__3DS__)
+	if (last != 0)
+	{
+		const u64 freq = SDL_GetPerformanceFrequency();
+		const u64 period = now - last;
+		const u64 work = (idle < period) ? (period - idle) : 0;
+		const u64 workUs = (freq != 0) ? ((work * 1000000) / freq) : 0;
+
+		N3DS_FramePaceNoteFrame((workUs > 0xFFFFFFFFull) ? 0xFFFFFFFFu : (unsigned)workUs);
+	}
+	return N3DS_FramePaceFlipVBlanks();
+#else
+	(void)last;
+	(void)idle;
+	return 2;
+#endif
 }
 
 void Platform_WaitUntilVBlank(int targetVBlank)

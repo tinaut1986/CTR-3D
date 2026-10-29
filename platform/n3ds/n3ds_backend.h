@@ -759,6 +759,34 @@ int N3DS_O3dsSimFtpAllowed(void);
 int N3DS_O3dsSimToggleFile(void);   /* DEBUG > ACTIONS; returns the new state */
 int N3DS_ExtraCoresUsable(void);    /* New 3DS and not simulating an Old one */
 
+/*
+ * Frame pacing and the Old-3DS stereo policy (n3ds_backend.c, "frame pace").
+ *
+ * The game flips when sdata->vsyncTillFlip, set at every submit, has counted
+ * down: 2 emulated vblanks (30 fps) is retail. Platform_FlipVBlanks
+ * (native_platform.c) measures each frame's WORK -- flip to flip minus the
+ * time the pacer slept -- hands it to N3DS_FramePaceNoteFrame and returns
+ * N3DS_FramePaceFlipVBlanks: 2 or 3 (20 fps). Option (cfg `fpscap`):
+ * 0 AUTO, 1 30 FPS, 2 20 FPS. AUTO is 30 on a New 3DS (unchanged) and, on an
+ * Old 3DS / 2DS or the simulation, 20 while a quarter of the frames would miss
+ * 30 and back to 30 once they all fit with margin, so the cadence is a steady 3
+ * vblanks instead of a 2/3 judder. Game logic is time-based (elapsedTimeMS
+ * from the root counter, clamped at 64 ms) and HOWL runs per vblank, so the
+ * cap changes neither game speed nor music tempo; retail drops to 20 itself on
+ * heavy frames.
+ *
+ * g_dbg_stereo: 0 off, 1 on, 2 AUTO (the Old-3DS default): on an Old 3DS the
+ * right eye is dropped while it alone makes the frame miss the cap the frame
+ * would otherwise hold, and comes back once the frame plus its last measured
+ * cost fits again. On a New 3DS 2 behaves as 1.
+ */
+void N3DS_FramePaceNoteFrame(unsigned workUs);
+int N3DS_FramePaceFlipVBlanks(void);
+int N3DS_FramePaceOldClass(void);          /* Old 3DS / 2DS, or simulating one */
+int N3DS_FramePaceStereoSuppressed(void);  /* AUTO stereo has the right eye off */
+void N3DS_FramePaceFormat(char *out, int outSize); /* [PACE] window line, resets */
+extern int g_dbg_frameCap;                 /* 0 AUTO, 1 30 fps, 2 20 fps (cfg fpscap) */
+
 /* Read-only state for the bottom-screen UI (n3ds_bottomui.c). */
 int N3DS_StereoFrameActive(void);   /* this frame rendered both eyes */
 float N3DS_StereoSliderState(void); /* physical 3D slider, 0..1 */
