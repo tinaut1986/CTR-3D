@@ -1445,7 +1445,11 @@ static void ui_updater_poll(void)
 void N3DS_BottomUi_Frame(const struct N3DS_BottomUiGameInfo *gi)
 {
 	const u64 now = svcGetSystemTick();
-	const u64 liveTicks = (u64)SYSCLOCK_ARM11 / 4ULL; /* 250 ms */
+	/* 250 ms; 1 s on the Old-3DS class, where one live repaint (full software
+	 * paint, Morton tile, texture copy + flush) is ~10-20 ms of the game
+	 * thread: [ENDPROF] btm=2.4 ms a frame in a static menu, nearly all of it
+	 * this tick on the STATUS tab. */
+	const u64 liveTicks = N3DS_FramePaceOldClass() ? (u64)SYSCLOCK_ARM11 : ((u64)SYSCLOCK_ARM11 / 4ULL);
 	unsigned sig;
 	int tab = s_tab;
 

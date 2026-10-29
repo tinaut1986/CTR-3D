@@ -171,6 +171,19 @@ enum NativePerfBucket
 	 * Appended, never inserted: s_bucketInfo is indexed by this enum.
 	 */
 	NATIVE_PERF_BUCKET_VOICE_CACHE_FILL,
+	/*
+	 * mainframe_level_geometry_ms split, 1P path (RenderAllLevelGeometry):
+	 * AnimateWater1P / AnimateQuad, the BSP render-list walk
+	 * (RenderLists_Init1P2P: frustum MVMVA + LOD RTPS), the resident track's
+	 * frame snapshot (NativeTrackFrame_Record), and the sky (DrawSky_Full +
+	 * CAM_SkyboxGlow: the menu's ~586 RTPT a frame). All nest inside
+	 * mainframe_level_geometry_ms (not dominant candidates). Appended, never
+	 * inserted: s_bucketInfo is indexed by this enum.
+	 */
+	NATIVE_PERF_BUCKET_LEVEL_ANIMATE,
+	NATIVE_PERF_BUCKET_LEVEL_RENDERLISTS,
+	NATIVE_PERF_BUCKET_LEVEL_TRACK_RECORD,
+	NATIVE_PERF_BUCKET_LEVEL_SKY,
 	NATIVE_PERF_BUCKET_COUNT
 };
 

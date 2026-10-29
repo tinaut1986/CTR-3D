@@ -168,7 +168,10 @@ Rules the hardware enforces and emulators do not:
   96MB crashed the 2DS HOME menu in the other ports). See "Old 3DS / 2DS" below.
 - In any build, an empty `enable-log.txt` in `sdmc:/3ds/ctr_native/` turns on the SD log
   at `sdmc:/ctr3ds.log`. It is flushed on a timer, because a flush per line
-  stalls the game on the card's latency.
+  stalls the game on the card's latency. The flush runs on a low-priority writer
+  thread (lines go to a 64 KiB RAM buffer; dumpreq `logasync` toggles the old
+  flush on the logging thread): on an Old 3DS the 2 s fflush+fsync was a
+  100-285 ms frame.
 - Frame-rate claims count only from a wall clock on hardware: the `[PERF]`
   windows in the SD log, or the on-screen readout.
 
@@ -338,6 +341,20 @@ Measuring (CTR_INTERNAL, SD log, every 64 frames after `[GPUTIME]`):
   title ID 0x0004000005A2C400, SystemModeExt Legacy, SystemMode `O3DS_MEM`
   default 80MB, 268MHz, no L2). It installs next to the normal CIA and shares the
   SD folder. The game detects the small region and simulates the rest.
+- Background voice-cache fill (after boot, in the pacer's vblank wait): stops
+  reading once the budget is full (a legacy region's ~5 MiB fills from the first
+  third of GAME; dumpreq `vcstop`), and on the Old-3DS class a step starts only
+  when the worst recent step plus 2 ms fits before the vblank target (dumpreq
+  `vcpace`). `[VFILL]` (windows with fill activity): `steps`, `avgUs`, `maxUs`,
+  `overruns` (steps that ended past the target: a late frame), `deferred`,
+  `windowUs`. `[XAPRELOAD] budget misses=... full=... filesSkipped=...` at the end.
+- `[LVLPROF]`: mainframe_level_geometry_ms by phase (1P): `anim`
+  (AnimateWater/AnimateQuad), `bsp` (render-list walk), `rec`
+  (NativeTrackFrame_Record), `sky` (DrawSky_Full + glow).
+- `[TRKANIM] window ... animPatched/f`: animated track vertices (water) patched
+  per walk; only those in the leaves the walk draws (dumpreq `trkanimvis`).
+- Bottom UI: the STATUS / DEBUG live repaint ticks every 1 s on the Old-3DS class
+  (250 ms on a New 3DS).
 
 ## Build options
 

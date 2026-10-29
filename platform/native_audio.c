@@ -3863,7 +3863,23 @@ internal struct
 	u32 voicePlannedSectors;
 	u32 backgroundSteps;
 	u64 backgroundStartTick;
+	/* A wanted track did not fit and what is left of the budget is below
+	 * NATIVE_AUDIO_XA_VOICE_CACHE_FULL_SLACK: nothing more will land, so the
+	 * fill stops after the file in hand (g_dbg_voiceFillStopFull). */
+	b32 cacheFull;
+	u32 budgetMisses; /* tracks that did not fit (logged once, then counted) */
+	u32 filesSkipped; /* wanted files never read because the cache was full */
 } s_vce;
+
+/* Once a track misses the budget with less than this left, the cache is full:
+ * a legacy region's ~5 MiB budget fills from the first ~third of GAME, and
+ * every later file was read in full (~11k sectors, the rest of the fill) only
+ * to log "budget full" for each of its tracks. Those tracks stay on the SD
+ * path either way, exactly as with no cache; the reads bought nothing but the
+ * count memo, which an SD-path open fills itself. Never reached on a New 3DS
+ * (32 MiB holds both categories). dumpreq `vcstop` A/Bs it (default on). */
+#define NATIVE_AUDIO_XA_VOICE_CACHE_FULL_SLACK (256u * 1024u)
+int g_dbg_voiceFillStopFull = 1;
 
 /* Resumable state for one category's build pass (GAME then EXTRA). A step
  * reads at most one bounded chunk of one file's span per call -- per-CALL SD
@@ -3973,6 +3989,13 @@ internal int NativeAudio_XAVoiceCacheBuildCategoryStep(int budgetSectors)
 		}
 		if ((s_xacb.filesWanted & (1u << s_xacb.fileNumber)) == 0)
 		{
+			s_xacb.fileNumber++;
+			continue;
+		}
+		if (s_vce.cacheFull && g_dbg_voiceFillStopFull)
+		{
+			/* Full: skip the read of every remaining wanted file. */
+			s_vce.filesSkipped++;
 			s_xacb.fileNumber++;
 			continue;
 		}
@@ -4087,8 +4110,26 @@ internal int NativeAudio_XAVoiceCacheBuildCategoryStep(int budgetSectors)
 
 			if (s_xaVoiceCache.blobUsed + (u32)matched * (u32)s_xacb.src.sectorSize > s_xaVoiceCacheBudget)
 			{
-				NativeAudio_XAVoiceCacheLog("[XAPRELOAD] budget full at cat=%d xa=%d (%u KiB) -- track stays on the SD path", s_xacb.categoryID,
-				                            (int)s_xaVoiceCacheScratch[i].xaID, (unsigned)(s_xaVoiceCache.blobUsed >> 10));
+				/* One line for the first miss (the summary in "voice cache
+				 * built" counts the rest): a line per track was ~150 lines,
+				 * each a share of the next SD log flush. */
+				if (s_vce.budgetMisses == 0)
+				{
+					NativeAudio_XAVoiceCacheLog("[XAPRELOAD] budget full at cat=%d xa=%d (%u KiB) -- track stays on the SD path", s_xacb.categoryID,
+					                            (int)s_xaVoiceCacheScratch[i].xaID, (unsigned)(s_xaVoiceCache.blobUsed >> 10));
+				}
+				s_vce.budgetMisses++;
+				if (s_xaVoiceCacheBudget - s_xaVoiceCache.blobUsed < NATIVE_AUDIO_XA_VOICE_CACHE_FULL_SLACK)
+				{
+					s_vce.cacheFull = 1;
+				}
+				if (s_vce.background)
+				{
+					/* Same one-track-per-call bound as a track that lands:
+					 * each miss still scanned its whole span. */
+					s_xacb.deinterleaveNext = i + 1;
+					return 0;
+				}
 				continue;
 			}
 
@@ -4590,6 +4631,8 @@ int NativeAudio_VoiceCacheEnsureStep(int budgetSectors)
 		                            s_vce.sectors, (unsigned)(s_xaVoiceCache.blobUsed >> 10), (unsigned)(s_xaVoiceCacheBudget >> 10),
 		                            (unsigned long)s_vce.backgroundSteps,
 		                            s_vce.backgroundStartTick ? (unsigned long)(((N3DS_GetTickCount() - s_vce.backgroundStartTick) * 1000ull) / N3DS_GetTickFrequency()) : 0ul);
+		NativeAudio_XAVoiceCacheLog("[XAPRELOAD] budget misses=%u full=%d filesSkipped=%u read=%u of %u planned sectors", (unsigned)s_vce.budgetMisses,
+		                            (int)s_vce.cacheFull, (unsigned)s_vce.filesSkipped, (unsigned)s_vce.readSectors, (unsigned)s_vce.voicePlannedSectors);
 		N3DS_MemLog("voicecache-built");
 	}
 	s_vce.active = 0;

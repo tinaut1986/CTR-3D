@@ -164,6 +164,11 @@ global_variable const struct NativePerfBucketInfo s_bucketInfo[NATIVE_PERF_BUCKE
     /* dominantCandidate 0: it only runs in time the frame would have slept,
      * so it never makes a frame late -- see the enum comment. */
     {"voice_cache_fill_ms", 0},
+    /* dominantCandidate 0: the four nest inside mainframe_level_geometry_ms. */
+    {"level_animate_ms", 0},
+    {"level_renderlists_ms", 0},
+    {"level_track_record_ms", 0},
+    {"level_sky_ms", 0},
 };
 
 global_variable FILE *s_csvFile;
@@ -878,6 +883,12 @@ internal void NativePerf_Report3DSWindow(void)
 		N3DS_EndProfFormat(endProf, (int)sizeof(endProf));
 		N3DS_DebugLog(endProf);
 	}
+	/* mainframe_level_geometry_ms by phase (1P), avg us per frame. */
+	snprintf(out, sizeof(out), "[LVLPROF] total=%d anim=%d bsp=%d rec=%d sky=%d",
+	         (int)(s_windowBucketMs[NATIVE_PERF_BUCKET_MAINFRAME_LEVEL_GEOMETRY] * toAvgUs),
+	         (int)(s_windowBucketMs[NATIVE_PERF_BUCKET_LEVEL_ANIMATE] * toAvgUs), (int)(s_windowBucketMs[NATIVE_PERF_BUCKET_LEVEL_RENDERLISTS] * toAvgUs),
+	         (int)(s_windowBucketMs[NATIVE_PERF_BUCKET_LEVEL_TRACK_RECORD] * toAvgUs), (int)(s_windowBucketMs[NATIVE_PERF_BUCKET_LEVEL_SKY] * toAvgUs));
+	N3DS_DebugLog(out);
 	/* Frame cap / AUTO 3D state and the frame WORK the policy sees
 	 * (n3ds_backend.h's frame-pace block). */
 	{
@@ -885,6 +896,18 @@ internal void NativePerf_Report3DSWindow(void)
 
 		N3DS_FramePaceFormat(pace, (int)sizeof(pace));
 		N3DS_DebugLog(pace);
+	}
+	/* Background voice-cache fill in the pacer's waits (native_platform.c):
+	 * only in windows that ran or deferred a step. */
+	{
+		extern void Native_VoiceFillFormat(char *out, int outSize);
+		char vfill[160];
+
+		Native_VoiceFillFormat(vfill, (int)sizeof(vfill));
+		if (vfill[0] != '\0')
+		{
+			N3DS_DebugLog(vfill);
+		}
 	}
 
 	/* Only when the effect was live: quiet windows would otherwise pay an SD
@@ -912,8 +935,17 @@ internal void NativePerf_Report3DSWindow(void)
 		unsigned lfTotal = 0;
 		unsigned lfCount = 0;
 
+		int lfAsync = 0;
+		unsigned lfSync = 0;
+		unsigned lfSyncWorst = 0;
+
 		N3DS_LogFlushStats(&lfWorst, &lfTotal, &lfCount);
-		snprintf(out, sizeof(out), "[LOGFLUSH] worstUs=%u totalUs=%u n=%u", lfWorst, lfTotal, lfCount);
+		N3DS_LogAsyncStats(&lfAsync, &lfSync, &lfSyncWorst);
+		/* async=1: worstUs/totalUs are the writer thread's flushes, off the
+		 * game thread; sync/syncWorstUs are full-buffer drains on a logging
+		 * thread (what still lands in a frame). */
+		snprintf(out, sizeof(out), "[LOGFLUSH] worstUs=%u totalUs=%u n=%u async=%d sync=%u syncWorstUs=%u", lfWorst, lfTotal, lfCount, lfAsync, lfSync,
+		         lfSyncWorst);
 		N3DS_DebugLog(out);
 	}
 

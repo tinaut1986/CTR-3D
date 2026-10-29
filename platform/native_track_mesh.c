@@ -260,6 +260,12 @@ struct NativeTrackMeshState
 	 * those indices a frame later and must not trust that on its own -- same
 	 * reasoning bspNodeCount exists for above. */
 	u32 animSrcCount;
+	/* Per leaf range: the run of animVerts[] (sorted by vertex index) that
+	 * falls inside the range's [min, max] referenced vertex, so the patch can
+	 * walk only the leaves the frame draws (g_dbg_trackAnimVisible). Built
+	 * with the AnimTex lists, after the binning; NULL = patch every vertex. */
+	u32 *leafAnimFirst;
+	u16 *leafAnimCount;
 
 	/*
 	 * AnimTex ("picture flip") patching -- turbo-pad arrows, waterfall sheets, lava. Distinct from
@@ -631,6 +637,8 @@ static void NativeTrackMesh_Free(void)
 	free(s_trackMesh.texTable);
 	free(s_trackMesh.srcVert);
 	free(s_trackMesh.animVerts);
+	free(s_trackMesh.leafAnimFirst);
+	free(s_trackMesh.leafAnimCount);
 	free(s_trackMesh.animTex);
 	free(s_trackMesh.animFrameRect);
 	free(s_trackMesh.animTexVerts);
@@ -1212,9 +1220,129 @@ internal void NativeTrackAnim_WaterFade(struct NativeTrackVert *vert, s32 camX, 
 	vert->b = (u8)(((u32)vert->b * (u32)(0x1000 - factor)) >> 12);
 }
 
-static u32 NativeTrackAnim_PatchVertices(s32 camX, s32 camZ)
+/*
+ * Visible-leaves-only vertex patch (dumpreq `trkanimvis`, default on).
+ * Retail itself only animates what the frame sees (AnimateWater/AnimateQuad
+ * skip vertices whose visOVertList/visSCVertList bit is clear), and the
+ * resident renderer only draws the snapshot's leaves. A vertex outside every
+ * drawn leaf is not on screen this walk; the walk that next draws its leaf
+ * patches it first (the patch runs at the walk's head, against the snapshot
+ * the draw uses), from the same source values and camera the full pass would
+ * have used then -- so every drawn vertex is exactly what the full pass gives.
+ * On Crash Cove (7952 animated vertices, mostly sea) the full pass was 16 ms a
+ * frame on an Old 3DS: memory-bound, four scattered cache lines per vertex
+ * with no L2. [TRKANIM] window: animPatched/animVerts per frame.
+ */
+int g_dbg_trackAnimVisible = 1;
+static unsigned s_animVisPatchedWin; /* vertices patched in the [TRKANIM] window */
+static unsigned s_animVisFramesWin;
+
+/* Each leaf range's run of animVerts[]. animVerts is ascending (filled by a
+ * vertex-index loop), so the run is a binary search on the range's own
+ * [min, max] referenced vertex: a superset of the vertices it draws. */
+static void NativeTrackAnim_BuildLeafSpans(void)
 {
-	u32 i;
+	u32 leaf;
+
+	free(s_trackMesh.leafAnimFirst);
+	free(s_trackMesh.leafAnimCount);
+	s_trackMesh.leafAnimFirst = NULL;
+	s_trackMesh.leafAnimCount = NULL;
+
+	if ((s_trackMesh.animVertCount == 0) || (s_trackMesh.animVerts == NULL) || (s_trackMesh.leafCount == 0) || (s_trackMesh.indices == NULL))
+	{
+		return;
+	}
+
+	for (leaf = 1; leaf < s_trackMesh.animVertCount; leaf++)
+	{
+		if (s_trackMesh.animVerts[leaf] < s_trackMesh.animVerts[leaf - 1])
+		{
+			return; /* not sorted: keep the full pass */
+		}
+	}
+
+	s_trackMesh.leafAnimFirst = (u32 *)malloc((size_t)s_trackMesh.leafCount * sizeof(u32));
+	s_trackMesh.leafAnimCount = (u16 *)malloc((size_t)s_trackMesh.leafCount * sizeof(u16));
+	if ((s_trackMesh.leafAnimFirst == NULL) || (s_trackMesh.leafAnimCount == NULL))
+	{
+		free(s_trackMesh.leafAnimFirst);
+		free(s_trackMesh.leafAnimCount);
+		s_trackMesh.leafAnimFirst = NULL;
+		s_trackMesh.leafAnimCount = NULL;
+		return;
+	}
+
+	for (leaf = 0; leaf < s_trackMesh.leafCount; leaf++)
+	{
+		const struct NativeTrackLeafRange *range = &s_trackMesh.leafRanges[leaf];
+		u32 lo = 0xffffffffu, hi = 0;
+		u32 k, a, b, first;
+
+		for (k = 0; k < range->indexCount; k++)
+		{
+			u32 vi = s_trackMesh.indices[range->firstIndex + k];
+
+			lo = (vi < lo) ? vi : lo;
+			hi = (vi > hi) ? vi : hi;
+		}
+		s_trackMesh.leafAnimFirst[leaf] = 0;
+		s_trackMesh.leafAnimCount[leaf] = 0;
+		if (lo > hi)
+		{
+			continue;
+		}
+
+		/* first animVerts entry >= lo */
+		a = 0;
+		b = s_trackMesh.animVertCount;
+		while (a < b)
+		{
+			u32 m = a + ((b - a) >> 1);
+
+			if (s_trackMesh.animVerts[m] < lo)
+			{
+				a = m + 1;
+			}
+			else
+			{
+				b = m;
+			}
+		}
+		first = a;
+		/* first animVerts entry > hi */
+		b = s_trackMesh.animVertCount;
+		while (a < b)
+		{
+			u32 m = a + ((b - a) >> 1);
+
+			if (s_trackMesh.animVerts[m] <= hi)
+			{
+				a = m + 1;
+			}
+			else
+			{
+				b = m;
+			}
+		}
+		if (a - first > 0xffffu)
+		{
+			/* A run this long does not fit the u16: fall back for the level. */
+			free(s_trackMesh.leafAnimFirst);
+			free(s_trackMesh.leafAnimCount);
+			s_trackMesh.leafAnimFirst = NULL;
+			s_trackMesh.leafAnimCount = NULL;
+			return;
+		}
+		s_trackMesh.leafAnimFirst[leaf] = first;
+		s_trackMesh.leafAnimCount[leaf] = (u16)(a - first);
+	}
+}
+
+static u32 NativeTrackAnim_PatchVertexRun(u32 first, u32 count, s32 camX, s32 camZ);
+
+static u32 NativeTrackAnim_PatchVertices(s32 camX, s32 camZ, const struct NativeTrackFrameSnapshot *snap)
+{
 	u32 patched = 0;
 
 	if ((s_trackMesh.animVertCount == 0) || (s_trackMesh.animVerts == NULL) || (s_trackMesh.animSrcArray == NULL) || (s_trackMesh.srcVert == NULL))
@@ -1222,7 +1350,44 @@ static u32 NativeTrackAnim_PatchVertices(s32 camX, s32 camZ)
 		return 0;
 	}
 
-	for (i = 0; i < s_trackMesh.animVertCount; i++)
+	if (g_dbg_trackAnimVisible && (s_trackMesh.leafAnimFirst != NULL) && (snap != NULL))
+	{
+		u32 n = (snap->leafCount < NATIVE_TRACK_FRAME_MAX_LEAVES) ? snap->leafCount : NATIVE_TRACK_FRAME_MAX_LEAVES;
+		u32 k;
+
+		for (k = 0; k < n; k++)
+		{
+			u32 leaf = snap->leafSlot[k];
+
+			if ((leaf < s_trackMesh.leafCount) && (s_trackMesh.leafAnimCount[leaf] != 0))
+			{
+				patched += NativeTrackAnim_PatchVertexRun(s_trackMesh.leafAnimFirst[leaf], s_trackMesh.leafAnimCount[leaf], camX, camZ);
+			}
+		}
+	}
+	else
+	{
+		patched = NativeTrackAnim_PatchVertexRun(0, s_trackMesh.animVertCount, camX, camZ);
+	}
+
+	NativeTrackAnim_FlushQueuedVerts();
+	NativeTrackAnim_FlushQueuedUV();
+#if defined(__3DS__)
+	/* One cache flush over the union of everything patched above, instead of
+	 * one per chunk inside each Patch* call. */
+	N3DS_TrackGeom_FlushPatched();
+#endif
+	s_animVisPatchedWin += patched;
+	s_animVisFramesWin++;
+	return patched;
+}
+
+static u32 NativeTrackAnim_PatchVertexRun(u32 first, u32 count, s32 camX, s32 camZ)
+{
+	u32 i;
+	u32 patched = 0;
+
+	for (i = first; (i < first + count) && (i < s_trackMesh.animVertCount); i++)
 	{
 		u32 vi = s_trackMesh.animVerts[i];
 		struct NativeTrackVert *vert;
@@ -1306,14 +1471,6 @@ static u32 NativeTrackAnim_PatchVertices(s32 camX, s32 camZ)
 		NativeTrackAnim_QueueVertexPos(vi, vert);
 		patched++;
 	}
-
-	NativeTrackAnim_FlushQueuedVerts();
-	NativeTrackAnim_FlushQueuedUV();
-#if defined(__3DS__)
-	/* One cache flush over the union of everything patched above, instead of
-	 * one per chunk inside each Patch* call. */
-	N3DS_TrackGeom_FlushPatched();
-#endif
 	return patched;
 }
 
@@ -1379,27 +1536,24 @@ void NativeTrackAnim_PatchFrame(void)
 	 */
 	s32 camX;
 	s32 camZ;
+	const struct NativeTrackFrameSnapshot *snap;
 
 	if (s_trackMesh.builtFor == NULL)
 	{
 		return;
 	}
 
+	snap = NativeTrackFrame_ForWalk();
+	if ((snap == NULL) || (snap->valid == 0))
 	{
-		const struct NativeTrackFrameSnapshot *snap = NativeTrackFrame_ForWalk();
-
-		if ((snap == NULL) || (snap->valid == 0))
-		{
-			return;
-		}
-
-		camX = snap->camX;
-		camZ = snap->camZ;
+		return;
 	}
+	camX = snap->camX;
+	camZ = snap->camZ;
 
 	NativePerf_BeginScope(NATIVE_PERF_BUCKET_TRACK_ANIM);
 
-	patched = NativeTrackAnim_PatchVertices(camX, camZ);
+	patched = NativeTrackAnim_PatchVertices(camX, camZ, snap);
 
 	/* Deliberately NOT an early return: a track can have moving water and no
 	 * animated textures, and the heartbeat below is the only runtime evidence
@@ -1540,11 +1694,14 @@ static void NativeTrackAnim_Report(void)
 	 * clock and stays comparable between a capped and an uncapped build. */
 	if (s_animPatchFrames >= 600)
 	{
-		Platform_LogInstrument("[TRKANIM] window steps=%u vertsLast=%u skipUnit=%u skipRect=%u animVerts=%u srcOOB=%u\n", s_animPatchSteps,
-		             s_trackMesh.animPatchVertsLast, s_trackMesh.animPatchSkipUnit, s_trackMesh.animPatchSkipRect, s_trackMesh.animVertCount,
-		             s_vertPatchSrcOOB);
+		Platform_LogInstrument("[TRKANIM] window steps=%u vertsLast=%u skipUnit=%u skipRect=%u animVerts=%u srcOOB=%u animPatched/f=%u vis=%d spans=%d\n",
+		                       s_animPatchSteps, s_trackMesh.animPatchVertsLast, s_trackMesh.animPatchSkipUnit, s_trackMesh.animPatchSkipRect,
+		                       s_trackMesh.animVertCount, s_vertPatchSrcOOB, (unsigned)((s_animVisFramesWin != 0) ? (s_animVisPatchedWin / s_animVisFramesWin) : 0u),
+		                       g_dbg_trackAnimVisible, (s_trackMesh.leafAnimFirst != NULL) ? 1 : 0);
 		s_animPatchFrames = 0;
 		s_animPatchSteps = 0;
+		s_animVisPatchedWin = 0;
+		s_animVisFramesWin = 0;
 	}
 }
 
@@ -3486,6 +3643,7 @@ void NativeTrackMesh_Frame(struct Level *level, struct mesh_info *mesh)
 	 * neither runs, so the unit column below is optimistic there -- PC verifies
 	 * COUNTS and UV arithmetic, never pixels, same as the rest of this file. */
 	NativeTrackAnim_BuildVertexLists();
+	NativeTrackAnim_BuildLeafSpans();
 
 	/* Latch only now, on success -- see the fingerprint comment up top. On
 	 * 3DS, a transient track-atlas allocation shortfall (linear-heap

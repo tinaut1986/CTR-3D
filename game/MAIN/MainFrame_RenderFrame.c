@@ -1321,6 +1321,7 @@ void RenderAllLevelGeometry(struct GameTracker *gGT, struct Level *level1, struc
 		// 60fps: Fps60_Timer30() is that 30fps clock (here and 2P-4P below).
 
 		// if no SCVert
+		MAINFRAME_PERF_BEGIN(NATIVE_PERF_BUCKET_LEVEL_ANIMATE);
 		if ((level1->configFlags & 4) == 0)
 		{
 			// assume OVert (no primitives generated here)
@@ -1333,6 +1334,7 @@ void RenderAllLevelGeometry(struct GameTracker *gGT, struct Level *level1, struc
 			// draw SCVert (no primitives generated here
 			AnimateQuad(Fps60_Timer30() << 7, level1->numSCVert, level1->ptrSCVert, gGT->visMem1->visSCVertList[0]);
 		}
+		MAINFRAME_PERF_END(NATIVE_PERF_BUCKET_LEVEL_ANIMATE);
 
 		// camera of player 1
 		pushBuffer = &gGT->pushBuffer[0];
@@ -1401,11 +1403,13 @@ void RenderAllLevelGeometry(struct GameTracker *gGT, struct Level *level1, struc
 		}
 #endif
 
+		MAINFRAME_PERF_BEGIN(NATIVE_PERF_BUCKET_LEVEL_RENDERLISTS);
 		RenderLists_PreInit();
 		gGT->bspLeafsDrawn = 0;
 
 		gGT->bspLeafsDrawn += RenderLists_Init1P2P(ptr_mesh_info->bspRoot, gGT->visMem1->visLeafList[0], pushBuffer, (u32)&gGT->LevRenderLists[0],
 		                                           gGT->visMem1->bspList[0], numPlyrCurrGame);
+		MAINFRAME_PERF_END(NATIVE_PERF_BUCKET_LEVEL_RENDERLISTS);
 
 #if defined(CTR_NATIVE) && defined(CTR_NATIVE_TRACK_RENDERER) && CTR_NATIVE_TRACK_RENDERER
 		// Native track renderer (rung 3a step 1): per-frame camera + visibility
@@ -1426,7 +1430,9 @@ void RenderAllLevelGeometry(struct GameTracker *gGT, struct Level *level1, struc
 			// the compiler doesn't flag a direct incompatible-pointer-type cast
 			// as a strict-aliasing hazard for what is actually the same object
 			// DrawLevelOvr1P below already reads through its own void* parameter.
+			MAINFRAME_PERF_BEGIN(NATIVE_PERF_BUCKET_LEVEL_TRACK_RECORD);
 			NativeTrackFrame_Record(gGT, ptr_mesh_info, (struct DrawLevelOvr1PRenderList *)(void *)&gGT->LevRenderLists[0], pushBuffer);
+			MAINFRAME_PERF_END(NATIVE_PERF_BUCKET_LEVEL_TRACK_RECORD);
 		}
 #endif
 
@@ -1468,13 +1474,19 @@ void RenderAllLevelGeometry(struct GameTracker *gGT, struct Level *level1, struc
 			               level1->ptr_tex_waterEnvMap); // waterEnvMap?
 		}
 
+		MAINFRAME_PERF_BEGIN(NATIVE_PERF_BUCKET_LEVEL_SKY);
 		DrawSky_Full(level1->ptr_skybox, pushBuffer, &gGT->backBuffer->primMem);
 
 		// skybox gradient
 		if ((level1->configFlags & 1) != 0)
 		{
-			goto SkyboxGlow;
+			for (i = 0; i < numPlyrCurrGame; i++)
+			{
+				pushBuffer = &gGT->pushBuffer[i];
+				CAM_SkyboxGlow(&level1->glowGradient[0], pushBuffer, &gGT->backBuffer->primMem, &pushBuffer->ptrOT[0x3ff]);
+			}
 		}
+		MAINFRAME_PERF_END(NATIVE_PERF_BUCKET_LEVEL_SKY);
 
 		return;
 	}

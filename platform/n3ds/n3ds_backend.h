@@ -169,6 +169,7 @@ void N3DS_C3DGpuTimeWindow(int *cpuUs, int *gpuUs, unsigned *frames);
  * window.
  */
 void N3DS_LogFlushStats(unsigned *worstUs, unsigned *totalUs, unsigned *count);
+void N3DS_LogAsyncStats(int *async, unsigned *syncDrains, unsigned *syncWorstUs); /* [LOGFLUSH] async writer fields, resets */
 
 /* ------------------------------------------------------------- stereo 3D --- */
 /*
