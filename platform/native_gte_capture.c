@@ -788,9 +788,24 @@ internal void GTECapture_InstanceAxisFlush(void)
 
 void GTECapture_Store(s16 sx, s16 sy, s64 sxFull, s64 syFull, u16 sz3, s32 hOverSz3, s16 vx, s16 vy, s16 vz)
 {
-	GTECaptureBuffer *buf = &s_gteCaptureBuf[s_gteCaptureWriteIdx];
-	u32 key = GTECapture_PackKey(sx, sy);
-	GTECaptureEntry *entry = &buf->entries[GTECapture_Hash(key)];
+	GTECaptureBuffer *buf;
+	u32 key;
+	GTECaptureEntry *entry;
+
+	/* Suppressed producers must not even EVICT -- see the comment above; the
+	 * eviction is the half of the bug that does not look like a skybox
+	 * problem. Tested here rather than at the GTE_RotTransPers call site so
+	 * there is exactly one place a store can be dropped. First, before the
+	 * prefetches below: the sky's ~1700 suppressed stores a frame (menu) used
+	 * to pull two lines of the 1.5 MiB table each for nothing. */
+	if (s_gteCaptureStoreSuppressed)
+	{
+		return;
+	}
+
+	buf = &s_gteCaptureBuf[s_gteCaptureWriteIdx];
+	key = GTECapture_PackKey(sx, sy);
+	entry = &buf->entries[GTECapture_Hash(key)];
 
 	/* The table is ~1.5 MiB and keyed by screen position, so the entry is a
 	 * cache miss nearly every time (no L2 on an Old 3DS). Start both of its
@@ -798,15 +813,6 @@ void GTECapture_Store(s16 sx, s16 sy, s64 sxFull, s64 syFull, u16 sz3, s32 hOver
 	 * under the bracket work below instead of stalling the compare. */
 	__builtin_prefetch(entry, 1);
 	__builtin_prefetch((const u8 *)entry + sizeof(*entry) - 1, 1);
-
-	/* Suppressed producers must not even EVICT -- see the comment above; the
-	 * eviction is the half of the bug that does not look like a skybox
-	 * problem. Tested here rather than at the GTE_RotTransPers call site so
-	 * there is exactly one place a store can be dropped. */
-	if (s_gteCaptureStoreSuppressed)
-	{
-		return;
-	}
 
 	/* Flag depth remap (block above SetStoreDepthRemap). Applied before
 	 * anything else reads sz3 -- census, ratios, the entry itself -- so every
