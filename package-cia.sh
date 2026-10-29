@@ -2,7 +2,11 @@
 # Build an installable CIA (FBI) from the 3DS build tree.
 # Usage: ./package-cia.sh [build-dir]   (default: build-3ds)
 # Needs makerom + bannertool: via MAKEROM / BANNERTOOL, on PATH, in $DEVKITPRO/tools/bin,
-# in ./tools/bin, or in the sibling zelda-tmc-3ds checkout (platform/3ds/tools/bin).
+# in platform/n3ds/tools/bin (committed there, copied from ../zelda-tmc-3ds like its CI does), or in
+# the sibling zelda-tmc-3ds checkout (platform/3ds/tools/bin).
+# The CIA carries the code only (no romfs, no game data: the assets stay on the SD card). Its
+# version fields are the build's X.Y.Z (platform/n3ds/tools/version.sh; CTR_VERSION overrides);
+# the file is written as ctr3d.cia and as ctr3d-vX.Y.Z.cia (the name the updater expects).
 # Normally run by ./build3ds.sh (which builds the .3dsx too).
 # APP_SYSTEM_MODE_EXT=124MB|178MB picks the New 3DS app memory mode (default 178MB).
 set -euo pipefail
@@ -13,6 +17,8 @@ DEVKITPRO="${DEVKITPRO:-/opt/devkitpro}"
 ELF="${BUILD}/ctr_native.elf"
 SMDH="${BUILD}/ctr_native.smdh"
 OUT="${BUILD}/cia"
+VERSION="$(sh platform/n3ds/tools/version.sh)"
+IFS=. read -r V_MAJOR V_MINOR V_MICRO <<< "$(printf '%s' "${VERSION}" | sed -E 's/^([0-9]+)\.([0-9]+)\.([0-9]+).*/\1.\2.\3/')"
 export APP_SYSTEM_MODE_EXT="${APP_SYSTEM_MODE_EXT:-178MB}"
 
 find_tool() {
@@ -20,7 +26,7 @@ find_tool() {
     if [[ -n "${var}" && -x "${var}" ]]; then echo "${var}"; return; fi
     command -v "${name}" 2>/dev/null && return
     local dir
-    for dir in "${DEVKITPRO}/tools/bin" "tools/bin" "../zelda-tmc-3ds/platform/3ds/tools/bin"; do
+    for dir in "${DEVKITPRO}/tools/bin" "platform/n3ds/tools/bin" "tools/bin" "../zelda-tmc-3ds/platform/3ds/tools/bin"; do
         if [[ -x "${dir}/${name}" ]]; then echo "${dir}/${name}"; return; fi
     done
 }
@@ -50,5 +56,6 @@ fi
 
 "${MAKEROM}" -f cia -o "${OUT}/ctr3d.cia" -DAPP_ENCRYPTED=false -DAPP_SYSTEM_MODE_EXT="${APP_SYSTEM_MODE_EXT}" \
     -elf "${ELF}" -rsf platform/n3ds/cia/ctr3d.rsf -exefslogo -target t \
-    -icon "${SMDH}" -banner "${OUT}/banner.bnr" -major 1 -minor 0 -micro 0
-echo "Built ${OUT}/ctr3d.cia (SystemModeExt ${APP_SYSTEM_MODE_EXT})"
+    -icon "${SMDH}" -banner "${OUT}/banner.bnr" -major "${V_MAJOR}" -minor "${V_MINOR}" -micro "${V_MICRO}"
+cp "${OUT}/ctr3d.cia" "${OUT}/ctr3d-v${VERSION}.cia"
+echo "Built ${OUT}/ctr3d.cia = ${OUT}/ctr3d-v${VERSION}.cia (version ${VERSION}, SystemModeExt ${APP_SYSTEM_MODE_EXT})"

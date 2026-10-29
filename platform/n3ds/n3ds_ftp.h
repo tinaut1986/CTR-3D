@@ -40,6 +40,11 @@ void N3DS_FtpBoot(void);
  * loop should quit so the new build starts. Arms the self-chainload. */
 int N3DS_FtpRelaunchDue(void);
 
+/* Arms the same restart as a successful SITE INSTALL (banner countdown of 10 s,
+ * then the main loop quits and the freshly installed build starts). Used by the
+ * in-game updater (n3ds_updater.c) after its own install. Any thread. */
+void N3DS_FtpScheduleRelaunch(void);
+
 /* Exit sequence: stop the thread (join, 3 s timeout) and close its sockets. */
 void N3DS_FtpShutdown(void);
 
