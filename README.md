@@ -96,6 +96,8 @@ cmake --build build-3ds
 
 Or just `./build3ds.sh`, which configures if needed and builds both outputs: `build-3ds/ctr_native.3dsx` and the installable `build-3ds/cia/ctr3d.cia` (needs `makerom` and `bannertool`; see `package-cia.sh` for where it looks). The CIA is the preferred way to run it: it gets the New 3DS's full app memory (SystemModeExt 178MB), a .3dsx only gets the launching title's. `./build3ds.sh --install <3DS IP>` sends the CIA to the running game over FTP and installs it. That build includes the internal debug surface (FTP on by default, Debug tab); add `-DCTR_INTERNAL=OFF` to the configure line to build what the release ships (FTP only when an empty `dev-ftp.txt` is in `/3ds/ctr_native/`).
 
+`./build3ds.sh --release` builds the production configuration (`CTR_INTERNAL=OFF`, `build-3ds-release/`), which is what a GitHub release ships. Versions come from git (`platform/n3ds/tools/version.sh`, tags `vX.Y.Z`); the game checks GitHub for newer releases from the Updater tab on the bottom screen and installs them itself. See `CLAUDE.md` for the release procedure.
+
 On Windows, run both commands from devkitPro's MSYS2 shell using the `msys` `cmake` and `make` packages, not the mingw ones. From plain Git Bash the cross-compiler fails with a temporary-file error.
 
 ## PC builds (Windows and Linux)

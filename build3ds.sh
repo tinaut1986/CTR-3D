@@ -5,7 +5,10 @@
 #
 #   ./build3ds.sh                       build/refresh both
 #   ./build3ds.sh --no-cia              .3dsx only
-#   ./build3ds.sh --o3ds-sim            also build build-3ds/cia/ctr3d-o3dssim.cia (Old-3DS
+#   ./build3ds.sh --release             the production config instead of the debug one:
+#                                       -DCTR_INTERNAL=OFF in build-3ds-release/ (what the
+#                                       release workflow builds)
+#   ./build3ds.sh --o3ds-sim            also build <build>/cia/ctr3d-o3dssim.cia (Old-3DS
 #                                       simulation CIA; O3DS_MEM=64MB|72MB|80MB|96MB, default 80MB)
 #   ./build3ds.sh --install [IP[:PORT]] build, then send the CIA to the running game's
 #                                       FTP server and have it install + relaunch
@@ -14,13 +17,20 @@
 #                                       FTP on: debug build = on by default, production
 #                                       build = an empty dev-ftp.txt in /3ds/ctr_native/.
 #
-# Outputs: build-3ds/ctr_native.3dsx and build-3ds/cia/ctr3d.cia.
+# Environment (set by .github/workflows/build-release.yml; empty for local builds):
+#   CTR_CHANNEL=beta|release   baked into the binary ("0.1.0 BETA" label, updater channel)
+#   CTR_VERSION=X.Y.Z          override the version derived from git (platform/n3ds/tools/version.sh)
+#   UPDATE_DEPS_ROOT=DIR       prefix with curl, mbedtls and jansson for the updater (default: the
+#                              devkitPro portlibs, else a pinned build into build-update-deps/)
+#
+# Outputs: build-3ds/ctr_native.3dsx and build-3ds/cia/ctr3d.cia (+ ctr3d-vX.Y.Z.cia).
 # Run via an MSYS2 login shell on Windows (`bash.exe -l build3ds.sh`). The cd comes
 # first because a login shell starts in $HOME, so a bare `cmake --build` would run
 # against the wrong directory.
 cd "$(dirname "$(readlink -f "$0")")" || exit 2
 
 BUILD=build-3ds
+INTERNAL=ON
 DEVKITPRO="${DEVKITPRO:-/opt/devkitpro}"
 CIA_PATH="/3ds/ctr_native/update/dev.cia"
 DO_CIA=1
@@ -30,17 +40,35 @@ HOST=""
 while [[ $# -gt 0 ]]; do
     case "$1" in
         --no-cia) DO_CIA=0 ;;
+        --release) BUILD=build-3ds-release; INTERNAL=OFF ;;
         --o3ds-sim) O3DS_SIM_CIA=1 ;;
         --install) INSTALL=1; DO_CIA=1
             if [[ $# -gt 1 && "$2" != --* ]]; then HOST="$2"; shift; fi ;;
-        -h|--help) sed -n '2,18p' "$0"; exit 0 ;;
+        -h|--help) sed -n '2,30p' "$0"; exit 0 ;;
         *) echo "unknown option: $1 (see --help)" >&2; exit 2 ;;
     esac
     shift
 done
 
+# The updater's libraries: curl + mbedTLS + jansson. The portlibs have them on some installs;
+# otherwise the pinned sources are built once into build-update-deps/ (needs network).
+if [[ -z "${UPDATE_DEPS_ROOT:-}" ]]; then
+    UPDATE_DEPS_ROOT="${DEVKITPRO}/portlibs/3ds"
+    if [[ ! -f "${UPDATE_DEPS_ROOT}/lib/libcurl.a" || ! -f "${UPDATE_DEPS_ROOT}/lib/libjansson.a" ]]; then
+        UPDATE_DEPS_ROOT="$PWD/build-update-deps/prefix"
+        if [[ ! -f "${UPDATE_DEPS_ROOT}/lib/libcurl.a" || ! -f "${UPDATE_DEPS_ROOT}/lib/libjansson.a" ]]; then
+            python3 platform/n3ds/tools/build_update_deps.py "$PWD/build-update-deps" || exit $?
+        fi
+    fi
+fi
+
 if [[ ! -f "${BUILD}/CMakeCache.txt" ]]; then
-    cmake -S . -B "${BUILD}" -DCMAKE_TOOLCHAIN_FILE="${DEVKITPRO}/cmake/3DS.cmake" -DCMAKE_BUILD_TYPE=Release 2>&1 || exit $?
+    cmake -S . -B "${BUILD}" -DCMAKE_TOOLCHAIN_FILE="${DEVKITPRO}/cmake/3DS.cmake" -DCMAKE_BUILD_TYPE=Release \
+        -DCTR_INTERNAL=${INTERNAL} -DUPDATE_DEPS_ROOT="${UPDATE_DEPS_ROOT}" \
+        -DCTR_CHANNEL="${CTR_CHANNEL:-}" -DCTR_VERSION="${CTR_VERSION:-}" 2>&1 || exit $?
+else
+    # Re-evaluate the version (a new commit or tag) and the channel on every run.
+    cmake -S . -B "${BUILD}" -DUPDATE_DEPS_ROOT="${UPDATE_DEPS_ROOT}" -DCTR_CHANNEL="${CTR_CHANNEL:-}" -DCTR_VERSION="${CTR_VERSION:-}" > /dev/null 2>&1 || exit $?
 fi
 cmake --build "${BUILD}" 2>&1
 rc=${PIPESTATUS[0]}
