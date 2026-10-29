@@ -1966,6 +1966,31 @@ static int N3DS_NextPktBias(int cur)
  */
 int g_dbg_frameSync = 0;
 
+/* Nonzero between a successful C3D_FrameBegin and C3D_FrameEnd. citro3d
+ * points libctru's GPU command buffer at NULL once a frame ends, so ANY draw
+ * or state change issued outside the bracket is a svcBreak (GPUCMD_Add's
+ * "no buffer" panic, gpu.c) -- a hard crash instead of a skipped draw. */
+static volatile int s_frameOpen = 0;
+static unsigned s_outsideFrameDraws = 0;
+
+int N3DS_C3DFrameOpen(void)
+{
+	return s_frameOpen;
+}
+
+/* Called by a draw site that found no open frame: counted, logged (first and
+ * every 256th) so the offender is identifiable from the log, never fatal. */
+void N3DS_C3DNoteDrawOutsideFrame(const char *site)
+{
+	char msg[96];
+
+	if ((s_outsideFrameDraws++ & 255u) == 0)
+	{
+		snprintf(msg, sizeof(msg), "[CTR-3DS] draw outside a frame skipped at %s (n=%u)", site, s_outsideFrameDraws);
+		N3DS_DebugLog(msg);
+	}
+}
+
 void N3DS_C3DBeginFrame(void)
 {
 	/* Latch the physical 3D slider for the whole frame BEFORE anything is
@@ -1978,6 +2003,7 @@ void N3DS_C3DBeginFrame(void)
 	N3DS_FrameTrace("[CTR-3DS] FrameBegin: enter (SYNCDRAW wait)");
 	N3DS_GuardedFrameBegin(g_dbg_frameSync ? 1 : 0);
 	N3DS_FrameTrace("[CTR-3DS] FrameBegin: returned");
+	s_frameOpen = 1;
 	/* Depth clears to FAR. Mtx_OrthoTilt maps LARGER vertex z to SMALLER
 	 * stored depth (verified empirically, see below), so far = max. */
 	C3D_RenderTargetClear(s_renderTarget, C3D_CLEAR_ALL, 0x000000FF, 0x00FFFFFF);
@@ -2080,6 +2106,7 @@ void N3DS_C3DEndFrame(void)
 
 	N3DS_FrameTrace("[CTR-3DS] FrameEnd: enter (submit)");
 	N3DS_BeatMark(beatThread, N3DS_BEAT_WHERE_FRAMEEND);
+	s_frameOpen = 0;
 	C3D_FrameEnd(0);
 	N3DS_BeatMark(beatThread, N3DS_BEAT_WHERE_OK);
 	N3DS_FrameTrace("[CTR-3DS] FrameEnd: returned");
@@ -2136,6 +2163,11 @@ int N3DS_C3DFrameVertexHighWater(void)
 
 void N3DS_C3DDrawTriangles(int startVertex, int triangleCount)
 {
+	if (!s_frameOpen)
+	{
+		N3DS_C3DNoteDrawOutsideFrame("N3DS_C3DDrawTriangles");
+		return;
+	}
 	C3D_DrawArrays(GPU_TRIANGLES, startVertex, triangleCount * 3);
 }
 
@@ -3546,7 +3578,7 @@ int N3DS_BottomPass_Begin(void)
 	const unsigned short *tiled;
 	static const float zeroVec[2][4] = {{0, 0, 0, 0}, {0, 0, 0, 0}};
 
-	if (s_bottomTargetFailed)
+	if (s_bottomTargetFailed || !s_frameOpen)
 	{
 		return 0;
 	}

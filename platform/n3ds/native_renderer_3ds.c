@@ -5838,6 +5838,14 @@ void NativeRenderer_PresentVRAMRect(int displayX, int displayY, int displayW, in
 		return;
 	}
 
+	/* A present issued with no citro3d frame open (renderer not up yet, or the
+	 * frame already ended) would panic the GPU command buffer: skip it loudly. */
+	if (!N3DS_C3DFrameOpen())
+	{
+		N3DS_C3DNoteDrawOutsideFrame("PresentVRAMRect");
+		return;
+	}
+
 	/* Foreign (non-atlas) draw: everything deferred must be recorded
 	 * first, both for paint order and because the TEV change below would
 	 * otherwise apply to it. The TEV latch is invalidated so the next

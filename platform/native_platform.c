@@ -675,7 +675,38 @@ void Platform_EndScene(void)
 	NativePerf_BeginScope(NATIVE_PERF_BUCKET_PLATFORM_END_SCENE);
 	s_platformBeginScene = 0;
 
+#ifdef __3DS__
+	/* citro3d: the present is GPU work and must land inside the frame, i.e.
+	 * BEFORE the frame is ended (it records into the stereo journal and the
+	 * merge barrier first, see NativeRenderer_PresentVRAMRect). Ended first, its
+	 * draw hits libctru's NULL command buffer. */
+	if (s_pinnedVramDisplayFrames > 0)
+	{
+		NativeRenderer_DiscardFramebufferReadback();
+		if (s_pinnedVramDisplayCustomRect)
+		{
+			NativeRenderer_PresentVRAMRect(s_pinnedVramDisplayX, s_pinnedVramDisplayY, s_pinnedVramDisplayW, s_pinnedVramDisplayH);
+		}
+		else
+		{
+			NativeRenderer_PresentVRAMDisplay();
+		}
+	}
 	NativeRenderer_EndScene();
+	if (s_pinnedVramDisplayFrames > 0)
+	{
+		NativeRenderer_SwapWindow();
+		s_pinnedVramDisplayFrames--;
+		if (s_pinnedVramDisplayFrames <= 0)
+		{
+			s_pinnedVramDisplayCustomRect = 0;
+		}
+		NativePerf_EndScope(NATIVE_PERF_BUCKET_PLATFORM_END_SCENE);
+		return;
+	}
+#else
+	NativeRenderer_EndScene();
+#endif
 
 	if (s_pinnedVramDisplayFrames > 0)
 	{

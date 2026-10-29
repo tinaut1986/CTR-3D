@@ -247,6 +247,11 @@ int N3DS_StereoSkyPadX(void);
  * skip drawing in that case, not draw from a stale/wrong offset. */
 int N3DS_C3DAppendVertices(const N3DS_Vertex *vertices, int count);
 void N3DS_C3DDrawTriangles(int startVertex, int triangleCount);
+/* Nonzero inside a C3D_FrameBegin/End bracket. Draws outside one would panic
+ * libctru's GPU command buffer (NULL after FrameEnd); sites that issue GPU work
+ * outside the walk check this and report through NoteDrawOutsideFrame. */
+int N3DS_C3DFrameOpen(void);
+void N3DS_C3DNoteDrawOutsideFrame(const char *site);
 /* Highest vertex count reached in any single frame so far. Reported in the
  * stats block: if this ever approaches N3DS_MAX_FRAME_VERTICES the budget
  * above is too small for real content and geometry is about to disappear. */
