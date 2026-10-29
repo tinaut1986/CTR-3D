@@ -85,10 +85,12 @@ void MainFrame_RenderFrame(struct GameTracker *gGT, struct GamepadSystem *gGamep
 
 	MAINFRAME_PERF_BEGIN(NATIVE_PERF_BUCKET_MAINFRAME_SETUP);
 	MAINFRAME_LOG_CHECKPOINT("SETUP");
+	MAINFRAME_PERF_BEGIN(NATIVE_PERF_BUCKET_SETUP_MISC);
 	DrawUnpluggedMsg(gGT, gGamepads);
 	DrawFinalLap(gGT);
 
 	ElimBG_HandleState(gGT);
+	MAINFRAME_PERF_END(NATIVE_PERF_BUCKET_SETUP_MISC);
 
 	if (lev != 0)
 	{
@@ -97,7 +99,9 @@ void MainFrame_RenderFrame(struct GameTracker *gGT, struct GamepadSystem *gGamep
 
 	if ((gGT->renderFlags & RENDER_FLAG_VISMEM_REFRESH_MASK) != 0)
 	{
+		MAINFRAME_PERF_BEGIN(NATIVE_PERF_BUCKET_SETUP_VISMEM);
 		MainFrame_VisMemFullFrame(gGT, gGT->level1);
+		MAINFRAME_PERF_END(NATIVE_PERF_BUCKET_SETUP_VISMEM);
 	}
 
 
@@ -108,11 +112,14 @@ void MainFrame_RenderFrame(struct GameTracker *gGT, struct GamepadSystem *gGamep
 			if (lev != 0)
 			{
 				// 60fps: retail frames (ModSDK CTR_04_CycleTex_LEV).
+				MAINFRAME_PERF_BEGIN(NATIVE_PERF_BUCKET_SETUP_CYCLETEX);
 				CTR_CycleTex_LEV(lev->ptr_anim_tex, Fps60_Timer30());
+				MAINFRAME_PERF_END(NATIVE_PERF_BUCKET_SETUP_CYCLETEX);
 			}
 		}
 	}
 
+	MAINFRAME_PERF_BEGIN(NATIVE_PERF_BUCKET_SETUP_MENU);
 	if ((sdata->ptrActiveMenu != 0) || ((gGT->gameMode1 & END_OF_RACE) != 0))
 	{
 		RECTMENU_CollectInput();
@@ -125,10 +132,13 @@ void MainFrame_RenderFrame(struct GameTracker *gGT, struct GamepadSystem *gGamep
 			RECTMENU_ProcessState();
 		}
 	}
+	MAINFRAME_PERF_END(NATIVE_PERF_BUCKET_SETUP_MENU);
 
+	MAINFRAME_PERF_BEGIN(NATIVE_PERF_BUCKET_SETUP_MISC);
 	RainLogic(gGT);
 	DropRain_MakeSound(gGT);
 	MenuHighlight();
+	MAINFRAME_PERF_END(NATIVE_PERF_BUCKET_SETUP_MISC);
 	MAINFRAME_PERF_END(NATIVE_PERF_BUCKET_MAINFRAME_SETUP);
 
 	MAINFRAME_PERF_BEGIN(NATIVE_PERF_BUCKET_MAINFRAME_EFFECTS);
