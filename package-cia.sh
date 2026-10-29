@@ -5,6 +5,12 @@
 # in ./tools/bin, or in the sibling zelda-tmc-3ds checkout (platform/3ds/tools/bin).
 # Normally run by ./build3ds.sh (which builds the .3dsx too).
 # APP_SYSTEM_MODE_EXT=124MB|178MB picks the New 3DS app memory mode (default 178MB).
+# APP_SYSTEM_MODE=64MB|72MB|80MB|96MB is the legacy (Old 3DS/2DS) mode (default 64MB).
+# O3DS_SIM=1 builds the Old-3DS SIMULATION CIA (ctr3d-o3dssim.cia): its own title ID
+#   (0x5A2C4, installs next to the normal one and shares sdmc:/3ds/ctr_native/),
+#   SystemModeExt Legacy + SystemMode ${O3DS_MEM:-80MB}, CpuSpeed 268MHz, no L2 cache.
+#   On a New 3DS the game sees a legacy-mode region and runs as an Old 3DS would
+#   (clock-up off, no core 2/3 workers); see docs/3DS_PORT.md. Not for release.
 set -euo pipefail
 cd "$(dirname "$(readlink -f "$0")")"
 
@@ -13,7 +19,24 @@ DEVKITPRO="${DEVKITPRO:-/opt/devkitpro}"
 ELF="${BUILD}/ctr_native.elf"
 SMDH="${BUILD}/ctr_native.smdh"
 OUT="${BUILD}/cia"
-export APP_SYSTEM_MODE_EXT="${APP_SYSTEM_MODE_EXT:-178MB}"
+CIA_NAME="ctr3d"
+if [[ "${O3DS_SIM:-0}" == "1" ]]; then
+    APP_SYSTEM_MODE_EXT="Legacy"
+    APP_SYSTEM_MODE="${O3DS_MEM:-80MB}"
+    APP_CPU_SPEED="268MHz"
+    APP_L2_CACHE="false"
+    APP_UNIQUE_ID="0x5A2C4"
+    APP_PRODUCT_CODE="CTR-P-CT3S"
+    APP_TITLE="CTR 3D O3DS SIM"
+    CIA_NAME="ctr3d-o3dssim"
+fi
+APP_SYSTEM_MODE_EXT="${APP_SYSTEM_MODE_EXT:-178MB}"
+APP_SYSTEM_MODE="${APP_SYSTEM_MODE:-64MB}"
+APP_CPU_SPEED="${APP_CPU_SPEED:-804MHz}"
+APP_L2_CACHE="${APP_L2_CACHE:-true}"
+APP_UNIQUE_ID="${APP_UNIQUE_ID:-0x5A2C3}"
+APP_PRODUCT_CODE="${APP_PRODUCT_CODE:-CTR-P-CT3D}"
+APP_TITLE="${APP_TITLE:-CTR 3D}"
 
 find_tool() {
     local name="$1" var="${2:-}"
@@ -48,7 +71,9 @@ PY
 fi
 "${BANNERTOOL}" makebanner -i "${BANNER_PNG}" -a "${BANNER_WAV}" -o "${OUT}/banner.bnr"
 
-"${MAKEROM}" -f cia -o "${OUT}/ctr3d.cia" -DAPP_ENCRYPTED=false -DAPP_SYSTEM_MODE_EXT="${APP_SYSTEM_MODE_EXT}" \
+"${MAKEROM}" -f cia -o "${OUT}/${CIA_NAME}.cia" -DAPP_ENCRYPTED=false -DAPP_SYSTEM_MODE_EXT="${APP_SYSTEM_MODE_EXT}" \
+    -DAPP_SYSTEM_MODE="${APP_SYSTEM_MODE}" -DAPP_CPU_SPEED="${APP_CPU_SPEED}" -DAPP_L2_CACHE="${APP_L2_CACHE}" \
+    -DAPP_UNIQUE_ID="${APP_UNIQUE_ID}" -DAPP_PRODUCT_CODE="${APP_PRODUCT_CODE}" -DAPP_TITLE="${APP_TITLE}" \
     -elf "${ELF}" -rsf platform/n3ds/cia/ctr3d.rsf -exefslogo -target t \
     -icon "${SMDH}" -banner "${OUT}/banner.bnr" -major 1 -minor 0 -micro 0
-echo "Built ${OUT}/ctr3d.cia (SystemModeExt ${APP_SYSTEM_MODE_EXT})"
+echo "Built ${OUT}/${CIA_NAME}.cia (SystemModeExt ${APP_SYSTEM_MODE_EXT}, SystemMode ${APP_SYSTEM_MODE}, ${APP_CPU_SPEED}, L2 ${APP_L2_CACHE}, UniqueId ${APP_UNIQUE_ID})"

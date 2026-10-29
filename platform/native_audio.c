@@ -3732,6 +3732,16 @@ internal int NativeAudio_XAStreamCountAudioSectors(struct NativeAudioXaSource *s
  * removes their repeat whole-file scans after the first open of each track.
  */
 #define NATIVE_AUDIO_XA_VOICE_CACHE_MAX_BYTES (32u * 1024u * 1024u)
+#if defined(__3DS__)
+/* n3ds_heap.c: heap bytes still available to malloc, and the memory log line. */
+extern unsigned long N3DS_HeapFreeBytes(void);
+extern void N3DS_MemLog(const char *tag);
+/* The cache never takes the heap below this much free (measured peak of the
+ * rest of the game outside the cache: ~16 MiB at boot, ~8 MiB in a race). */
+#define NATIVE_AUDIO_XA_VOICE_CACHE_HEAP_RESERVE (22u * 1024u * 1024u)
+#define NATIVE_AUDIO_XA_VOICE_CACHE_MIN_BYTES    (2u * 1024u * 1024u)
+#endif
+static u32 s_xaVoiceCacheBudget = NATIVE_AUDIO_XA_VOICE_CACHE_MAX_BYTES; /* sized to the heap on 3DS */
 #define NATIVE_AUDIO_XA_TRACK_INDEX_MAX       512
 #define NATIVE_AUDIO_XA_CATEGORY_MUSIC        0
 #define NATIVE_AUDIO_XA_CATEGORY_EXTRA        1
@@ -4057,7 +4067,7 @@ internal int NativeAudio_XAVoiceCacheBuildCategoryStep(int budgetSectors)
 
 			s_xaAudioSectorCountMemo[info->entryIndex] = matched;
 
-			if (s_xaVoiceCache.blobUsed + (u32)matched * (u32)s_xacb.src.sectorSize > NATIVE_AUDIO_XA_VOICE_CACHE_MAX_BYTES)
+			if (s_xaVoiceCache.blobUsed + (u32)matched * (u32)s_xacb.src.sectorSize > s_xaVoiceCacheBudget)
 			{
 				NativeAudio_XAVoiceCacheLog("[XAPRELOAD] budget full at cat=%d xa=%d (%u KiB) -- track stays on the SD path", s_xacb.categoryID,
 				                            (int)s_xaVoiceCacheScratch[i].xaID, (unsigned)(s_xaVoiceCache.blobUsed >> 10));
@@ -4381,11 +4391,35 @@ void NativeAudio_VoiceCacheEnsureBegin(void)
 	memset(&s_vce, 0, sizeof(s_vce));
 	s_vce.active = 1;
 
-	s_xaVoiceCache.blob = (u8 *)malloc(NATIVE_AUDIO_XA_VOICE_CACHE_MAX_BYTES);
-	if (s_xaVoiceCache.blob == NULL)
+	/* Budget = what the heap can spare while keeping the game's own reserve:
+	 * the full 32 MiB on a New 3DS (heap ~70 MiB), less or nothing on a legacy
+	 * Old 3DS region where the heap is lean. */
+	{
+		const unsigned long freeHeap = N3DS_HeapFreeBytes();
+		u32 budget = NATIVE_AUDIO_XA_VOICE_CACHE_MAX_BYTES;
+
+		if (freeHeap < (unsigned long)NATIVE_AUDIO_XA_VOICE_CACHE_HEAP_RESERVE + budget)
+		{
+			budget = (freeHeap > NATIVE_AUDIO_XA_VOICE_CACHE_HEAP_RESERVE) ? (u32)(freeHeap - NATIVE_AUDIO_XA_VOICE_CACHE_HEAP_RESERVE) : 0u;
+			budget &= ~((1u << 20) - 1u);
+		}
+		s_xaVoiceCacheBudget = budget;
+		N3DS_MemLog("voicecache-begin");
+		if (budget < NATIVE_AUDIO_XA_VOICE_CACHE_MIN_BYTES)
+		{
+			s_xaVoiceCacheBudget = 0;
+			NativeAudio_XAVoiceCacheLog("[XAPRELOAD] heap too small for a voice cache (%lu KiB free, reserve %u KiB) -- voice lines stay on the SD path",
+			                            freeHeap / 1024ul, (unsigned)(NATIVE_AUDIO_XA_VOICE_CACHE_HEAP_RESERVE >> 10));
+		}
+		else
+		{
+			s_xaVoiceCache.blob = (u8 *)malloc(budget);
+		}
+	}
+	if ((s_xaVoiceCache.blob == NULL) && (s_xaVoiceCacheBudget != 0))
 	{
 		NativeAudio_XAVoiceCacheLog("[XAPRELOAD] no %u KiB for the voice cache -- voice lines stay on the SD path",
-		                            (unsigned)(NATIVE_AUDIO_XA_VOICE_CACHE_MAX_BYTES >> 10));
+		                            (unsigned)(s_xaVoiceCacheBudget >> 10));
 	}
 
 	/* Independent of the RAM cache below (MUSIC is never cached): fills the
@@ -4515,7 +4549,8 @@ int NativeAudio_VoiceCacheEnsureStep(int budgetSectors)
 	{
 		s_xaVoiceCache.built = 1;
 		NativeAudio_XAVoiceCacheLog("[XAPRELOAD] voice cache built: %d tracks, %d sectors, %u KiB of %u KiB budget", s_vce.tracks, s_vce.sectors,
-		                            (unsigned)(s_xaVoiceCache.blobUsed >> 10), (unsigned)(NATIVE_AUDIO_XA_VOICE_CACHE_MAX_BYTES >> 10));
+		                            (unsigned)(s_xaVoiceCache.blobUsed >> 10), (unsigned)(s_xaVoiceCacheBudget >> 10));
+		N3DS_MemLog("voicecache-built");
 	}
 	s_vce.active = 0;
 	return 1;

@@ -328,6 +328,7 @@ enum
 	ACT_RTHREAD,
 	ACT_FLUSH,
 	ACT_FTP,
+	ACT_O3DSSIM,
 	ACT_COUNT
 };
 
@@ -475,10 +476,8 @@ static void ui_draw_status(void)
 	y += 17;
 
 	{
-		struct mallinfo mi = mallinfo();
-
-		ui_fmt_mb(a, sizeof(a), (unsigned long long)mi.uordblks);
-		ui_fmt_mb(b, sizeof(b), (unsigned long long)mi.fordblks);
+		ui_fmt_mb(a, sizeof(a), (unsigned long long)N3DS_HeapUsedBytes());
+		ui_fmt_mb(b, sizeof(b), (unsigned long long)N3DS_HeapFreeBytes());
 		snprintf(c, sizeof(c), "%sMB / %sMB FREE", a, b);
 		ui_kv(y, "HEAP", c, COL_TEXT);
 		y += 17;
@@ -491,7 +490,8 @@ static void ui_draw_status(void)
 		APT_CheckNew3DS(&n);
 		s_isNew3DS = n ? 1 : 0;
 	}
-	snprintf(c, sizeof(c), "%s %s", s_isNew3DS ? "NEW" : "OLD", (s_isNew3DS && N3DS_SpeedupEnabled()) ? "804MHZ" : "268MHZ");
+	snprintf(c, sizeof(c), "%s %s%s", s_isNew3DS ? "NEW" : "OLD", (s_isNew3DS && N3DS_SpeedupEnabled()) ? "804MHZ" : "268MHZ",
+	         N3DS_O3dsSimActive() ? " SIM" : "");
 	ui_kv(y, "3DS", c, (s_isNew3DS && !N3DS_SpeedupEnabled()) ? COL_WARN : COL_TEXT);
 	y += 17;
 
@@ -712,6 +712,12 @@ static void ui_act_label(int i, const char **name, const char **state, u16 *col)
 	case ACT_DRAWMERGE: *name = "DRAW MERGE"; on = g_dbg_drawMerge; break;
 	case ACT_RTHREAD: *name = "RENDER THREAD"; on = g_dbg_renderThread; break;
 	case ACT_FLUSH: *name = "LOG"; *state = "FLUSH"; return;
+	case ACT_O3DSSIM:
+		*name = "OLD 3DS SIM";
+		on = (N3DS_O3dsSimActive() != 0);
+		*state = ui_onoff(on);
+		*col = on ? COL_BTN_ON : COL_BTN_OFF;
+		return;
 	default:
 		*name = "FTP";
 		on = (ftp == N3DS_FTP_STATUS_LISTENING) || (ftp == N3DS_FTP_STATUS_WAITING_WIFI);
@@ -739,17 +745,17 @@ static void ui_draw_dbg_actions(void)
 		ui_text(x + 6, y + 5, 1, COL_TEXT, name);
 		ui_text(x + 6, y + 22, 2, COL_TEXT, state);
 	}
-	ui_text(6, CONTENT_Y + 134, 1, COL_LABEL, TR("SAME SWITCHES AS DUMPREQ.TXT", "LOS MISMOS INTERRUPTORES QUE DUMPREQ.TXT"));
+	ui_text(6, CONTENT_Y + 174, 1, COL_LABEL, TR("SAME SWITCHES AS DUMPREQ.TXT", "LOS MISMOS INTERRUPTORES QUE DUMPREQ.TXT"));
 	if (N3DS_FtpStatus() == N3DS_FTP_STATUS_LISTENING)
 	{
 		char c[48];
 
 		ui_ftp_address(c, sizeof(c));
-		ui_text(6, CONTENT_Y + 146, 1, COL_GOOD, c);
+		ui_text(6, CONTENT_Y + 184, 1, COL_GOOD, c);
 	}
 	if (s_msg[0] != '\0')
 	{
-		ui_text(6, CONTENT_Y + 160, 1, COL_GOOD, s_msg);
+		ui_text(6, CONTENT_Y + 194, 1, COL_GOOD, s_msg);
 	}
 }
 
@@ -994,6 +1000,16 @@ static void ui_press_action(int i)
 	case ACT_FLUSH:
 		N3DS_LogFlushNow();
 		ui_set_msg("LOG FLUSHED");
+		break;
+	case ACT_O3DSSIM:
+		if (N3DS_O3dsSimToggleFile() == 2)
+		{
+			ui_set_msg("LEGACY-MODE BUILD: ALWAYS SIM");
+		}
+		else
+		{
+			ui_set_msg(N3DS_O3dsSimActive() ? "OLD 3DS SIM: 268MHZ NOW, RESTART FOR MEMORY+CORES" : "OLD 3DS SIM OFF, RESTART");
+		}
 		break;
 	default:
 	{

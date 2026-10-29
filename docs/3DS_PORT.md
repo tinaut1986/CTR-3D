@@ -155,13 +155,35 @@ Rules the hardware enforces and emulators do not:
   the bottom screen (upload %, install %, 10 s countdown) and restarts into it.
 - CIA: `./build3ds.sh` builds the .3dsx and `build-3ds/cia/ctr3d.cia`
   (`package-cia.sh`; title ID 0x0004000005A2C300, SystemModeExt 178MB on New 3DS,
-  SystemMode 64MB legacy = all an Old 3DS app gets). Old 3DS blockers: that 64MB
-  region, and the FTP thread/render worker need New 3DS cores 2/3.
+  SystemMode 64MB legacy = all an Old 3DS app gets). Old 3DS blockers: see
+  "Old 3DS / 2DS" below.
 - In any build, an empty `enable-log.txt` in `sdmc:/3ds/ctr_native/` turns on the SD log
   at `sdmc:/ctr3ds.log`. It is flushed on a timer, because a flush per line
   stalls the game on the card's latency.
 - Frame-rate claims count only from a wall clock on hardware: the `[PERF]`
   windows in the SD log, or the on-screen readout.
+
+## Old 3DS / 2DS (not working yet; how to test it on a New 3DS)
+
+Blockers, measured on the New 3DS log: (1) memory: ~18.5 MiB code+bss, ~40-48 MiB
+linear, 8-16 MiB malloc outside the optional 32 MiB XA voice cache, so a legacy
+region needs >= 80 MB (64 MB cannot hold it); (2) CPU: 268 MHz without L2 against
+~9-11 ms main thread + 3-7 ms render worker per frame at 804 MHz; (3) the render
+worker (core 2), audio worker (core 3) and FTP (core 3/2) do not exist, so they
+fall back to synchronous work on core 0.
+
+Old-3DS simulation, two ways (both log `[O3DS-SIM]` lines; `[MEM]` lines report
+heap/linear use, grep them for the real peak per level):
+- DEBUG > ACTIONS > OLD 3DS SIM, or an `o3ds-sim.txt` in `sdmc:/3ds/ctr_native/`
+  (optional words: `mem=80` legacy region in MiB, `ftp=0`). At start it turns the
+  clock-up and L2 off (needs `ptm:sysm`, logged), makes the render and audio
+  workers unavailable as on a real Old 3DS, and parks ballast so heap and linear
+  match a legacy region of `mem` MiB. The button applies the clock at once; memory
+  and workers need a restart.
+- `./build3ds.sh --o3ds-sim` also builds `build-3ds/cia/ctr3d-o3dssim.cia` (own
+  title ID 0x0004000005A2C400, SystemModeExt Legacy, SystemMode `O3DS_MEM`
+  default 80MB, 268MHz, no L2). It installs next to the normal CIA and shares the
+  SD folder. The game detects the small region and simulates the rest.
 
 ## Build options
 

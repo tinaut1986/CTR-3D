@@ -1420,15 +1420,14 @@ void N3DS_AudioThreadInit(void)
 		}
 	}
 
-	isNew3DS = false;
-	APT_CheckNew3DS(&isNew3DS);
+	isNew3DS = N3DS_ExtraCoresUsable(); /* false on an Old 3DS and in the Old-3DS simulation */
 	if (!isNew3DS)
 	{
 		/* This project targets New3DS-XL only, but fail safe rather than
 		 * assume -- never fall back to a same-core thread (see "What
 		 * changed from v1" in the design doc: core_id=-1 does NOT mean "any
 		 * free core", it means "all CPUs", which resolves to core 0 here). */
-		N3DS_DebugLog("[CTR-3DS] audio worker: NO (APT says not New3DS) -- main-thread fallback");
+		N3DS_DebugLog("[CTR-3DS] audio worker: NO (not a New3DS, or Old-3DS simulation) -- main-thread fallback");
 		return;
 	}
 

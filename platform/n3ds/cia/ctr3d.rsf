@@ -1,6 +1,6 @@
 BasicInfo:
-  Title                   : "CTR 3D"
-  ProductCode             : "CTR-P-CT3D"
+  Title                   : "$(APP_TITLE)"
+  ProductCode             : "$(APP_PRODUCT_CODE)"
   Logo                    : Homebrew # as the author's other CIAs (zelda-tmc-3ds, sm-3ds); the ExeFS logo is the same type
 
 #RomFs:
@@ -9,7 +9,7 @@ BasicInfo:
 
 TitleInfo:
   Category                : Application
-  UniqueId                : 0x5A2C3 # own title ID, picked to avoid the ones used by the author's other builds
+  UniqueId                : $(APP_UNIQUE_ID) # own title ID, picked to avoid the ones used by the author's other builds
 
 Option:
   UseOnSD                 : true # true if App is to be installed to SD
@@ -57,7 +57,7 @@ AccessControlInfo:
 
   # Process Settings
   MemoryType                    : Application # Application/System/Base
-  SystemMode                    : 64MB # legacy mode (O3DS fallback); the real budget comes from SystemModeExt below
+  SystemMode                    : $(APP_SYSTEM_MODE) # legacy mode (Old 3DS/2DS); package-cia.sh default 64MB, 80MB for the O3DS builds; a New 3DS uses SystemModeExt below
   IdealProcessor                : 0
   AffinityMask                  : 3 # cores 0 and 1: the audio thread runs on core 1 (as sm-3ds / mzm)
   Priority                      : 16
@@ -74,9 +74,9 @@ AccessControlInfo:
   SpecialMemoryArrange          : true
 
   # New3DS Exclusive Process Settings
-  SystemModeExt                 : $(APP_SYSTEM_MODE_EXT) # 124MB or 178MB; package-cia.sh defaults to 178MB. The port needs far more than the 64MB legacy app region.
-  CpuSpeed                      : 804MHz # 256MHz(Default)/804MHz
-  EnableL2Cache                 : true # false(default)/true
+  SystemModeExt                 : $(APP_SYSTEM_MODE_EXT) # Legacy (= use SystemMode above, the Old-3DS simulation CIA), 124MB or 178MB; package-cia.sh defaults to 178MB. The port needs far more than the 64MB legacy app region.
+  CpuSpeed                      : $(APP_CPU_SPEED) # 256MHz(Default)/804MHz
+  EnableL2Cache                 : $(APP_L2_CACHE) # false(default)/true
   CanAccessCore2                : true
 
   # Virtual Address Mappings
@@ -167,6 +167,7 @@ AccessControlInfo:
    - news:u
    - nwm::UDS
    - ptm:u
+   - ptm:sysm # osSetSpeedupEnable (libctru) configures the New 3DS clock + L2 through it; without it the DEBUG/Options clock toggle and the Old-3DS simulation cannot change the exheader's CpuSpeed/L2
    - pxi:dev
    - soc:U
    - ssl:C

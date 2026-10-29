@@ -5,6 +5,8 @@
 #
 #   ./build3ds.sh                       build/refresh both
 #   ./build3ds.sh --no-cia              .3dsx only
+#   ./build3ds.sh --o3ds-sim            also build build-3ds/cia/ctr3d-o3dssim.cia (Old-3DS
+#                                       simulation CIA; O3DS_MEM=64MB|72MB|80MB|96MB, default 80MB)
 #   ./build3ds.sh --install [IP[:PORT]] build, then send the CIA to the running game's
 #                                       FTP server and have it install + relaunch
 #                                       (IP is remembered in .3ds_ftp_ip; port default 5000).
@@ -22,14 +24,16 @@ BUILD=build-3ds
 DEVKITPRO="${DEVKITPRO:-/opt/devkitpro}"
 CIA_PATH="/3ds/ctr_native/update/dev.cia"
 DO_CIA=1
+O3DS_SIM_CIA=0
 INSTALL=0
 HOST=""
 while [[ $# -gt 0 ]]; do
     case "$1" in
         --no-cia) DO_CIA=0 ;;
+        --o3ds-sim) O3DS_SIM_CIA=1 ;;
         --install) INSTALL=1; DO_CIA=1
             if [[ $# -gt 1 && "$2" != --* ]]; then HOST="$2"; shift; fi ;;
-        -h|--help) sed -n '2,16p' "$0"; exit 0 ;;
+        -h|--help) sed -n '2,18p' "$0"; exit 0 ;;
         *) echo "unknown option: $1 (see --help)" >&2; exit 2 ;;
     esac
     shift
@@ -45,6 +49,9 @@ echo "Built ${BUILD}/ctr_native.3dsx"
 
 if [[ $DO_CIA -eq 1 ]]; then
     ./package-cia.sh "${BUILD}" || exit $?
+    if [[ $O3DS_SIM_CIA -eq 1 ]]; then
+        O3DS_SIM=1 ./package-cia.sh "${BUILD}" || exit $?
+    fi
 fi
 
 if [[ $INSTALL -eq 1 ]]; then

@@ -47,15 +47,14 @@ int N3DS_RenderWorkerStart(void (*workerMain)(void))
 	LightEvent_Init(&s_workEvent, RESET_STICKY);
 	LightEvent_Init(&s_doneEvent, RESET_STICKY);
 
-	isNew3DS = false;
-	APT_CheckNew3DS(&isNew3DS);
+	isNew3DS = N3DS_ExtraCoresUsable(); /* false on an Old 3DS and in the Old-3DS simulation */
 	if (!isNew3DS)
 	{
 		/* Target is New3DS-XL only, but fail safe rather than assume. Core 2
 		 * does not exist on old hardware, and core_id=-1 means "all CPUs"
 		 * (which resolves to core 0), never "any free core" -- same trap the
 		 * audio design doc documents for core 1. */
-		N3DS_DebugLog("[CTR-3DS] render worker: NO (APT says not New3DS) -- sync fallback");
+		N3DS_DebugLog("[CTR-3DS] render worker: NO (not a New3DS, or Old-3DS simulation) -- sync fallback");
 		return 0;
 	}
 

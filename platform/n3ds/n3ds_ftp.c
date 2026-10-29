@@ -1198,6 +1198,11 @@ static int N3DS_FtpStartThread(void)
 		N3DS_DebugLog("[CTR-3DS] ftp: NO (not a New3DS, no spare core)");
 		return 0;
 	}
+	if (!N3DS_O3dsSimFtpAllowed())
+	{
+		N3DS_DebugLog("[CTR-3DS] ftp: NO (Old-3DS simulation with ftp=0)");
+		return 0;
+	}
 	if (!N3DS_NetEnsureSoc())
 	{
 		N3DS_DebugLog("[CTR-3DS] ftp: NO (socket service unavailable)");

@@ -1940,6 +1940,7 @@ static int NativeTrackAtlas_UploadToBackend(struct mesh_info *mesh, int numQuadB
 	Platform_Log("[TRKATLAS3DS] units=%d/%d rects=%d/%d stp=%d p2drop=%d skipOversize=%d skipNoUnit=%d texels=%u KB=%u us=%d freeKiB=%u\n", allocated,
 	             atlas->unitsUsed, rectsUploaded, atlas->rectCount, stpRectsUploaded, atlas->p2Dropped, skipOversize, skipNoUnit,
 	             texelsDecoded, (texelsDecoded * 2u) / 1024u, (int)elapsedUs, freeKiB);
+	N3DS_MemLog("trackatlas");
 
 	if (allocated < atlas->unitsUsed)
 	{

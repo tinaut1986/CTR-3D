@@ -305,6 +305,123 @@ void N3DS_ConfigSet(const char *key, int value)
 	N3DS_ConfigWrite();
 }
 
+/*
+ * Old-3DS simulation on a New 3DS (see docs/3DS_PORT.md, "Old 3DS").
+ *
+ * Switched on by an `o3ds-sim.txt` in the app dir (DEBUG > ACTIONS toggles it)
+ * or automatically when a New 3DS runs a legacy-mode CIA (package-cia.sh
+ * O3DS_SIM=1: SystemModeExt Legacy, app region <= 96 MiB). It then
+ *   - turns the 804 MHz clock-up (and with it the L2 cache) off at start,
+ *   - makes the render worker and the audio worker unavailable, exactly as
+ *     the `!isNew3DS` branches do on a real Old 3DS (cores 2/3 do not exist),
+ *   - with the file only: parks ballast so heap + linear match a legacy app
+ *     region of `mem=NN` MiB (default 80; a legacy-mode CIA already is one).
+ * The FTP server keeps running (on core 3 -- no game thread shares that core)
+ * so the log stays reachable; `ftp=0` in the file turns it off too.
+ * File contents: optional words `mem=NN` and `ftp=0`.
+ * Memory and threads need a restart; the clock applies at once.
+ */
+#define N3DS_O3DS_SIM_FILE N3DS_APP_DIR "/o3ds-sim.txt"
+#define N3DS_O3DS_SIM_DEFAULT_MIB 80
+static int s_o3dsSim = 0;     /* 0 off, 1 flag file, 2 legacy-mode CIA */
+static int s_o3dsSimMem = 0;  /* MiB cap to emulate, 0 = none */
+static int s_o3dsSimFtp = 1;
+
+void N3DS_O3dsSimInit(void)
+{
+	bool isNew3DS = false;
+	FILE *f;
+
+	APT_CheckNew3DS(&isNew3DS);
+	if (!isNew3DS)
+	{
+		return; /* a real Old 3DS needs no simulation */
+	}
+	f = fopen(N3DS_O3DS_SIM_FILE, "rb");
+	if (f != NULL)
+	{
+		char buf[128];
+		const size_t n = fread(buf, 1, sizeof(buf) - 1, f);
+		const char *p;
+
+		fclose(f);
+		buf[n] = '\0';
+		s_o3dsSim = 1;
+		s_o3dsSimMem = N3DS_O3DS_SIM_DEFAULT_MIB;
+		p = strstr(buf, "mem=");
+		if ((p != NULL) && (atoi(p + 4) >= 40))
+		{
+			s_o3dsSimMem = atoi(p + 4);
+		}
+		p = strstr(buf, "ftp=0");
+		s_o3dsSimFtp = (p == NULL);
+	}
+	else if (osGetMemRegionSize(MEMREGION_APPLICATION) <= (96u << 20))
+	{
+		s_o3dsSim = 2; /* legacy-mode CIA: the region itself is the cap */
+	}
+	if (s_o3dsSim)
+	{
+		char msg[160];
+
+		snprintf(msg, sizeof(msg), "[O3DS-SIM] ACTIVE (%s): clock-up off, no core-2/3 workers, ftp %s, memory cap %d MiB%s",
+		         (s_o3dsSim == 1) ? "o3ds-sim.txt" : "legacy-mode CIA", s_o3dsSimFtp ? "on" : "off", s_o3dsSimMem,
+		         (s_o3dsSim == 2) ? " (real region)" : "");
+		N3DS_DebugLog(msg);
+	}
+}
+
+int N3DS_O3dsSimActive(void)
+{
+	return s_o3dsSim;
+}
+
+int N3DS_O3dsSimFtpAllowed(void)
+{
+	return !s_o3dsSim || s_o3dsSimFtp;
+}
+
+/* Cores 2 and 3 usable: a real New 3DS that is not pretending to be an old one. */
+int N3DS_ExtraCoresUsable(void)
+{
+	bool isNew3DS = false;
+
+	APT_CheckNew3DS(&isNew3DS);
+	return isNew3DS && !s_o3dsSim;
+}
+
+/* DEBUG > ACTIONS: create/remove the flag file. Takes effect at the next start
+ * (the clock part is applied here at once). Returns the new state. */
+int N3DS_O3dsSimToggleFile(void)
+{
+	int now = (s_o3dsSim == 1);
+
+	if (s_o3dsSim == 2)
+	{
+		return 2; /* a legacy-mode CIA is always simulating */
+	}
+	if (now)
+	{
+		remove(N3DS_O3DS_SIM_FILE);
+		s_o3dsSim = 0;
+		N3DS_SetSpeedup(N3DS_ConfigGet("cpu804", 1));
+	}
+	else
+	{
+		FILE *f = fopen(N3DS_O3DS_SIM_FILE, "wb");
+
+		if (f != NULL)
+		{
+			fputs("mem=80\n", f);
+			fclose(f);
+		}
+		s_o3dsSim = 1;
+		s_o3dsSimMem = N3DS_O3DS_SIM_DEFAULT_MIB;
+		N3DS_SetSpeedup(0);
+	}
+	return s_o3dsSim;
+}
+
 void N3DS_EarlyInit(void)
 {
 	/* Before anything can call N3DS_DebugLog (the netload-stream connect
@@ -325,6 +442,7 @@ void N3DS_EarlyInit(void)
 	mkdir("sdmc:/3ds", 0777);
 	mkdir(N3DS_APP_DIR, 0777);
 	N3DS_ConfigLoad();
+	N3DS_O3dsSimInit();
 	{
 		extern int g_dbg_btmMap;
 		extern int g_dbg_stereo;
@@ -631,6 +749,7 @@ void N3DS_ShowFatalAssetScreen(const char *assetDir)
  * libctru has no getter. */
 int g_n3dsSpeedup = 1;
 
+static void N3DS_LogSpeedupAccess(int on);
 void N3DS_HeapDescribe(char *out, unsigned cap); /* n3ds_heap.c */
 unsigned long N3DS_LinearHeapSize(void);
 
@@ -681,7 +800,18 @@ void N3DS_GfxInit(void)
 	 * Harmless on an Old3DS, where libctru makes it a no-op.
 	 */
 	g_n3dsSpeedup = N3DS_ConfigGet("cpu804", 1) ? 1 : 0;
+	if (s_o3dsSim)
+	{
+		g_n3dsSpeedup = 0; /* Old-3DS simulation: 268 MHz, no L2 (cpu804 in the cfg is left alone) */
+	}
 	osSetSpeedupEnable(g_n3dsSpeedup != 0);
+	N3DS_LogSpeedupAccess(g_n3dsSpeedup);
+	if (s_o3dsSim == 1)
+	{
+		/* Before anything takes linear memory: gfxInit follows. */
+		N3DS_HeapSimCap((unsigned)s_o3dsSimMem);
+	}
+	N3DS_MemLog("gfxinit");
 
 	gfxInitDefault();
 
@@ -2685,6 +2815,12 @@ int N3DS_TrackGeom_Upload(const void *verts, int vertCount, int vertStride, cons
 	BufInfo_Add(&s_trackBufInfo, s_trackGeomMem, vertStride, 3, 0x210);
 
 	s_trackGeomReady = 1;
+	{
+		char tag[48];
+
+		snprintf(tag, sizeof(tag), "trackgeom +%uKiB", (unsigned)(totalBytes / 1024u));
+		N3DS_MemLog(tag);
+	}
 	return 1;
 }
 
@@ -6041,9 +6177,7 @@ unsigned int N3DS_ReadButtons(void)
 
 unsigned long N3DS_HeapUsedBytes(void)
 {
-	struct mallinfo mi = mallinfo();
-
-	return (unsigned long)mi.uordblks;
+	return N3DS_HeapGameUsedBytes(); /* simulation ballast excluded */
 }
 
 unsigned long N3DS_LinearFreeBytes(void)
@@ -6062,9 +6196,27 @@ float N3DS_StereoSliderState(void)
 	return osGet3DSliderState();
 }
 
+/* Does this process hold ptm:sysm? osSetSpeedupEnable silently does nothing
+ * without it (the CIA's exheader must list the service). Logged so a
+ * non-working clock toggle is visible. */
+static void N3DS_LogSpeedupAccess(int on)
+{
+	char msg[96];
+	const Result rc = ptmSysmInit();
+
+	if (R_SUCCEEDED(rc))
+	{
+		ptmSysmExit();
+	}
+	snprintf(msg, sizeof(msg), "[CTR-3DS] speedup %s: ptm:sysm %s (rc=0x%08lx)", on ? "on" : "off", R_SUCCEEDED(rc) ? "available" : "DENIED -- toggle has no effect",
+	         (unsigned long)rc);
+	N3DS_DebugLog(msg);
+}
+
 void N3DS_SetSpeedup(int on)
 {
 	osSetSpeedupEnable(on != 0);
+	N3DS_LogSpeedupAccess(on);
 	g_n3dsSpeedup = (on != 0);
 	N3DS_DebugLog(on ? "[CTR-3DS] speedup: New3DS clock-up enabled" : "[CTR-3DS] speedup: New3DS clock-up disabled");
 }
@@ -6088,7 +6240,13 @@ static void N3DS_BeatMainTick(void)
 	static unsigned int s_beatPrevRwCounter;
 	static u64 s_beatMainStallStartTick;
 	static unsigned int s_beatPostThawFrames;
+	static unsigned int s_memSampleDiv;
 	const u64 now = svcGetSystemTick();
+
+	if ((++s_memSampleDiv & 7u) == 0)
+	{
+		N3DS_MemSample(); /* heap extent / linear free water marks, see N3DS_MemLog */
+	}
 
 	if (s_beatLastTick != 0)
 	{

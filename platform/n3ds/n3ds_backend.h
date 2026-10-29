@@ -692,6 +692,19 @@ void N3DS_DebugSetVRAMForDump(const void *vram, unsigned int bytes, const unsign
  * Reported on screen so runaway allocation is visible as it happens. */
 unsigned long N3DS_HeapUsedBytes(void);
 unsigned long N3DS_LinearFreeBytes(void);
+unsigned long N3DS_HeapGameUsedBytes(void); /* same as HeapUsedBytes (ballast excluded) */
+unsigned long N3DS_HeapFreeBytes(void);     /* heap window minus handed-out bytes */
+unsigned long N3DS_HeapBallastBytes(void);  /* Old-3DS simulation ballast (0 normally) */
+void N3DS_MemSample(void);                  /* fold heap extent / linear free into the water marks */
+void N3DS_MemLog(const char *tag);          /* one "[MEM] tag ..." line: heap, peaks, linear free/min */
+int N3DS_HeapSimCap(unsigned capMiB);       /* Old-3DS simulation: park ballast to a legacy region */
+
+/* Old-3DS simulation on a New 3DS (n3ds_backend.c). */
+void N3DS_O3dsSimInit(void);
+int N3DS_O3dsSimActive(void);       /* 0 off, 1 o3ds-sim.txt, 2 legacy-mode CIA */
+int N3DS_O3dsSimFtpAllowed(void);
+int N3DS_O3dsSimToggleFile(void);   /* DEBUG > ACTIONS; returns the new state */
+int N3DS_ExtraCoresUsable(void);    /* New 3DS and not simulating an Old one */
 
 /* Read-only state for the bottom-screen UI (n3ds_bottomui.c). */
 int N3DS_StereoFrameActive(void);   /* this frame rendered both eyes */

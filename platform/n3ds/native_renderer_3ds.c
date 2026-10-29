@@ -5026,6 +5026,7 @@ void NativeRenderer_SwapWindow(void)
 		         NativeAudio_XAStreamSectorsBuffered(), NATIVE_AUDIO_XA_RING_SECTORS, s_audio.xaStream.underrunEvents,
 		         s_audio.voicePcmArena.capacity / 1024, (int)sdata->mainGameState);
 		N3DS_DebugLog(line);
+		N3DS_MemLog("window");
 
 		/*
 		 * Texture decode cache diagnostics -- added to check whether the cache
