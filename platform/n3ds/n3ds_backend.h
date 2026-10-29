@@ -323,6 +323,18 @@ int N3DS_C3DFrameVertexHighWater(void);
 #else
 #define N3DS_ATLAS_COUNT           12
 #endif
+/*
+ * N3DS_ATLAS_COUNT is the MAXIMUM (array sizes). N3DS_C3DInit allocates as many
+ * as the linear heap holds after keeping room for what is allocated later
+ * (N3DS_LINEAR_AFTER_ATLASES in n3ds_backend.c), between N3DS_ATLAS_MIN_COUNT
+ * and N3DS_ATLAS_COUNT: all 11 on a New 3DS (unchanged), 7-8 in a legacy
+ * Old 3DS region. The decode cache keeps its 96 full-page cells at every count
+ * (native_renderer_3ds.c); only the sub-page tier shrinks: 13 physical cells =
+ * 208 slots at 7 atlases against a measured peak of ~86 slots. Fewer atlases
+ * are therefore the same full-page hit rate, not a correctness change.
+ */
+#define N3DS_ATLAS_MIN_COUNT       7
+int N3DS_C3DAtlasCount(void);
 #define N3DS_ATLAS_DIM             1024
 #define N3DS_ATLAS_CELLS_PER_ROW   (N3DS_ATLAS_DIM / N3DS_DECODE_TEXTURE_DIM)
 #define N3DS_ATLAS_CELLS_PER_ATLAS (N3DS_ATLAS_CELLS_PER_ROW * N3DS_ATLAS_CELLS_PER_ROW)
@@ -697,7 +709,15 @@ unsigned long N3DS_HeapFreeBytes(void);     /* heap window minus handed-out byte
 unsigned long N3DS_HeapBallastBytes(void);  /* Old-3DS simulation ballast (0 normally) */
 void N3DS_MemSample(void);                  /* fold heap extent / linear free into the water marks */
 void N3DS_MemLog(const char *tag);          /* one "[MEM] tag ..." line: heap, peaks, linear free/min */
+void N3DS_MemLevelBegin(void);              /* "[MEM] level-end" line for the level before, then reset the per-level marks */
 int N3DS_HeapSimCap(unsigned capMiB);       /* Old-3DS simulation: park ballast to a legacy region */
+unsigned long N3DS_LinearHeapSize(void);    /* the linear heap's size (n3ds_heap.c split) */
+unsigned long N3DS_LinearAfterAtlases(void); /* linear kept free at init for what follows the decode atlases */
+unsigned long N3DS_HwVoiceStoreBytes(void);  /* hw-voice sample store size (n3ds_audio_thread.c) */
+/* An allocation the game cannot run without failed (level load, any thread):
+ * the main loop shows the fatal memory screen with these numbers and quits.
+ * First call wins; later ones are logged only. */
+void N3DS_FatalMemRequest(const char *what, unsigned long bytes);
 
 /* Old-3DS simulation on a New 3DS (n3ds_backend.c). */
 void N3DS_O3dsSimInit(void);

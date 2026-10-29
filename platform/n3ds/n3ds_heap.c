@@ -9,34 +9,43 @@
  * frames) while the .3dsx worked. Sized here from what the process may commit,
  * for every launch mode alike (HBL, CIA, 124/178 MB New 3DS, 64 MB Old 3DS).
  *
- * LINEAR BUDGET (audit of every linearAlloc / C3D_TexInit / gfx buffer):
- *   gfx framebuffers (top L+R double buffered, bottom)           ~1.6 MiB
- *   citro3d command buffer (4 x 256 KiB)                          1.0 MiB
- *   frame vertex buffer (65536 x 16 B)                             1.0 MiB
- *   11 decode atlases (1024^2 RGBA5551 = 2 MiB each)              22.0 MiB
- *   8 track atlas units (512^2 RGBA5551 = 512 KiB each)            4.0 MiB
- *   VRAM display textures (4 x 128 KiB) + bottom UI texture        0.8 MiB
- *   hw-voice sample store                                          3.0 MiB
- *   ndsp PCM blocks, audio and misc (measured: ~9 MiB were in use
- *     before the atlases in the hardware log, including the above)  ~7 MiB
- *   one level's track geometry (linearAlloc per level)             ~4 MiB
- *   => REQUIRED about 48 MiB; the XA voice cache wants 32 MiB more
- *      and has a fallback (voice lines stay on the SD path).
- * Render targets live in VRAM, not here.
+ * LINEAR BUDGET (audit of every linearAlloc / C3D_TexInit / gfx buffer; sizes
+ * from the code, libctru's gfx.o and citro3d checked by disassembly):
+ *                                                       New 3DS      Old 3DS (lean)
+ *   gfx framebuffers: top 2 x 800x240x3 (gfxInit always
+ *     allocates the stereo width; gfxSet3D allocates
+ *     nothing) + bottom 2 x 320x240x3                  1575 KiB     1575 KiB
+ *   citro3d command buffer (C3D_Init, 4 x 256 KiB)     1024 KiB     1024 KiB
+ *   frame vertex buffer (65536 x 16 B)                 1024 KiB     1024 KiB
+ *   decode atlases (1024^2 RGBA5551 = 2 MiB each)      11 = 22 MiB  7 = 14 MiB
+ *   VRAM display textures (4 x 256^2 x 2)               512 KiB      512 KiB
+ *   bottom UI texture (512 x 256 x 2)                   256 KiB      256 KiB
+ *   ndsp PCM blocks (6 x 5880 x 4 B)                    138 KiB      138 KiB
+ *   hw-voice sample store                              3 MiB        2 MiB
+ *   track atlas (up to 8 x 512^2 x 2, per level)       4 MiB        4 MiB
+ *   track geometry (one linearAlloc per level)         ~4 MiB       ~4 MiB
+ *   => ~37.5 MiB New 3DS (the XA voice cache is HEAP, not linear);
+ *      ~28.4 MiB lean, which N3DS_LINEAR_LEAN (32 MiB) holds with ~3.5 MiB spare.
+ * Render targets live in VRAM, not here. The atlas count and the store size
+ * follow the linear heap at runtime (N3DS_C3DInit, N3DS_HwVoiceStoreBytes):
+ * a New 3DS gets exactly what it had before.
  *
- * Policy: linear first, up to LINEAR_WANT (required + margin + voice cache),
- * but the application heap keeps at least HEAP_FLOOR; the heap takes the rest
- * up to its address window (OS_HEAP_AREA, ~96 MiB). If even the required part
- * cannot be had (Old 3DS 64 MB), fall back to an even split and say so in the
- * log; nothing here panics while a smaller size still works.
+ * Policy (commit >= LINEAR_REQUIRED + HEAP_FLOOR: New 3DS 124/178 MB, HBL):
+ * linear first, up to LINEAR_WANT (required + margin + room), but the
+ * application heap keeps at least HEAP_FLOOR (sized for the 32 MiB XA voice
+ * cache); the heap takes the rest up to its address window (OS_HEAP_AREA,
+ * ~96 MiB). Unchanged from before.
  *
- * LEAN POLICY (legacy app region, Old 3DS): when the commit cannot hold
- * LINEAR_REQUIRED + HEAP_FLOOR, the 48 MiB heap floor (sized for the 32 MiB XA
- * voice cache) is NOT honoured; the heap gets only HEAP_LEAN (measured: the
- * New 3DS log peaks at ~16 MiB of malloc outside the voice cache, ~8 MiB in a
- * race) and linear gets the rest up to LINEAR_REQUIRED. The voice cache sizes
- * itself to the heap that is left (native_audio.c), so it shrinks or drops.
- * Unchanged for any commit >= 96 MiB (New 3DS, HBL).
+ * LEAN POLICY (legacy app region: Old 3DS / 2DS, SystemMode 80 MB): linear gets
+ * N3DS_LINEAR_LEAN and the heap everything else; the heap's measured need
+ * outside the voice cache is ~15 MiB at the loading peak, ~7.5 MiB in a race,
+ * and the voice cache sizes itself to what is left (native_audio.c) or stays
+ * on the SD path. With ~18.5 MiB of code+bss+stacks (debug build):
+ *   80 MB: commit ~61.5 MiB -> linear 32, heap ~29.5 MiB
+ *   72 MB: commit ~53.5 MiB -> linear 32, heap ~21.5 MiB
+ *   64 MB: commit ~45.5 MiB -> linear 30, heap ~15.5 MiB (below the loading peak:
+ *          not expected to fit, the [MEM] lines will say)
+ * Below that, an even split; the game's fatal screens report what is missing.
  *
  * OLD-3DS SIMULATION (N3DS_HeapSimCap): the split is computed here, before the
  * SD card exists, so a flag file cannot steer it. Instead the game, once the
@@ -58,14 +67,15 @@ u32 __ctru_heap_size = 0;
 u32 __ctru_linear_heap_size = 0;
 
 #define N3DS_MIB (1u << 20)
-#define N3DS_LINEAR_REQUIRED (48u * N3DS_MIB)
+#define N3DS_LINEAR_REQUIRED (48u * N3DS_MIB) /* New 3DS budget + margin: the full policy's floor */
 #define N3DS_LINEAR_WANT (88u * N3DS_MIB)
 #define N3DS_HEAP_FLOOR (48u * N3DS_MIB)
-#define N3DS_HEAP_MIN (24u * N3DS_MIB)
+#define N3DS_HEAP_MIN (12u * N3DS_MIB)
 #define N3DS_LINEAR_MIN (8u * N3DS_MIB)
 #define N3DS_HEAP_STEP (4u * N3DS_MIB)
-#define N3DS_HEAP_LEAN (20u * N3DS_MIB)
-#define N3DS_LINEAR_VIABLE (36u * N3DS_MIB)
+#define N3DS_LINEAR_LEAN (32u * N3DS_MIB)     /* lean linear: the Old-3DS budget above + ~3.5 MiB */
+#define N3DS_LINEAR_LEAN_MIN (30u * N3DS_MIB) /* the lean budget + ~1.5 MiB: below this, expect failures */
+#define N3DS_HEAP_LEAN (18u * N3DS_MIB)       /* loading peak ~15 MiB + 3 MiB */
 
 static u32 s_commitRemaining = 0;
 static u32 s_simBallastHeap = 0;
@@ -91,19 +101,22 @@ static u32 N3DS_LinearPlan(u32 remaining)
 	}
 	if (linear < N3DS_LINEAR_REQUIRED)
 	{
-		/* Cannot give the renderer what it needs AND keep the heap floor
-		 * (Old 3DS). Lean: heap down to HEAP_LEAN, linear up to REQUIRED. */
-		if (remaining > N3DS_HEAP_LEAN + N3DS_LINEAR_VIABLE)
+		/* Legacy region (Old 3DS): the lean split, see LEAN POLICY above. */
+		if (remaining >= N3DS_LINEAR_LEAN + N3DS_HEAP_LEAN)
+		{
+			linear = N3DS_LINEAR_LEAN;
+		}
+		else if (remaining >= N3DS_LINEAR_LEAN_MIN + N3DS_HEAP_LEAN)
 		{
 			linear = remaining - N3DS_HEAP_LEAN;
-			if (linear > N3DS_LINEAR_REQUIRED)
-			{
-				linear = N3DS_LINEAR_REQUIRED;
-			}
+		}
+		else if (remaining >= N3DS_LINEAR_LEAN_MIN + N3DS_HEAP_MIN)
+		{
+			linear = N3DS_LINEAR_LEAN_MIN; /* heap below its loading peak: the logs will show it */
 		}
 		else
 		{
-			/* Not even lean fits: even split, the game logs what does not. */
+			/* Not even that fits: even split, the game logs what does not. */
 			linear = remaining / 2;
 		}
 	}
@@ -198,21 +211,33 @@ void __system_allocateHeaps(void)
 /* One line for the boot log: what was chosen, from what, against what need. */
 void N3DS_HeapDescribe(char *out, unsigned cap)
 {
-	snprintf(out, cap, "[CTR-3DS] heaps: app heap %lu KiB, linear %lu KiB (commit left %lu KiB; linear need ~%lu KiB%s)",
-	         (unsigned long)(__ctru_heap_size / 1024), (unsigned long)(__ctru_linear_heap_size / 1024),
-	         (unsigned long)(s_commitRemaining / 1024), (unsigned long)(N3DS_LINEAR_REQUIRED / 1024),
-	         (__ctru_linear_heap_size < N3DS_LINEAR_REQUIRED) ? " -- TOO SMALL, expect failures" : "");
+	/* Effective sizes: the Old-3DS simulation's ballast is left out. */
+	const u32 heap = __ctru_heap_size - s_simBallastHeap;
+	const u32 linear = __ctru_linear_heap_size - s_simBallastLinear;
+
+	snprintf(out, cap, "[CTR-3DS] heaps: app heap %lu KiB, linear %lu KiB (commit left %lu KiB; %s split; linear need ~%lu KiB, heap need ~%lu KiB%s%s%s)",
+	         (unsigned long)(heap / 1024), (unsigned long)(linear / 1024), (unsigned long)(s_commitRemaining / 1024),
+	         (linear < N3DS_LINEAR_REQUIRED) ? "lean (legacy region)" : "full", (unsigned long)(N3DS_LINEAR_LEAN_MIN / 1024),
+	         (unsigned long)(N3DS_HEAP_LEAN / 1024), (linear < N3DS_LINEAR_LEAN_MIN) ? " -- LINEAR TOO SMALL, expect failures" : "",
+	         (heap < N3DS_HEAP_LEAN) ? " -- HEAP TIGHT, loading may fail" : "", (s_simBallastHeap | s_simBallastLinear) ? "; O3DS-SIM ballast excluded" : "");
 }
 
+/* The linear heap the game may use: the Old-3DS simulation's ballast is not
+ * part of it, so the runtime sizing (atlas count, hw-voice store) behaves as
+ * it would in the real legacy region. */
 unsigned long N3DS_LinearHeapSize(void)
 {
-	return (unsigned long)__ctru_linear_heap_size;
+	return (unsigned long)(__ctru_linear_heap_size - s_simBallastLinear);
 }
 
 /* ------------------------------------------------- memory accounting / sim --- */
 
 static unsigned long s_arenaPeak = 0;
 static unsigned long s_linearMin = 0xFFFFFFFFul;
+/* The same marks since the current level started loading (N3DS_MemLevelBegin). */
+static unsigned long s_levelArenaPeak = 0;
+static unsigned long s_levelLinearMin = 0xFFFFFFFFul;
+static unsigned s_levelIndex = 0;
 
 unsigned long N3DS_HeapBallastBytes(void)
 {
@@ -251,6 +276,37 @@ void N3DS_MemSample(void)
 	{
 		s_linearMin = lin;
 	}
+	if (arena > s_levelArenaPeak)
+	{
+		s_levelArenaPeak = arena;
+	}
+	if (lin < s_levelLinearMin)
+	{
+		s_levelLinearMin = lin;
+	}
+}
+
+/*
+ * Called when a level starts loading (the track atlas upload of a new level):
+ * one line with the water marks of everything since the previous call -- the
+ * previous level's load AND race -- then the per-level marks restart from now.
+ * grep "[MEM] level-end" for each level's worst heap extent and lowest linear.
+ */
+void N3DS_MemLevelBegin(void)
+{
+	char line[200];
+
+	N3DS_MemSample();
+	if (s_levelIndex > 0)
+	{
+		snprintf(line, sizeof(line), "[MEM] level-end #%u heapArenaPeak=%lu KiB of %lu KiB | linMin=%lu KiB of %lu KiB", s_levelIndex,
+		         (s_levelArenaPeak > s_simBallastHeap ? s_levelArenaPeak - s_simBallastHeap : 0ul) / 1024ul,
+		         (unsigned long)((__ctru_heap_size - s_simBallastHeap) / 1024), s_levelLinearMin / 1024ul, N3DS_LinearHeapSize() / 1024ul);
+		N3DS_DebugLog(line);
+	}
+	s_levelIndex++;
+	s_levelArenaPeak = (unsigned long)((u32)sbrk(0) - __ctru_heap);
+	s_levelLinearMin = (unsigned long)linearSpaceFree();
 }
 
 /* One log line with every memory number worth keeping: grep "[MEM]" in the
@@ -305,9 +361,10 @@ int N3DS_HeapSimCap(unsigned capMiB)
 	}
 	simLinear = N3DS_LinearPlan(simRemaining);
 	simHeap = N3DS_HeapPlan(simRemaining, simLinear);
-	snprintf(line, sizeof(line), "[O3DS-SIM] legacy split would be: heap %lu KiB, linear %lu KiB (linear need ~%lu KiB%s)", (unsigned long)(simHeap / 1024),
-	         (unsigned long)(simLinear / 1024), (unsigned long)(N3DS_LINEAR_REQUIRED / 1024),
-	         (simLinear < N3DS_LINEAR_REQUIRED) ? " -- TOO SMALL, expect failures" : "");
+	snprintf(line, sizeof(line), "[O3DS-SIM] legacy split would be: heap %lu KiB, linear %lu KiB (linear need ~%lu KiB, heap need ~%lu KiB%s%s)",
+	         (unsigned long)(simHeap / 1024), (unsigned long)(simLinear / 1024), (unsigned long)(N3DS_LINEAR_LEAN_MIN / 1024),
+	         (unsigned long)(N3DS_HEAP_LEAN / 1024), (simLinear < N3DS_LINEAR_LEAN_MIN) ? " -- LINEAR TOO SMALL, expect failures" : "",
+	         (simHeap < N3DS_HEAP_LEAN) ? " -- HEAP TIGHT" : "");
 	N3DS_DebugLog(line);
 
 	/* Linear ballast first (nothing has used linear yet). */

@@ -1831,6 +1831,8 @@ static int NativeTrackAtlas_UploadToBackend(struct mesh_info *mesh, int numQuadB
 		s_retryQb = numQuadBlock;
 		s_retryVtx = numVertex;
 		s_retryCount = 0;
+		/* A new level: close the previous level's [MEM] water marks. */
+		N3DS_MemLevelBegin();
 	}
 
 	if (atlas->unitsUsed <= 0)
@@ -1950,6 +1952,10 @@ static int NativeTrackAtlas_UploadToBackend(struct mesh_info *mesh, int numQuadB
 		{
 			Platform_Log("[TRKATLAS3DS] GIVEUP units=%d/%d after %d tries -- latching with partial atlas\n", allocated, atlas->unitsUsed, s_retryCount);
 			s_retryCount = 0;
+			/* Out of linear memory at level load: the fatal screen with the
+			 * numbers, not a level with untextured track. */
+			N3DS_FatalMemRequest("track atlas (level load)",
+			                     (unsigned long)(atlas->unitsUsed - allocated) * (unsigned long)(N3DS_TRACK_ATLAS_DIM * N3DS_TRACK_ATLAS_DIM * 2));
 			return 1;
 		}
 
@@ -2134,6 +2140,10 @@ static int NativeTrackGeom_UploadToBackend(struct mesh_info *mesh, int numQuadBl
 		Platform_Log("[TRKGEOM3DS] GIVEUP after %d tries -- latching level with NO resident geometry\n", s_retryCount);
 		s_retryCount = 0;
 		N3DS_TrackGeom_Free();
+		/* Without the resident geometry the track is invisible: say so on the
+		 * fatal screen instead of running blind. */
+		N3DS_FatalMemRequest("track geometry (level load)",
+		                     (unsigned long)(s_trackMesh.vertCount * sizeof(N3DS_TrackVertex) + s_trackMesh.indexCount * sizeof(u16)));
 		return 1;
 	}
 

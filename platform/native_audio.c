@@ -6862,9 +6862,17 @@ int NativeAudio_LifecycleBench(const char *statePath)
 	 */
 	if (mismatches != 0)
 	{
-		static struct NativeAudioState snapshot;
+		/* Heap, not static: a 700 KiB function-static here sat in every build's
+		 * bss (the 3DS's too) for a host-only bench. */
+		struct NativeAudioState *snapshotMem = (struct NativeAudioState *)malloc(sizeof(struct NativeAudioState));
 		static struct NativeAudioVoice beforeVblank[NATIVE_AUDIO_SPU_VOICE_COUNT];
 		int reported = 0;
+
+		if (snapshotMem == NULL)
+		{
+			free(blob);
+			return 1;
+		}
 
 		/* blob is still the loaded snapshot here -- the outer free is below. */
 		NativeAudio_RestoreState(blob, stateSize);
@@ -6881,7 +6889,7 @@ int NativeAudio_LifecycleBench(const char *statePath)
 			NativeAudio_LifecycleVBlankNoLock(NATIVE_AUDIO_VBLANK_FRAMES, 1);
 			steppedIters = s_lifecycleDebugIters;
 			steppedFrames = s_lifecycleDebugFrames;
-			memcpy(&snapshot, &s_audio, sizeof(snapshot));
+			memcpy(snapshotMem, &s_audio, sizeof(*snapshotMem));
 			memcpy(stepped, s_audio.voices, sizeof(stepped));
 
 			memcpy(s_audio.voices, beforeVblank, sizeof(beforeVblank));
@@ -6921,8 +6929,9 @@ int NativeAudio_LifecycleBench(const char *statePath)
 
 			/* Continue from the stepped path's state so later vblanks are
 			 * compared from a known-good baseline rather than compounding. */
-			memcpy(&s_audio, &snapshot, sizeof(s_audio));
+			memcpy(&s_audio, snapshotMem, sizeof(s_audio));
 		}
+		free(snapshotMem);
 	}
 
 	free(blob);

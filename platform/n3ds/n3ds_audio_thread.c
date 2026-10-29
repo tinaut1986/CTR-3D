@@ -239,8 +239,16 @@ static int s_ndspAggTarget = N3DS_NDSP_AGG_DEFAULT;
 
 /* Hardware-voice linear store (full contract at the plan-B section below);
  * declared here because N3DS_NdspSinkShutdown frees it. */
-#define N3DS_HW_STORE_BYTES  (3 * 1024 * 1024)
+/* 3 MiB with a New 3DS-sized linear heap (unchanged); 2 MiB in a legacy Old 3DS
+ * region. The whole PSX SPU RAM (512 KiB of ADPCM, 16 bytes -> 28 samples) is
+ * 1.75 MiB of PCM, and a full store reclaims (NativeAudio_HwSampleSlotAcquire:
+ * stale entries, then idle ones), so a smaller store costs re-decodes, never a
+ * silent voice. Fixed at the first allocation (N3DS_HwVoiceStoreBytes). */
+#define N3DS_HW_STORE_BYTES_FULL  (3u * 1024u * 1024u)
+#define N3DS_HW_STORE_BYTES_LEAN  (2u * 1024u * 1024u)
+#define N3DS_HW_STORE_LEAN_BELOW  (48u * 1024u * 1024u) /* linear heap size */
 #define N3DS_HW_STORE_BLOCKS 256
+static u32 s_hwStoreBytes;     /* size of s_hwStore once allocated */
 struct N3DS_HwStoreBlock
 {
 	u32 off;
@@ -730,6 +738,17 @@ static void N3DS_HwStoreBlocksReset(void)
 	s_hwStoreLive = 0;
 }
 
+/* The store's size for this process: see N3DS_HW_STORE_BYTES_LEAN. Also read by
+ * N3DS_LinearAfterAtlases (n3ds_backend.c) to keep room for it. */
+unsigned long N3DS_HwVoiceStoreBytes(void)
+{
+	if (s_hwStore != NULL)
+	{
+		return (unsigned long)s_hwStoreBytes;
+	}
+	return (N3DS_LinearHeapSize() < N3DS_HW_STORE_LEAN_BELOW) ? N3DS_HW_STORE_BYTES_LEAN : N3DS_HW_STORE_BYTES_FULL;
+}
+
 short *N3DS_HwVoiceStoreAlloc(int sampleCount)
 {
 	u32 bytes;
@@ -738,12 +757,26 @@ short *N3DS_HwVoiceStoreAlloc(int sampleCount)
 
 	if (s_hwStore == NULL)
 	{
-		s_hwStore = (s16 *)linearAlloc(N3DS_HW_STORE_BYTES);
+		char line[128];
+
+		s_hwStoreBytes = (u32)N3DS_HwVoiceStoreBytes();
+		s_hwStore = (s16 *)linearAlloc(s_hwStoreBytes);
+		if ((s_hwStore == NULL) && (s_hwStoreBytes > N3DS_HW_STORE_BYTES_LEAN))
+		{
+			s_hwStoreBytes = N3DS_HW_STORE_BYTES_LEAN;
+			s_hwStore = (s16 *)linearAlloc(s_hwStoreBytes);
+		}
 		if (s_hwStore == NULL)
 		{
-			N3DS_DebugLog("[CTR-3DS] hw-voice store: linearAlloc FAILED -- voices silent");
+			snprintf(line, sizeof(line), "[CTR-3DS] hw-voice store: linearAlloc of %lu KiB FAILED (linear free %lu KiB) -- voices silent",
+			         (unsigned long)(s_hwStoreBytes / 1024u), (unsigned long)(linearSpaceFree() / 1024u));
+			N3DS_DebugLog(line);
+			s_hwStoreBytes = 0;
 			return NULL;
 		}
+		snprintf(line, sizeof(line), "[CTR-3DS] hw-voice store: %lu KiB of linear (linear free now %lu KiB)", (unsigned long)(s_hwStoreBytes / 1024u),
+		         (unsigned long)(linearSpaceFree() / 1024u));
+		N3DS_DebugLog(line);
 		N3DS_HwStoreBlocksReset();
 	}
 	if (sampleCount <= 0)
@@ -786,7 +819,7 @@ short *N3DS_HwVoiceStoreAlloc(int sampleCount)
 		return (short *)((u8 *)s_hwStore + s_hwStoreBlocks[best].off);
 	}
 
-	if (((s_hwStoreHiWater + bytes) > N3DS_HW_STORE_BYTES) || (s_hwStoreBlockCount >= N3DS_HW_STORE_BLOCKS))
+	if (((s_hwStoreHiWater + bytes) > s_hwStoreBytes) || (s_hwStoreBlockCount >= N3DS_HW_STORE_BLOCKS))
 	{
 		s_hwStoreFullDrops++;
 		return NULL;

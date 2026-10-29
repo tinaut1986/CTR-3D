@@ -326,8 +326,9 @@ void N3DS_ConfigSet(const char *key, int value)
  *     the `!isNew3DS` branches do on a real Old 3DS (cores 2/3 do not exist),
  *   - with the file only: parks ballast so heap + linear match a legacy app
  *     region of `mem=NN` MiB (default 80; a legacy-mode CIA already is one).
- * The FTP server keeps running (on core 3 -- no game thread shares that core)
- * so the log stays reachable; `ftp=0` in the file turns it off too.
+ * The FTP server and the updater run where a real Old 3DS puts them: core 0,
+ * lowest priority, behind the game (n3ds_ftp.c); `ftp=0` in the file turns the
+ * server off.
  * File contents: optional words `mem=NN` and `ftp=0`.
  * Memory and threads need a restart; the clock applies at once.
  */
@@ -784,8 +785,10 @@ void N3DS_ShowFatalGfxScreen(const char *what)
 	printf("\n  CTR 3D\n\n  Graphics could not start:\n  %s\n\n", what);
 	printf("  Linear memory free: %lu KiB\n", (unsigned long)(linearSpaceFree() / 1024));
 	printf("  Linear heap:        %lu KiB\n", N3DS_LinearHeapSize() / 1024);
-	printf("  Heap free:          %lu KiB\n\n", (unsigned long)(mallinfo().fordblks / 1024));
-	printf("  The game needs about 48 MiB of linear\n  memory. On an Old 3DS (64 MB) it does not fit.\n\n");
+	printf("  Heap free:          %lu KiB\n", N3DS_HeapFreeBytes() / 1024);
+	printf("  App memory region:  %lu KiB\n\n", (unsigned long)(osGetMemRegionSize(MEMREGION_APPLICATION) / 1024));
+	printf("  The decode atlases alone need %d x 2 MiB\n  of linear memory, plus ~%lu MiB for the rest.\n\n", N3DS_ATLAS_MIN_COUNT,
+	       (N3DS_LinearAfterAtlases() + (4ul << 20)) >> 20);
 	printf("  Press START to exit.\n");
 	while (aptMainLoop())
 	{
@@ -800,6 +803,30 @@ void N3DS_ShowFatalGfxScreen(const char *what)
 	}
 	exit(1);
 }
+
+/*
+ * Linear memory N3DS_C3DInit keeps free when it sizes the decode atlases: what
+ * is allocated after them, measured from the code (sizes in bytes):
+ *   VRAM display textures   N3DS_VRAM_DISPLAY_TEX_COUNT x 256^2 x 2 =   512 KiB (right after the atlases)
+ *   bottom UI texture       512 x 256 x 2                           =   256 KiB (first GPU frame)
+ *   ndsp PCM blocks         6 x 5880 frames x 4 B                   =   138 KiB (first sound)
+ *   hw-voice sample store   N3DS_HwVoiceStoreBytes()                = 3 MiB, 2 MiB on a small linear heap
+ *   track atlas             N3DS_TRACK_ATLAS_MAX_UNITS x 512^2 x 2  =  4096 KiB (per level)
+ *   track geometry          one linearAlloc per level               ~ 4 MiB (largest level, New 3DS log)
+ *   margin (linear allocator alignment / fragmentation)                1 MiB
+ */
+#define N3DS_LINEAR_TRACK_GEOM_MAX (4ul << 20)
+#define N3DS_LINEAR_MARGIN         (1ul << 20)
+unsigned long N3DS_LinearAfterAtlases(void)
+{
+	return ((unsigned long)N3DS_VRAM_DISPLAY_TEX_COUNT * N3DS_VRAM_DISPLAY_TEX_DIM * N3DS_VRAM_DISPLAY_TEX_DIM * 2ul) +
+	       ((unsigned long)N3DS_BOTTOM_UI_TEX_W * N3DS_BOTTOM_UI_TEX_H * 2ul) + (140ul << 10) + N3DS_HwVoiceStoreBytes() +
+	       ((unsigned long)N3DS_TRACK_ATLAS_MAX_UNITS * N3DS_TRACK_ATLAS_DIM * N3DS_TRACK_ATLAS_DIM * 2ul) + N3DS_LINEAR_TRACK_GEOM_MAX +
+	       N3DS_LINEAR_MARGIN;
+}
+
+/* CFG model has a parallax panel (not an Old 2DS / New 2DS XL). Set in N3DS_GfxInit. */
+static int s_has3dPanel = 1;
 
 void N3DS_GfxInit(void)
 {
@@ -829,14 +856,33 @@ void N3DS_GfxInit(void)
 	gfxInitDefault();
 
 	/*
-	 * Stereoscopic 3D: double-buffer the top screen's RIGHT framebuffer too.
-	 * Costs ~576KB of linear heap up front; with the physical slider at zero
-	 * the parallax barrier is off, the right buffer is never presented, and
-	 * the render path draws one eye exactly as before (N3DS_StereoLatchFrame).
-	 * Called here, before any framebuffer is fetched, because gfxSet3D
-	 * reallocates the top screen's buffers.
+	 * Stereoscopic 3D. With the physical slider at zero the parallax barrier is
+	 * off, the right buffer is never presented, and the render path draws one
+	 * eye exactly as before (N3DS_StereoLatchFrame). Costs no linear memory:
+	 * this libctru's gfxInit always allocates the top buffers at the stereo
+	 * width (800x240, checked in gfx.o) and gfxSet3D only sets the mode. A 2DS
+	 * / New 2DS XL has no 3D panel: 3D stays off there, and N3DS_C3DInit
+	 * skips the right-eye render target (768 KiB of VRAM).
 	 */
-	gfxSet3D(true);
+	{
+		u8 model = CFG_MODEL_3DS;
+
+		if (R_SUCCEEDED(cfguInit()))
+		{
+			if (R_SUCCEEDED(CFGU_GetSystemModel(&model)))
+			{
+				s_has3dPanel = (model != CFG_MODEL_2DS) && (model != CFG_MODEL_N2DSXL);
+			}
+			cfguExit();
+		}
+		{
+			char msg[96];
+
+			snprintf(msg, sizeof(msg), "[CTR-3DS] console model %u: %s", (unsigned)model, s_has3dPanel ? "3D panel, stereo available" : "no 3D panel (2DS), stereo off");
+			N3DS_DebugLog(msg);
+		}
+	}
+	gfxSet3D(s_has3dPanel != 0);
 
 	/*
 	 * The bottom screen is the UI's (n3ds_bottomui.c): graphics mode from the
@@ -1035,6 +1081,13 @@ static void *s_vertexBufferMem = NULL;
 static int s_vertexCursor = 0;
 static int s_vertexHighWater = 0;
 static C3D_Tex s_atlasTextures[N3DS_ATLAS_COUNT];
+/* How many of s_atlasTextures were allocated (N3DS_C3DInit; see N3DS_ATLAS_MIN_COUNT). */
+static int s_atlasCount = 0;
+
+int N3DS_C3DAtlasCount(void)
+{
+	return s_atlasCount;
+}
 static C3D_Tex s_vramDisplayTex[N3DS_VRAM_DISPLAY_TEX_COUNT];
 
 /* Native track renderer's dedicated atlas pool (rung 2b) -- see the header
@@ -1956,14 +2009,15 @@ int N3DS_C3DInit(void)
 	 * and says so once, rather than refusing to boot over an optional
 	 * feature. Every stereo path is gated on this pointer being non-NULL.
 	 */
-	s_renderTargetRight = C3D_RenderTargetCreate(240, 400, GPU_RB_RGBA8, GPU_RB_DEPTH24_STENCIL8);
+	s_renderTargetRight = s_has3dPanel ? C3D_RenderTargetCreate(240, 400, GPU_RB_RGBA8, GPU_RB_DEPTH24_STENCIL8) : NULL;
 	if (s_renderTargetRight != NULL)
 	{
 		C3D_RenderTargetSetOutput(s_renderTargetRight, GFX_TOP, GFX_RIGHT, N3DS_DISPLAY_TRANSFER_FLAGS);
 	}
 	else
 	{
-		N3DS_DebugLog("[CTR-3DS] stereo: right-eye render target FAILED to allocate, 3D disabled");
+		N3DS_DebugLog(s_has3dPanel ? "[CTR-3DS] stereo: right-eye render target FAILED to allocate, 3D disabled"
+		                           : "[CTR-3DS] stereo: no 3D panel, no right-eye render target");
 	}
 
 	s_shaderDvlb = DVLB_ParseFile((u32 *)ctr_shbin, ctr_shbin_size);
@@ -2054,23 +2108,53 @@ int N3DS_C3DInit(void)
 		 * longer uses. If allocation ever fails now, the log line below
 		 * states exactly which atlas index and how much free KiB remained --
 		 * trust that over any comment. */
-		snprintf(msg, sizeof(msg), "[CTR-3DS] linear free before atlases: %lu KiB (want %d x %d KiB)",
-		         (unsigned long)(linearSpaceFree() / 1024), N3DS_ATLAS_COUNT,
-		         (N3DS_ATLAS_DIM * N3DS_ATLAS_DIM * 2) / 1024);
+		/* As many atlases as the linear heap holds once everything allocated
+		 * after them has room (N3DS_LinearAfterAtlases): the maximum on a
+		 * New 3DS, fewer in a legacy Old 3DS region (N3DS_ATLAS_MIN_COUNT's
+		 * comment). Below the minimum is fatal, never a blind run. */
+		const unsigned long atlasBytes = (unsigned long)N3DS_ATLAS_DIM * N3DS_ATLAS_DIM * 2ul;
+		const unsigned long freeLin = (unsigned long)linearSpaceFree();
+		const unsigned long after = N3DS_LinearAfterAtlases();
+		int want = (int)((freeLin > after) ? ((freeLin - after) / atlasBytes) : 0ul);
+
+		if (want > N3DS_ATLAS_COUNT)
+		{
+			want = N3DS_ATLAS_COUNT;
+		}
+		/* Lean (legacy-region) linear heap: atlases past the minimum only grow
+		 * the sub-page tier (already ~2.4x its measured peak at 7), while the
+		 * per-level track geometry has no fallback -- keep the room for it. */
+		if ((N3DS_LinearHeapSize() < (48ul << 20)) && (want > N3DS_ATLAS_MIN_COUNT))
+		{
+			want = N3DS_ATLAS_MIN_COUNT;
+		}
+		if (want < N3DS_ATLAS_MIN_COUNT)
+		{
+			want = N3DS_ATLAS_MIN_COUNT;
+		}
+		snprintf(msg, sizeof(msg), "[CTR-3DS] linear free before atlases: %lu KiB; %d x %lu KiB atlases (min %d, max %d), %lu KiB kept for later",
+		         freeLin / 1024ul, want, atlasBytes / 1024ul, N3DS_ATLAS_MIN_COUNT, N3DS_ATLAS_COUNT, after / 1024ul);
 		N3DS_DebugLog(msg);
 
-		for (i = 0; i < N3DS_ATLAS_COUNT; i++)
+		s_atlasCount = 0;
+		for (i = 0; i < want; i++)
 		{
 			if (!C3D_TexInit(&s_atlasTextures[i], N3DS_ATLAS_DIM, N3DS_ATLAS_DIM, GPU_RGBA5551))
 			{
-				snprintf(msg, sizeof(msg), "[CTR-3DS] atlas %d of %d FAILED to allocate; linear free %lu KiB", i,
-				         N3DS_ATLAS_COUNT, (unsigned long)(linearSpaceFree() / 1024));
+				snprintf(msg, sizeof(msg), "[CTR-3DS] atlas %d of %d FAILED to allocate; linear free %lu KiB", i, want,
+				         (unsigned long)(linearSpaceFree() / 1024));
 				N3DS_DebugLog(msg);
-				return 0;
+				if (i < N3DS_ATLAS_MIN_COUNT)
+				{
+					return 0;
+				}
+				break; /* contiguous space ran out above the minimum: keep what we have */
 			}
 			C3D_TexSetFilter(&s_atlasTextures[i], GPU_NEAREST, GPU_NEAREST);
 			C3D_TexSetWrap(&s_atlasTextures[i], GPU_CLAMP_TO_EDGE, GPU_CLAMP_TO_EDGE);
+			s_atlasCount = i + 1;
 		}
+		N3DS_MemLog("atlases");
 	}
 
 	/* Boot-splash present texture pool -- see the header comment on
@@ -2208,10 +2292,11 @@ static void N3DS_C3DTeardown(void)
 		C3D_TexDelete(&s_vramDisplayTex[i]);
 	}
 
-	for (i = 0; i < N3DS_ATLAS_COUNT; i++)
+	for (i = 0; i < s_atlasCount; i++)
 	{
 		C3D_TexDelete(&s_atlasTextures[i]);
 	}
+	s_atlasCount = 0;
 
 	if (s_vertexBufferMem != NULL)
 	{
@@ -2734,7 +2819,7 @@ static void N3DS_C3DUploadTileBlock(C3D_Tex *tex, int tilesPerRow, int baseTileC
 
 void N3DS_C3DUploadDecodedCell(int atlasIndex, int cellX, int cellY, const void *tiled256)
 {
-	if ((atlasIndex < 0) || (atlasIndex >= N3DS_ATLAS_COUNT))
+	if ((atlasIndex < 0) || (atlasIndex >= s_atlasCount))
 	{
 		return;
 	}
@@ -2743,7 +2828,7 @@ void N3DS_C3DUploadDecodedCell(int atlasIndex, int cellX, int cellY, const void 
 
 void N3DS_C3DUploadDecodedSubCell(int atlasIndex, int physCellX, int physCellY, int subX, int subY, const void *tiled64)
 {
-	if ((atlasIndex < 0) || (atlasIndex >= N3DS_ATLAS_COUNT))
+	if ((atlasIndex < 0) || (atlasIndex >= s_atlasCount))
 	{
 		return;
 	}
@@ -2764,7 +2849,7 @@ static void N3DS_DebugWriteAtlasDump(void)
 	char msg[96];
 	int i, written = 0;
 
-	for (i = 0; i < N3DS_ATLAS_COUNT; i++)
+	for (i = 0; i < s_atlasCount; i++)
 	{
 		FILE *f;
 
@@ -2785,7 +2870,7 @@ static void N3DS_DebugWriteAtlasDump(void)
 		written++;
 	}
 
-	snprintf(msg, sizeof(msg), "[CTR-3DS] dumped %d/%d atlas textures (%u bytes each)", written, N3DS_ATLAS_COUNT, (unsigned)bytes);
+	snprintf(msg, sizeof(msg), "[CTR-3DS] dumped %d/%d atlas textures (%u bytes each)", written, s_atlasCount, (unsigned)bytes);
 	N3DS_DebugLog(msg);
 }
 #endif
@@ -2824,7 +2909,7 @@ void N3DS_C3DSetColorDoubling(int enable)
 
 void N3DS_C3DBindAtlas(int atlasIndex)
 {
-	if ((atlasIndex < 0) || (atlasIndex >= N3DS_ATLAS_COUNT))
+	if ((atlasIndex < 0) || (atlasIndex >= s_atlasCount))
 	{
 		return;
 	}
@@ -3905,7 +3990,7 @@ void N3DS_ModelDraw_Run(int startVertex, int triangleCount, int atlasIndex, int 
 		N3DS_C3DSetBlendMode(blend);
 	}
 
-	if (textured && (atlasIndex >= 0) && (atlasIndex < N3DS_ATLAS_COUNT))
+	if (textured && (atlasIndex >= 0) && (atlasIndex < s_atlasCount))
 	{
 		/* Bind only on change. The caller sorts a frame's triangles into
 		 * texture-homogeneous runs, so consecutive runs frequently share an
@@ -5479,7 +5564,7 @@ unsigned int N3DS_ReadButtons(void)
 					}
 					else
 					{
-						g_dbg_atlasView = (g_dbg_atlasView + 1) % (N3DS_ATLAS_COUNT + 1);
+						g_dbg_atlasView = (g_dbg_atlasView + 1) % (s_atlasCount + 1);
 					}
 					snprintf(msg, sizeof(msg), "[CTR-3DS] atlas view: %d", g_dbg_atlasView - 1);
 					N3DS_DebugLog(g_dbg_atlasView ? msg : "[CTR-3DS] atlas view: off");
@@ -6575,9 +6660,109 @@ static void N3DS_BeatMainTick(void)
 	}
 }
 
+/* ------------------------------------------------ fatal out-of-memory --- */
+
+static volatile int s_fatalMemPending = 0;
+static const char *s_fatalMemWhat = NULL;
+static unsigned long s_fatalMemBytes = 0;
+static unsigned long s_fatalMemLinFree = 0;
+static unsigned long s_fatalMemHeapFree = 0;
+
+void N3DS_FatalMemRequest(const char *what, unsigned long bytes)
+{
+	char line[200];
+	const unsigned long linFree = (unsigned long)linearSpaceFree();
+	const unsigned long heapFree = N3DS_HeapFreeBytes();
+
+	snprintf(line, sizeof(line), "[MEM] FATAL: %s needs %lu KiB; linear free %lu KiB of %lu KiB, heap free %lu KiB", (what != NULL) ? what : "?",
+	         bytes / 1024ul, linFree / 1024ul, N3DS_LinearHeapSize() / 1024ul, heapFree / 1024ul);
+	N3DS_DebugLog(line);
+	if (__sync_bool_compare_and_swap(&s_fatalMemPending, 0, 1))
+	{
+		s_fatalMemWhat = what;
+		s_fatalMemBytes = bytes;
+		s_fatalMemLinFree = linFree;
+		s_fatalMemHeapFree = heapFree;
+		__sync_synchronize();
+		s_fatalMemPending = 2; /* published */
+	}
+}
+
+/*
+ * The main loop's half of N3DS_FatalMemRequest: the GPU is let idle (the frame
+ * the render worker may still be building ends, the queue drains), the top
+ * screen becomes a text console with the numbers, and after START (or the
+ * system closing the app) the game quits through the normal exit path.
+ */
+#if defined(CTR_NATIVE_RENDER_THREAD)
+void NativeRenderQueue_Fence(void); /* native_render_queue.c: plain void, no game types */
+#endif
+
+static void N3DS_ShowFatalMemScreen(void)
+{
+	char heap[200];
+	int waited;
+
+	N3DS_MemLog("fatal");
+	N3DS_HeapDescribe(heap, sizeof(heap));
+	N3DS_DebugLog(heap);
+	N3DS_LogFlushNow();
+#if defined(CTR_NATIVE_RENDER_THREAD)
+	/* Jobs this (the game) thread posted run to the end first: no worker frame
+	 * may start after the console takes the top screen. */
+	NativeRenderQueue_Fence();
+#endif
+	for (waited = 0; (s_frameOpen || s_beginActive) && (waited < 1000); waited++)
+	{
+		svcSleepThread(1000 * 1000LL);
+	}
+	if (s_c3dUp && !s_gpuGone && !s_frameOpen)
+	{
+		C3D_FrameSync();
+	}
+	N3DS_BottomUi_SetStatus("OUT OF MEMORY");
+	consoleInit(GFX_TOP, NULL);
+	printf("\n  CTR 3D\n\n  Out of memory:\n  %s\n\n", (s_fatalMemWhat != NULL) ? s_fatalMemWhat : "?");
+	printf("  Needed:             %lu KiB\n", s_fatalMemBytes / 1024ul);
+	printf("  Linear free:        %lu KiB\n", s_fatalMemLinFree / 1024ul);
+	printf("  Linear heap:        %lu KiB\n", N3DS_LinearHeapSize() / 1024ul);
+	printf("  Heap free:          %lu KiB\n", s_fatalMemHeapFree / 1024ul);
+	printf("  App memory region:  %lu KiB\n", (unsigned long)(osGetMemRegionSize(MEMREGION_APPLICATION) / 1024));
+	printf("  Decode atlases:     %d\n\n", N3DS_C3DAtlasCount());
+	printf("  The log (sdmc:/ctr3ds.log with\n  enable-log.txt) has the [MEM] lines.\n\n");
+	printf("  Press START to exit.\n");
+	while (aptMainLoop())
+	{
+		hidScanInput();
+		if (hidKeysDown() & KEY_START)
+		{
+			return;
+		}
+		gfxFlushBuffers();
+		gfxSwapBuffers();
+		gspWaitForVBlank();
+	}
+	if (!s_gpuGone)
+	{
+		s_gpuGone = 1;
+		__sync_synchronize();
+		N3DS_ExitLog("quit event from the system on the fatal screen (GPU gone)");
+	}
+}
+
 int N3DS_MainLoopActive(void)
 {
 	N3DS_BeatMainTick();
+	if (s_fatalMemPending == 2)
+	{
+		s_fatalMemPending = 3; /* shown once */
+		N3DS_ShowFatalMemScreen();
+		return 0;
+	}
+	if (s_fatalMemPending == 3)
+	{
+		return 0;
+	}
 	/* An FTP "SITE INSTALL" finished: leave through the normal quit path so
 	 * aptExit() chainloads the freshly installed build. */
 	if (N3DS_FtpRelaunchDue())

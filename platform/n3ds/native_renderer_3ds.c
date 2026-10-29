@@ -1132,7 +1132,16 @@ typedef struct
  * never entered into the LRU cache; indices 1..N3DS_TOTAL_CELLS-1 are real,
  * split between two tiers as of the sub-page cache below.
  */
-#define N3DS_TOTAL_CELLS (N3DS_ATLAS_COUNT * N3DS_ATLAS_CELLS_PER_ATLAS)
+/*
+ * The atlas count is chosen at init from the linear heap (N3DS_C3DAtlasCount:
+ * N3DS_ATLAS_MIN_COUNT..N3DS_ATLAS_COUNT, all of them on a New 3DS, fewer on a
+ * legacy Old 3DS region), so the cell totals below are runtime values; the
+ * arrays are sized for the maximum. The full-page tier keeps its 96 cells at
+ * every count: a smaller cache only shrinks the sub-page tier (see below).
+ */
+#define N3DS_TOTAL_CELLS_MAX (N3DS_ATLAS_COUNT * N3DS_ATLAS_CELLS_PER_ATLAS)
+global_variable int s_totalCells = N3DS_ATLAS_MIN_COUNT * N3DS_ATLAS_CELLS_PER_ATLAS; /* set by InitialiseRender */
+#define N3DS_TOTAL_CELLS (s_totalCells)
 #define N3DS_WHITE_ATLAS  0
 #define N3DS_WHITE_CELL_X 0
 #define N3DS_WHITE_CELL_Y 0
@@ -1172,16 +1181,24 @@ typedef struct
  * bumps and the full-page decodes that evict the live working set.
  */
 #define N3DS_FBCAP_RESERVED_CELLS       2
-#define N3DS_SUBPAGE_PHYSICAL_CELLS     (N3DS_TOTAL_CELLS - 1 - N3DS_FULLPAGE_RESERVED_CELLS - N3DS_FBCAP_RESERVED_CELLS)
 #define N3DS_SUBPAGE_CELLS_PER_PHYSICAL 16
-#define N3DS_SUBPAGE_TOTAL_CELLS        (N3DS_SUBPAGE_PHYSICAL_CELLS * N3DS_SUBPAGE_CELLS_PER_PHYSICAL)
+/* Runtime (the atlas count): 77 physical cells / 1232 slots with 11 atlases,
+ * 13 / 208 with the minimum 7 -- the measured sub-page peak is ~86 slots. */
+#define N3DS_SUBPAGE_PHYSICAL_CELLS     (N3DS_TOTAL_CELLS - 1 - N3DS_FULLPAGE_RESERVED_CELLS - N3DS_FBCAP_RESERVED_CELLS)
+#define N3DS_SUBPAGE_TOTAL_CELLS_MAX    ((N3DS_TOTAL_CELLS_MAX - 1 - N3DS_FULLPAGE_RESERVED_CELLS - N3DS_FBCAP_RESERVED_CELLS) * N3DS_SUBPAGE_CELLS_PER_PHYSICAL)
+global_variable int s_subPageTotalCells = 0; /* set by InitialiseRender */
+#define N3DS_SUBPAGE_TOTAL_CELLS        (s_subPageTotalCells)
 #define N3DS_SUBPAGE_DIM                64
 #define N3DS_SUBPAGE_PHYSICAL_BASE      (1 + N3DS_FULLPAGE_RESERVED_CELLS)
+/* The minimum atlas count must still leave the sub-page tier some cells. */
+CTR_STATIC_ASSERT(((N3DS_ATLAS_MIN_COUNT * N3DS_ATLAS_CELLS_PER_ATLAS) - 1 - N3DS_FULLPAGE_RESERVED_CELLS - N3DS_FBCAP_RESERVED_CELLS) >= 8);
 
+/* The capture cells are the last two of the last atlas. The cell total is a
+ * whole number of atlases, so their position inside that atlas is fixed. */
 #define N3DS_FBCAP_CELL_FIRST (N3DS_TOTAL_CELLS - N3DS_FBCAP_RESERVED_CELLS)
 #define N3DS_FBCAP_ATLAS      (N3DS_FBCAP_CELL_FIRST / N3DS_ATLAS_CELLS_PER_ATLAS)
-#define N3DS_FBCAP_CELL_X     ((N3DS_FBCAP_CELL_FIRST % N3DS_ATLAS_CELLS_PER_ATLAS) % N3DS_ATLAS_CELLS_PER_ROW)
-#define N3DS_FBCAP_CELL_Y     ((N3DS_FBCAP_CELL_FIRST % N3DS_ATLAS_CELLS_PER_ATLAS) / N3DS_ATLAS_CELLS_PER_ROW)
+#define N3DS_FBCAP_CELL_X     ((N3DS_ATLAS_CELLS_PER_ATLAS - N3DS_FBCAP_RESERVED_CELLS) % N3DS_ATLAS_CELLS_PER_ROW)
+#define N3DS_FBCAP_CELL_Y     ((N3DS_ATLAS_CELLS_PER_ATLAS - N3DS_FBCAP_RESERVED_CELLS) / N3DS_ATLAS_CELLS_PER_ROW)
 /* Atlas-texel origin of the capture region; the reserved cells must be
  * horizontally adjacent in ONE atlas for the region to be contiguous. */
 #define N3DS_FBCAP_REGION_X   (N3DS_FBCAP_CELL_X * N3DS_DECODE_TEXTURE_DIM)
@@ -1193,7 +1210,7 @@ CTR_STATIC_ASSERT((N3DS_FBCAP_CELL_X + N3DS_FBCAP_RESERVED_CELLS) <= N3DS_ATLAS_
  * (N3DS_FullPageCellBound below), so the A/B isn't confounded by
  * eviction thrash -- 96 cells hold less than one busy scene's working set,
  * which is exactly what invalidated the first run of that experiment. */
-global_variable N3DS_DecodeCacheEntry s_decodeCache[N3DS_TOTAL_CELLS];
+global_variable N3DS_DecodeCacheEntry s_decodeCache[N3DS_TOTAL_CELLS_MAX];
 
 internal int N3DS_FullPageCellBound(void)
 {
@@ -1235,7 +1252,7 @@ typedef struct
 	u32 lastUsedFrame;
 } N3DS_SubPageCacheEntry;
 
-global_variable N3DS_SubPageCacheEntry s_subPageCache[N3DS_SUBPAGE_TOTAL_CELLS];
+global_variable N3DS_SubPageCacheEntry s_subPageCache[N3DS_SUBPAGE_TOTAL_CELLS_MAX];
 /* Mirrors s_lastCellHit. -1 = no memo yet -- unlike the full-page array, index
  * 0 is a real, valid sub-page slot here (no reserved white cell at 0), so 0
  * can't double as the "no memo" sentinel the way it implicitly does not for
@@ -4176,6 +4193,15 @@ int NativeRenderer_InitialiseRender(char *windowName, int width, int height, int
 		N3DS_ShowFatalGfxScreen("citro3d init failed (out of linear memory?)");
 		return 0;
 	}
+	s_totalCells = N3DS_C3DAtlasCount() * N3DS_ATLAS_CELLS_PER_ATLAS;
+	s_subPageTotalCells = N3DS_SUBPAGE_PHYSICAL_CELLS * N3DS_SUBPAGE_CELLS_PER_PHYSICAL;
+	{
+		char msg[128];
+
+		snprintf(msg, sizeof(msg), "[CTR-3DS] decode cache: %d atlases, %d full-page cells, %d sub-page slots", N3DS_C3DAtlasCount(),
+		         N3DS_FULLPAGE_RESERVED_CELLS, s_subPageTotalCells);
+		N3DS_DebugLog(msg);
+	}
 
 	/* All-bits-set = -1 in every bucket (see the hash-index comment). */
 	memset(s_fullPageHashIdx, 0xFF, sizeof(s_fullPageHashIdx));
@@ -6826,7 +6852,7 @@ void NativeRenderer3DS_DebugDumpCacheMeta(void)
 	N3DS_MetaWriteU32(f, (u32)N3DS_FULLPAGE_RESERVED_CELLS);
 	N3DS_MetaWriteU32(f, (u32)N3DS_SUBPAGE_TOTAL_CELLS);
 	N3DS_MetaWriteU32(f, (u32)N3DS_SUBPAGE_PHYSICAL_BASE);
-	N3DS_MetaWriteU32(f, (u32)N3DS_ATLAS_COUNT);
+	N3DS_MetaWriteU32(f, (u32)N3DS_C3DAtlasCount());
 	N3DS_MetaWriteU32(f, (u32)N3DS_ATLAS_DIM);
 	N3DS_MetaWriteU32(f, (u32)N3DS_DECODE_TEXTURE_DIM);
 	N3DS_MetaWriteU32(f, (u32)N3DS_SUBPAGE_DIM);
