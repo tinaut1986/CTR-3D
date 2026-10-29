@@ -2129,6 +2129,70 @@ internal int NativeGpu_IsHudShinePacket(uintptr_t addr)
 	return 0;
 }
 
+/*
+ * Envelope of every tag range above for one read buffer: the OT walk tests a
+ * node against it first and skips the eight individual range tests (and the
+ * hud-shine span loop) for a node outside it -- every node of most frames, and
+ * all ~1000 menu flag quads. Same answers by construction: a node outside the
+ * envelope is outside each range. Rebuilt whenever the walk sees a read index
+ * it was not built for, and forced at every walk start (NativeGpu_ResetTagEnvelope),
+ * so a range marked between two walks is never missed.
+ */
+global_variable int s_tagEnvelopeIdx = -1;
+global_variable uintptr_t s_tagEnvelopeLo;
+global_variable uintptr_t s_tagEnvelopeHi;
+
+internal void NativeGpu_TagEnvelopeAdd(uintptr_t start, uintptr_t end)
+{
+	if (start < end)
+	{
+		if (start < s_tagEnvelopeLo)
+		{
+			s_tagEnvelopeLo = start;
+		}
+		if (end > s_tagEnvelopeHi)
+		{
+			s_tagEnvelopeHi = end;
+		}
+	}
+}
+
+internal void NativeGpu_RebuildTagEnvelope(void)
+{
+	const int idx = s_skyRangeReadIdx;
+	int i;
+
+	s_tagEnvelopeLo = UINTPTR_MAX;
+	s_tagEnvelopeHi = 0;
+	NativeGpu_TagEnvelopeAdd(s_skyRangeStart[idx], s_skyRangeEnd[idx]);
+	NativeGpu_TagEnvelopeAdd(s_starRangeStart[idx], s_starRangeEnd[idx]);
+	NativeGpu_TagEnvelopeAdd(s_menubdRangeStart[idx], s_menubdRangeEnd[idx]);
+	NativeGpu_TagEnvelopeAdd(s_glowRangeStart[idx], s_glowRangeEnd[idx]);
+	NativeGpu_TagEnvelopeAdd(s_uimapRangeStart[idx], s_uimapRangeEnd[idx]);
+	NativeGpu_TagEnvelopeAdd(s_uifpsRangeStart[idx], s_uifpsRangeEnd[idx]);
+	NativeGpu_TagEnvelopeAdd(s_uipicRangeStart[idx], s_uipicRangeEnd[idx]);
+	for (i = 0; i < s_hudshineRangeCount[idx]; i++)
+	{
+		NativeGpu_TagEnvelopeAdd(s_hudshineRangeStart[idx][i], s_hudshineRangeEnd[idx][i]);
+	}
+	s_tagEnvelopeIdx = idx;
+}
+
+internal void NativeGpu_ResetTagEnvelope(void)
+{
+	s_tagEnvelopeIdx = -1;
+}
+
+/* Whether addr can be inside any tag range; when 0, every Is*Packet is 0. */
+internal int NativeGpu_InTagEnvelope(uintptr_t addr)
+{
+	if (s_tagEnvelopeIdx != s_skyRangeReadIdx)
+	{
+		NativeGpu_RebuildTagEnvelope();
+	}
+	return (addr >= s_tagEnvelopeLo) && (addr < s_tagEnvelopeHi);
+}
+
 #endif
 
 internal u16 PacketDepth_ClampWorld(u32 stamp)
@@ -4991,6 +5055,7 @@ void ParsePrimitivesLinkedList(u32 *p, int singlePrimitive)
 		/* UI-band ordinal + the flag's latched stamp: same walk scope, same
 		 * instant. See PacketDepth_BeginWalk. */
 		PacketDepth_BeginWalk();
+		NativeGpu_ResetTagEnvelope();
 #endif
 
 #if defined(CTR_NATIVE) && defined(CTR_NATIVE_BAKE_PARITY) && CTR_NATIVE_BAKE_PARITY
@@ -5124,13 +5189,27 @@ void ParsePrimitivesLinkedList(u32 *p, int singlePrimitive)
 			 * a walk-order guard here counted zero rescues across a full test run
 			 * -- the minimap black box was the sky PASS clobbering the open blend
 			 * run's state memo, fixed in N3DS_DrawSkyPass.) */
-			s_skyNodeActive = NativeGpu_IsSkyPacket((uintptr_t)basePacket) || NativeGpu_IsStarPacket((uintptr_t)basePacket);
-			s_menubdNodeActive = NativeGpu_IsMenuBackdropPacket((uintptr_t)basePacket);
-			s_glowNodeActive = NativeGpu_IsGlowPacket((uintptr_t)basePacket);
-			s_uimapNodeActive = NativeGpu_IsUiMapPacket((uintptr_t)basePacket);
-			s_uifpsNodeActive = NativeGpu_IsUiFpsPacket((uintptr_t)basePacket);
-			s_uipicNodeActive = NativeGpu_IsUiPicPacket((uintptr_t)basePacket);
-			s_hudshineNodeActive = NativeGpu_IsHudShinePacket((uintptr_t)basePacket);
+			if (NativeGpu_InTagEnvelope((uintptr_t)basePacket))
+			{
+				s_skyNodeActive = NativeGpu_IsSkyPacket((uintptr_t)basePacket) || NativeGpu_IsStarPacket((uintptr_t)basePacket);
+				s_menubdNodeActive = NativeGpu_IsMenuBackdropPacket((uintptr_t)basePacket);
+				s_glowNodeActive = NativeGpu_IsGlowPacket((uintptr_t)basePacket);
+				s_uimapNodeActive = NativeGpu_IsUiMapPacket((uintptr_t)basePacket);
+				s_uifpsNodeActive = NativeGpu_IsUiFpsPacket((uintptr_t)basePacket);
+				s_uipicNodeActive = NativeGpu_IsUiPicPacket((uintptr_t)basePacket);
+				s_hudshineNodeActive = NativeGpu_IsHudShinePacket((uintptr_t)basePacket);
+			}
+			else
+			{
+				/* Outside every tag range (see NativeGpu_InTagEnvelope). */
+				s_skyNodeActive = 0;
+				s_menubdNodeActive = 0;
+				s_glowNodeActive = 0;
+				s_uimapNodeActive = 0;
+				s_uifpsNodeActive = 0;
+				s_uipicNodeActive = 0;
+				s_hudshineNodeActive = 0;
+			}
 #endif
 			if (tagLength > 0)
 			{
