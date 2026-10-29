@@ -44,6 +44,13 @@ void N3DS_AudioThreadInit(void);
 void N3DS_AudioThreadNotifyVBlank(void);
 
 /*
+ * No-worker fallback: run one vblank of the worker's job (lifecycle + mirror,
+ * XA parcel top-up, hardware decode pump) synchronously on the caller. No-op
+ * while a worker is running. Call with no audio lock held.
+ */
+void N3DS_AudioRunVBlankOnCaller(void);
+
+/*
  * Stop and join the worker thread, if one was ever created, but leave the
  * wake handle and ndsp sink up. No-op (null-safe) if no worker is running.
  * N3DS_AudioThreadIsRunning() reads false immediately after, so
@@ -141,12 +148,12 @@ void N3DS_AudioUnlock(void);
  * sampleRate is the rate the samples were produced at, not assumed 44100:
  * the XA path feeds this channel source PCM at its own 37800/18900 rate and
  * lets the DSP resample in hardware, avoiding a CPU resampler. The worker's
- * XA path submits 630 (or 315) frames at 37800 (or 18900); the no-worker
- * StepVBlank fallback submits 735 at 44100 (full software mixer). Exactly
- * one producer exists per process lifetime.
+ * XA path submits 630 (or 315) frames at 37800 (or 18900), from the worker
+ * or, with no worker, from the main thread through the same code
+ * (N3DS_AudioRunVBlankOnCaller). Exactly one producer runs at a time.
  *
- * gainLeft/gainRight scale the channel (ndspChnSetMix); the fallback passes
- * 1.0f since its mixer already applied volume.
+ * gainLeft/gainRight scale the channel (ndspChnSetMix): the XA path's CD and
+ * master volume, applied once per parcel instead of per sample.
  *
  * frameCount must be 1..N3DS_NDSP_PARCEL_FRAMES_MAX. Returns 1 if queued, 0
  * if dropped (counted).

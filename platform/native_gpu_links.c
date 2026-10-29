@@ -32,6 +32,24 @@ global_variable int s_nativeGpuLinkRangeCount;
 global_variable struct NativeGpuLinkRange s_nativeGpuLinkPending[NATIVE_GPU_LINK_MAX_RANGES];
 global_variable int s_nativeGpuLinkPendingCount;
 global_variable uint32_t s_nativeGpuLinkNextToken = NATIVE_GPU_LINK_FIRST_DYNAMIC_TOKEN;
+/*
+ * Last-hit hints for the two range scans. Every addPrim on the game thread
+ * resolves a host pointer to a token, and the OT walk resolves each node's
+ * link token back and then validates the host pointer -- three scans of the
+ * live table per primitive, and nearly every one lands in the same range as
+ * the one before (the frame's primMem, or its OT). The hint is checked first
+ * and the scan only runs on a miss. Correctness does not depend on the hint:
+ * it is only an index into the live table, re-validated against that range's
+ * bounds on every use, and only trusted when the live ranges are pairwise
+ * disjoint (checked at Commit) -- otherwise the scan's first-match answer
+ * could differ from the hinted range. The game thread and the render worker
+ * may both write a hint; a torn race costs one scan, never a wrong answer
+ * (an aligned int store is atomic, and the table itself only changes under
+ * Commit's render-queue fence).
+ */
+global_variable int s_nativeGpuLinkHostHint;
+global_variable int s_nativeGpuLinkTokenHint;
+global_variable int s_nativeGpuLinkHintsUsable;
 
 static int NativeGpuLinks_AlignTokenSize(size_t size, uint32_t *tokenSizeOut)
 {
@@ -70,6 +88,28 @@ void NativeGpuLinks_Commit(void)
 	NativeRenderQueue_Fence();
 	memcpy(s_nativeGpuLinkRanges, s_nativeGpuLinkPending, liveBytes);
 	s_nativeGpuLinkRangeCount = s_nativeGpuLinkPendingCount;
+
+	/* Hints (see their declaration) only when no two ranges overlap, in host
+	 * or token space: then at most one range contains any pointer or token,
+	 * and the hinted range IS the scan's answer whenever it matches. Token
+	 * ranges are carved downward without overlap by construction; host
+	 * ranges are separate allocations, but checked rather than assumed. */
+	s_nativeGpuLinkHostHint = 0;
+	s_nativeGpuLinkTokenHint = 0;
+	s_nativeGpuLinkHintsUsable = 1;
+	for (int i = 0; i < s_nativeGpuLinkRangeCount; i++)
+	{
+		for (int j = i + 1; j < s_nativeGpuLinkRangeCount; j++)
+		{
+			const struct NativeGpuLinkRange *a = &s_nativeGpuLinkRanges[i];
+			const struct NativeGpuLinkRange *b = &s_nativeGpuLinkRanges[j];
+
+			if (((a->hostStart < b->hostEnd) && (b->hostStart < a->hostEnd)) || ((a->tokenStart < b->tokenEnd) && (b->tokenStart < a->tokenEnd)))
+			{
+				s_nativeGpuLinkHintsUsable = 0;
+			}
+		}
+	}
 }
 
 int NativeGpuLinks_IsTerminator(uint32_t token)
@@ -134,11 +174,23 @@ void NativeGpuLinks_RegisterRangeChecked(const char *label, const void *hostStar
 
 static const struct NativeGpuLinkRange *NativeGpuLinks_FindHostRange(uintptr_t hostPtr)
 {
+	const int hint = s_nativeGpuLinkHostHint;
+
+	if (s_nativeGpuLinkHintsUsable && (hint < s_nativeGpuLinkRangeCount))
+	{
+		const struct NativeGpuLinkRange *range = &s_nativeGpuLinkRanges[hint];
+		if ((hostPtr >= range->hostStart) && (hostPtr < range->hostEnd))
+		{
+			return range;
+		}
+	}
+
 	for (int i = 0; i < s_nativeGpuLinkRangeCount; i++)
 	{
 		const struct NativeGpuLinkRange *range = &s_nativeGpuLinkRanges[i];
 		if ((hostPtr >= range->hostStart) && (hostPtr < range->hostEnd))
 		{
+			s_nativeGpuLinkHostHint = i;
 			return range;
 		}
 	}
@@ -148,13 +200,25 @@ static const struct NativeGpuLinkRange *NativeGpuLinks_FindHostRange(uintptr_t h
 
 static const struct NativeGpuLinkRange *NativeGpuLinks_FindTokenRange(uint32_t token)
 {
+	const int hint = s_nativeGpuLinkTokenHint;
+
 	token &= 0x00ffffffu;
+
+	if (s_nativeGpuLinkHintsUsable && (hint < s_nativeGpuLinkRangeCount))
+	{
+		const struct NativeGpuLinkRange *range = &s_nativeGpuLinkRanges[hint];
+		if ((token >= range->tokenStart) && (token < range->tokenEnd))
+		{
+			return range;
+		}
+	}
 
 	for (int i = 0; i < s_nativeGpuLinkRangeCount; i++)
 	{
 		const struct NativeGpuLinkRange *range = &s_nativeGpuLinkRanges[i];
 		if ((token >= range->tokenStart) && (token < range->tokenEnd))
 		{
+			s_nativeGpuLinkTokenHint = i;
 			return range;
 		}
 	}

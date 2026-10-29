@@ -41,6 +41,9 @@ extern int g_dbg_polygonSelected;
 // needs this file's and the 3DS renderer's file-scope state in view).
 internal int NativeDirectEmit_TryNode(const u8 *packet, u32 tagLength);
 internal void DirectEmit_FoldFrame(void);
+#if defined(__3DS__)
+internal u8 *NativeDirectEmit_G4Run(u8 *packet, u32 tagLength, u32 *walkIterations, u32 *runNodes);
+#endif
 #endif
 
 // NOTE(aalhendi): Little-endian tag `CTRG` = CTR native GPU snapshot.
@@ -2127,6 +2130,97 @@ internal int NativeGpu_IsHudShinePacket(uintptr_t addr)
 		}
 	}
 	return 0;
+}
+
+/*
+ * Envelope of every tag range above for one read buffer: the OT walk tests a
+ * node against it first and skips the eight individual range tests (and the
+ * hud-shine span loop) for a node outside it -- every node of most frames, and
+ * all ~1000 menu flag quads. Same answers by construction: a node outside the
+ * envelope is outside each range. Rebuilt whenever the walk sees a read index
+ * it was not built for, and forced at every walk start (NativeGpu_ResetTagEnvelope),
+ * so a range marked between two walks is never missed.
+ */
+global_variable int s_tagEnvelopeIdx = -1;
+global_variable uintptr_t s_tagEnvelopeLo;
+global_variable uintptr_t s_tagEnvelopeHi;
+
+internal void NativeGpu_TagEnvelopeAdd(uintptr_t start, uintptr_t end)
+{
+	if (start < end)
+	{
+		if (start < s_tagEnvelopeLo)
+		{
+			s_tagEnvelopeLo = start;
+		}
+		if (end > s_tagEnvelopeHi)
+		{
+			s_tagEnvelopeHi = end;
+		}
+	}
+}
+
+internal void NativeGpu_RebuildTagEnvelope(void)
+{
+	const int idx = s_skyRangeReadIdx;
+	int i;
+
+	s_tagEnvelopeLo = UINTPTR_MAX;
+	s_tagEnvelopeHi = 0;
+	NativeGpu_TagEnvelopeAdd(s_skyRangeStart[idx], s_skyRangeEnd[idx]);
+	NativeGpu_TagEnvelopeAdd(s_starRangeStart[idx], s_starRangeEnd[idx]);
+	NativeGpu_TagEnvelopeAdd(s_menubdRangeStart[idx], s_menubdRangeEnd[idx]);
+	NativeGpu_TagEnvelopeAdd(s_glowRangeStart[idx], s_glowRangeEnd[idx]);
+	NativeGpu_TagEnvelopeAdd(s_uimapRangeStart[idx], s_uimapRangeEnd[idx]);
+	NativeGpu_TagEnvelopeAdd(s_uifpsRangeStart[idx], s_uifpsRangeEnd[idx]);
+	NativeGpu_TagEnvelopeAdd(s_uipicRangeStart[idx], s_uipicRangeEnd[idx]);
+	for (i = 0; i < s_hudshineRangeCount[idx]; i++)
+	{
+		NativeGpu_TagEnvelopeAdd(s_hudshineRangeStart[idx][i], s_hudshineRangeEnd[idx][i]);
+	}
+	s_tagEnvelopeIdx = idx;
+}
+
+internal void NativeGpu_ResetTagEnvelope(void)
+{
+	s_tagEnvelopeIdx = -1;
+}
+
+/* Whether addr can be inside any tag range; when 0, every Is*Packet is 0. */
+internal int NativeGpu_InTagEnvelope(uintptr_t addr)
+{
+	if (s_tagEnvelopeIdx != s_skyRangeReadIdx)
+	{
+		NativeGpu_RebuildTagEnvelope();
+	}
+	return (addr >= s_tagEnvelopeLo) && (addr < s_tagEnvelopeHi);
+}
+
+/* The walk's per-node tag flags (s_skyNodeActive and its siblings) for the
+ * node at addr. */
+force_inline void NativeGpu_TagWalkNode(uintptr_t addr)
+{
+	if (NativeGpu_InTagEnvelope(addr))
+	{
+		s_skyNodeActive = NativeGpu_IsSkyPacket(addr) || NativeGpu_IsStarPacket(addr);
+		s_menubdNodeActive = NativeGpu_IsMenuBackdropPacket(addr);
+		s_glowNodeActive = NativeGpu_IsGlowPacket(addr);
+		s_uimapNodeActive = NativeGpu_IsUiMapPacket(addr);
+		s_uifpsNodeActive = NativeGpu_IsUiFpsPacket(addr);
+		s_uipicNodeActive = NativeGpu_IsUiPicPacket(addr);
+		s_hudshineNodeActive = NativeGpu_IsHudShinePacket(addr);
+	}
+	else
+	{
+		/* Outside every tag range (see NativeGpu_InTagEnvelope). */
+		s_skyNodeActive = 0;
+		s_menubdNodeActive = 0;
+		s_glowNodeActive = 0;
+		s_uimapNodeActive = 0;
+		s_uifpsNodeActive = 0;
+		s_uipicNodeActive = 0;
+		s_hudshineNodeActive = 0;
+	}
 }
 
 #endif
@@ -4855,6 +4949,142 @@ internal void OTProf_DryWalk(u8 *basePacket)
 }
 #endif /* CTR_NATIVE_OTWALK_PROFILE */
 
+/* One zero-length node crossed by the walk (the walk's own zero-length branch,
+ * and the empty-slot run after it). */
+force_inline void NativeGpu_WalkCrossEmptyNode(uintptr_t addr)
+{
+	/* Zero-length node: either an OT slot or a len-0 filler
+	 * packet (v1 conflated them; primMem sits contiguous with
+	 * the OT arena, so only the game's own ClearOTag bounds
+	 * discriminate -- measured, [OTZ2]). slotIdx = plain
+	 * array index = the retail otIndex GetProjectedOtIndex
+	 * computes from depth. */
+	s_gpu.otSlotsCrossed++;
+
+	/* Read the SAME latched value the walk's clear used --
+	 * never re-evaluate g_dbg_otzWiden /
+	 * NATIVE_GPU_TRACK_RENDER_ACTIVE live here, see
+	 * otRecorderActive's field comment for why. */
+	if (s_gpu.otRecorderActive)
+	{
+		if ((s_gpu.walkOtBase != 0) && (addr >= s_gpu.walkOtBase) && (addr < s_gpu.walkOtBase + (uintptr_t)s_gpu.walkOtCount * 4u))
+		{
+			u32 slotIdx = (u32)((addr - s_gpu.walkOtBase) >> 2);
+
+			if (slotIdx < OTZ_TABLE_SLOTS)
+			{
+				s_gpu.otBucketOrdinal[slotIdx] = (u16)(s_gpu.emitOrdinal < 0xFFFFu ? s_gpu.emitOrdinal : 0xFFFFu);
+				s_gpu.otSlotsDetected++;
+
+				/* Depth-compose fix: remember which bucket the
+				 * walk is passing through right now, so a later
+				 * content advance (NativeGpu_RecordContentAdvance)
+				 * knows which bucket to attribute itself to.
+				 * Slots are visited in descending order, so
+				 * whichever bucket was crossed most recently is
+				 * simply the current one -- no comparison needed
+				 * here, only at the point that reads it. */
+				s_gpu.otCurrentSlotIdx = slotIdx;
+
+				if (slotIdx > s_gpu.otMaxSlotIdx)
+				{
+					s_gpu.otMaxSlotIdx = slotIdx;
+				}
+			}
+		}
+		else
+		{
+			s_gpu.otSpuriousLen0++;
+		}
+	}
+}
+
+#if defined(CTR_INTERNAL) && defined(__3DS__)
+/*
+ * [PARSEPROF] -- where draw_otag_parse_ms goes, per node class, on hardware.
+ * The scope only says the walk is expensive (24 ms of an 83 ms Old-3DS menu
+ * frame); this says which kind of node pays: empty OT slots (the walk's own
+ * per-node overhead), direct-emitted nodes (split into the dry scan, the depth
+ * resolve and the rest of the emit), and nodes that take the packet parse.
+ *
+ * Sampled, not per node: one node in PARSEPROF_SAMPLE_EVERY is timed with
+ * svcGetSystemTick (an SVC, a few hundred cycles), so the tax stays near 1% of
+ * the walk while a frame still yields ~100 samples. A class's cost is its full
+ * node count times its sampled mean. Ticks are SYSCLOCK_ARM11 (268 MHz) units,
+ * i.e. CPU cycles on an Old 3DS and a third of them on a New 3DS at 804 MHz.
+ * Always on in CTR_INTERNAL builds (no toggle to forget); one log line per 64
+ * walks, beside [PERF].
+ */
+#define PARSEPROF_SAMPLE_EVERY 16
+#define PARSEPROF_WINDOW_WALKS 64
+enum
+{
+	PARSEPROF_EMPTY = 0,
+	PARSEPROF_DEMIT,
+	PARSEPROF_PARSE,
+	PARSEPROF_CLASSES
+};
+global_variable struct
+{
+	u32 nodes[PARSEPROF_CLASSES];
+	u32 samples[PARSEPROF_CLASSES];
+	u64 ticks[PARSEPROF_CLASSES];
+	/* Inside the sampled DEMIT nodes only (same samples as ticks[DEMIT]). */
+	u64 demitScanTicks;
+	u64 demitResolveTicks;
+	u64 walkTicks; /* whole walks, every walk: the denominator */
+	u32 walks;
+	/* POLY_G4 runs (NativeDirectEmit_G4Run): every run timed whole, its
+	 * nodes counted here and NOT in nodes[DEMIT] (the run's first node is). */
+	u32 runNodes;
+	u64 runTicks;
+} s_parseProf;
+/* Set by the walk for the node being sampled; read by the direct-emit scan and
+ * the emit's depth resolve to time their own parts of that same node. */
+global_variable int s_parseProfSampleNode;
+
+internal void ParseProf_FoldWalk(void)
+{
+	char line[320];
+	const double usPerTick = 1000000.0 / (double)N3DS_GetTickFrequency();
+	double estUs[PARSEPROF_CLASSES];
+	u32 perFrame[PARSEPROF_CLASSES];
+	u32 cyc[PARSEPROF_CLASSES];
+	u32 scanCyc;
+	u32 resolveCyc;
+	int c;
+
+	if (++s_parseProf.walks < PARSEPROF_WINDOW_WALKS)
+	{
+		return;
+	}
+
+	for (c = 0; c < PARSEPROF_CLASSES; c++)
+	{
+		const double mean = s_parseProf.samples[c] ? ((double)s_parseProf.ticks[c] / (double)s_parseProf.samples[c]) : 0.0;
+
+		cyc[c] = (u32)mean;
+		perFrame[c] = s_parseProf.nodes[c] / s_parseProf.walks;
+		estUs[c] = mean * (double)s_parseProf.nodes[c] * usPerTick / (double)s_parseProf.walks;
+	}
+	scanCyc = s_parseProf.samples[PARSEPROF_DEMIT] ? (u32)(s_parseProf.demitScanTicks / s_parseProf.samples[PARSEPROF_DEMIT]) : 0u;
+	resolveCyc = s_parseProf.samples[PARSEPROF_DEMIT] ? (u32)(s_parseProf.demitResolveTicks / s_parseProf.samples[PARSEPROF_DEMIT]) : 0u;
+
+	snprintf(line, sizeof(line),
+	         "[PARSEPROF] walks=%lu walkUs=%lu | empty n/f=%lu cyc=%lu us=%lu | demit n/f=%lu cyc=%lu (scan=%lu depth=%lu) us=%lu | g4run n/f=%lu cyc=%lu us=%lu | parse n/f=%lu cyc=%lu us=%lu",
+	         (unsigned long)s_parseProf.walks, (unsigned long)((double)s_parseProf.walkTicks * usPerTick / (double)s_parseProf.walks),
+	         (unsigned long)perFrame[PARSEPROF_EMPTY], (unsigned long)cyc[PARSEPROF_EMPTY], (unsigned long)estUs[PARSEPROF_EMPTY],
+	         (unsigned long)perFrame[PARSEPROF_DEMIT], (unsigned long)cyc[PARSEPROF_DEMIT], (unsigned long)scanCyc, (unsigned long)resolveCyc,
+	         (unsigned long)estUs[PARSEPROF_DEMIT], (unsigned long)(s_parseProf.runNodes / s_parseProf.walks),
+	         (unsigned long)(s_parseProf.runNodes ? (s_parseProf.runTicks / s_parseProf.runNodes) : 0u),
+	         (unsigned long)((double)s_parseProf.runTicks * usPerTick / (double)s_parseProf.walks), (unsigned long)perFrame[PARSEPROF_PARSE],
+	         (unsigned long)cyc[PARSEPROF_PARSE], (unsigned long)estUs[PARSEPROF_PARSE]);
+	N3DS_DebugLog(line);
+	memset(&s_parseProf, 0, sizeof(s_parseProf));
+}
+#define PARSEPROF_TICK() N3DS_GetTickCount()
+#endif
+
 void ParsePrimitivesLinkedList(u32 *p, int singlePrimitive)
 {
 	if (!p)
@@ -4911,6 +5141,7 @@ void ParsePrimitivesLinkedList(u32 *p, int singlePrimitive)
 		/* UI-band ordinal + the flag's latched stamp: same walk scope, same
 		 * instant. See PacketDepth_BeginWalk. */
 		PacketDepth_BeginWalk();
+		NativeGpu_ResetTagEnvelope();
 #endif
 
 #if defined(CTR_NATIVE) && defined(CTR_NATIVE_BAKE_PARITY) && CTR_NATIVE_BAKE_PARITY
@@ -4995,9 +5226,20 @@ void ParsePrimitivesLinkedList(u32 *p, int singlePrimitive)
 			s_gpu.minContentBucket = NATIVE_GPU_NO_CONTENT_BUCKET;
 		}
 
+#if defined(CTR_INTERNAL) && defined(__3DS__)
+		const u64 profWalkStart = PARSEPROF_TICK();
+#endif
+
 		while (true)
 		{
 			otWalkIterations++;
+#if defined(CTR_INTERNAL) && defined(__3DS__)
+			const int profSample = ((otWalkIterations % PARSEPROF_SAMPLE_EVERY) == 0);
+			u64 profNodeStart = profSample ? PARSEPROF_TICK() : 0;
+			int profClass = PARSEPROF_EMPTY;
+
+			s_parseProfSampleNode = profSample;
+#endif
 			if (otWalkIterations > 65536)
 			{
 				char packetRegion[64];
@@ -5033,13 +5275,7 @@ void ParsePrimitivesLinkedList(u32 *p, int singlePrimitive)
 			 * a walk-order guard here counted zero rescues across a full test run
 			 * -- the minimap black box was the sky PASS clobbering the open blend
 			 * run's state memo, fixed in N3DS_DrawSkyPass.) */
-			s_skyNodeActive = NativeGpu_IsSkyPacket((uintptr_t)basePacket) || NativeGpu_IsStarPacket((uintptr_t)basePacket);
-			s_menubdNodeActive = NativeGpu_IsMenuBackdropPacket((uintptr_t)basePacket);
-			s_glowNodeActive = NativeGpu_IsGlowPacket((uintptr_t)basePacket);
-			s_uimapNodeActive = NativeGpu_IsUiMapPacket((uintptr_t)basePacket);
-			s_uifpsNodeActive = NativeGpu_IsUiFpsPacket((uintptr_t)basePacket);
-			s_uipicNodeActive = NativeGpu_IsUiPicPacket((uintptr_t)basePacket);
-			s_hudshineNodeActive = NativeGpu_IsHudShinePacket((uintptr_t)basePacket);
+			NativeGpu_TagWalkNode((uintptr_t)basePacket);
 #endif
 			if (tagLength > 0)
 			{
@@ -5063,11 +5299,41 @@ void ParsePrimitivesLinkedList(u32 *p, int singlePrimitive)
 				if (NativeDirectEmit_TryNode(basePacket, (u32)tagLength))
 				{
 					// handled: nothing to parse
+#if defined(CTR_INTERNAL) && defined(__3DS__)
+					profClass = PARSEPROF_DEMIT;
+#endif
+#if defined(__3DS__)
+					/* A POLY_G4 node: emit the run of them that follows it
+					 * (the menu flag) without the generic per-node work, and
+					 * resume the walk at the last one -- see
+					 * NativeDirectEmit_G4Run. */
+					{
+						u32 runNodes;
+#if defined(CTR_INTERNAL)
+						const u64 runStart = PARSEPROF_TICK();
+#endif
+						basePacket = NativeDirectEmit_G4Run(basePacket, (u32)tagLength, &otWalkIterations, &runNodes);
+#if defined(CTR_INTERNAL)
+						if (runNodes > 0)
+						{
+							const u64 runTicks = PARSEPROF_TICK() - runStart;
+
+							s_parseProf.runNodes += runNodes;
+							s_parseProf.runTicks += runTicks;
+							/* Keep this node's own sample free of the run. */
+							profNodeStart += runTicks;
+						}
+#endif
+					}
+#endif
 				}
 				else
 #endif
 				{
 					u8 *currentPacket = basePacket;
+#if defined(CTR_INTERNAL) && defined(__3DS__)
+					profClass = PARSEPROF_PARSE;
+#endif
 					u8 *endPacket = basePacket + (tagLength + P_LEN) * sizeof(u32);
 					int primLength = 0;
 					int firstVertex = s_gpu.vertexIndex;
@@ -5101,52 +5367,58 @@ void ParsePrimitivesLinkedList(u32 *p, int singlePrimitive)
 			}
 			else
 			{
-				/* Zero-length node: either an OT slot or a len-0 filler
-				 * packet (v1 conflated them; primMem sits contiguous with
-				 * the OT arena, so only the game's own ClearOTag bounds
-				 * discriminate -- measured, [OTZ2]). slotIdx = plain
-				 * array index = the retail otIndex GetProjectedOtIndex
-				 * computes from depth. */
-				s_gpu.otSlotsCrossed++;
+				NativeGpu_WalkCrossEmptyNode((uintptr_t)basePacket);
 
-				/* Read the SAME latched value the clear above used --
-				 * never re-evaluate g_dbg_otzWiden /
-				 * NATIVE_GPU_TRACK_RENDER_ACTIVE live here, see
-				 * otRecorderActive's field comment for why. */
-				if (s_gpu.otRecorderActive)
+#if !defined(CTR_NATIVE_OTWALK_PROFILE)
+				/*
+				 * Empty-slot run. A 1P frame walks ~1030 OT slots, most of them
+				 * empty and back to back, and each paid a whole generic
+				 * iteration. Following zero-length nodes are crossed here doing
+				 * only what that iteration does that can matter: link
+				 * validation, the cycle guard's count, GTECapture_MarkOTNode
+				 * (the UI-band latch can be entered on an OT slot) and the slot
+				 * crossing itself. The tag flags only matter for a node with
+				 * content, so they are set once, for the node the run stops on
+				 * -- the value the generic loop would have left behind. The
+				 * run stops before any node with content, the OT's end, a bad
+				 * link or the cycle guard, so the walk's tail takes over there
+				 * unchanged. (Off in OTPROF builds, which record every node.)
+				 */
 				{
-					uintptr_t addr = (uintptr_t)basePacket;
+					u32 emptyRun = 0;
 
-					if ((s_gpu.walkOtBase != 0) && (addr >= s_gpu.walkOtBase) && (addr < s_gpu.walkOtBase + (uintptr_t)s_gpu.walkOtCount * 4u))
+					while (!isendprim(basePacket))
 					{
-						u32 slotIdx = (u32)((addr - s_gpu.walkOtBase) >> 2);
+						u8 *next = nextPrim(basePacket);
 
-						if (slotIdx < OTZ_TABLE_SLOTS)
+						if (!NativeGpu_IsValidOTLink((uintptr_t)next) || (getlen(next) != 0) || (otWalkIterations >= 65536))
 						{
-							s_gpu.otBucketOrdinal[slotIdx] = (u16)(s_gpu.emitOrdinal < 0xFFFFu ? s_gpu.emitOrdinal : 0xFFFFu);
-							s_gpu.otSlotsDetected++;
-
-							/* Depth-compose fix: remember which bucket the
-							 * walk is passing through right now, so a later
-							 * content advance (NativeGpu_RecordContentAdvance)
-							 * knows which bucket to attribute itself to.
-							 * Slots are visited in descending order, so
-							 * whichever bucket was crossed most recently is
-							 * simply the current one -- no comparison needed
-							 * here, only at the point that reads it. */
-							s_gpu.otCurrentSlotIdx = slotIdx;
-
-							if (slotIdx > s_gpu.otMaxSlotIdx)
-							{
-								s_gpu.otMaxSlotIdx = slotIdx;
-							}
+							break;
 						}
+						otWalkIterations++;
+#if defined(CTR_NATIVE) && CTR_NATIVE_GTE_CAPTURE
+						GTECapture_MarkOTNode(next);
+#endif
+						basePacket = next;
+						NativeGpu_WalkCrossEmptyNode((uintptr_t)basePacket);
+						emptyRun++;
 					}
-					else
+					if (emptyRun > 0)
 					{
-						s_gpu.otSpuriousLen0++;
+#if defined(CTR_NATIVE) && CTR_NATIVE_GTE_CAPTURE
+						NativeGpu_TagWalkNode((uintptr_t)basePacket);
+#endif
+#if defined(CTR_INTERNAL) && defined(__3DS__)
+						/* This iteration's sample (if any) timed the whole run. */
+						s_parseProf.nodes[PARSEPROF_EMPTY] += emptyRun;
+						if (profSample)
+						{
+							s_parseProf.samples[PARSEPROF_EMPTY] += emptyRun;
+						}
+#endif
 					}
 				}
+#endif
 			}
 
 			GPUDrawSplit *lastSplit = &s_gpu.splits[s_gpu.splitIndex];
@@ -5171,8 +5443,22 @@ void ParsePrimitivesLinkedList(u32 *p, int singlePrimitive)
 				break;
 			}
 
+#if defined(CTR_INTERNAL) && defined(__3DS__)
+			s_parseProf.nodes[profClass]++;
+			if (profSample)
+			{
+				s_parseProf.samples[profClass]++;
+				s_parseProf.ticks[profClass] += PARSEPROF_TICK() - profNodeStart;
+			}
+#endif
 			basePacket = nextPacket;
 		}
+
+#if defined(CTR_INTERNAL) && defined(__3DS__)
+		s_parseProfSampleNode = 0;
+		s_parseProf.walkTicks += PARSEPROF_TICK() - profWalkStart;
+		ParseProf_FoldWalk();
+#endif
 	}
 
 	NativePerf_EndScope(NATIVE_PERF_BUCKET_DRAW_OTAG_PARSE);

@@ -161,6 +161,9 @@ global_variable const struct NativePerfBucketInfo s_bucketInfo[NATIVE_PERF_BUCKE
     /* Main-thread disc read; a dominant candidate -- it IS the thing we want to
      * see win "dominant" on a stalled frame. Appended to match the enum. */
     {"disc_read_main_ms", 1},
+    /* dominantCandidate 0: it only runs in time the frame would have slept,
+     * so it never makes a frame late -- see the enum comment. */
+    {"voice_cache_fill_ms", 0},
 };
 
 global_variable FILE *s_csvFile;

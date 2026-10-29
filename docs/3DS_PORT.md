@@ -107,8 +107,11 @@ Rules the hardware enforces and emulators do not:
   the whole software mix when the hardware voices are unavailable. Software
   mixing on the ARM11 is not fast enough to be the primary path.
 - XA music streams from the disc image on the SD card. The XA voice lines are
-  cached while the Sony logo is on screen (`Loading audio`), so a race never
-  waits on the card for speech.
+  cached in RAM after boot, in the idle part of each frame (the frame pacer's
+  wait, never during a level load), 8 sectors per step; a line played before
+  its track has landed streams from the card. The cache used to fill while
+  the Sony logo was held on screen, which made the boot ~16 s. No cache on
+  an Old 3DS (the heap has no room for it).
 - Output gain is twice retail's master level, because the PS1's master volume
   of 0x3fff is half of digital full scale.
 
@@ -206,6 +209,12 @@ heap/linear use, grep them for the real peak per level):
   there, and parks ballast so heap and linear match a legacy region of `mem` MiB
   (the atlas count and the hw-voice store follow the simulated linear heap). The button applies the clock at once; memory
   and workers need a restart.
+- With no workers, audio runs the worker's own per-vblank job on the main
+  thread (`N3DS_AudioRunVBlankOnCaller`: event-batched voice lifecycle, the
+  hardware-voice mirror, XA parcels at the source rate); the `audioprof` line
+  reports its split (`vbl` counts vblanks, `wakes` stays 0). The OT walk's
+  cost per node class is the `[PARSEPROF]` line (268 MHz ticks, i.e. Old-3DS
+  cycles); dumpreq `g4run` A/Bs the menu flag's fast path.
 - `./build3ds.sh --o3ds-sim` also builds `build-3ds/cia/ctr3d-o3dssim.cia` (own
   title ID 0x0004000005A2C400, SystemModeExt Legacy, SystemMode `O3DS_MEM`
   default 80MB, 268MHz, no L2). It installs next to the normal CIA and shares the

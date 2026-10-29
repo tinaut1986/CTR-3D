@@ -34,6 +34,13 @@ void NativeAudio_VoiceCacheEnsureBegin(void);
 int NativeAudio_VoiceCacheEnsureStep(int budgetSectors);
 u32 NativeAudio_VoiceCacheWarmSectorsRead(void);
 int NativeAudio_VoiceCacheWarmPercent(void);
+// On 3DS the voice lines themselves load AFTER the boot hold, in idle frame
+// time: the hold's Step returns as soon as the MUSIC count memo is warm, and
+// the frame pacer (native_platform.c) calls BackgroundStep while it would
+// otherwise sleep. A voice line opened before its track has landed streams
+// from the SD card, as it always could.
+int NativeAudio_VoiceCacheBackgroundPending(void);
+int NativeAudio_VoiceCacheBackgroundStep(int budgetSectors);
 int NativeAudio_PlayXAFile(const char *relativePath, int channelFilter, int volumeLeft, int volumeRight);
 int NativeAudio_GetXATrackLength(int categoryID, int xaID);
 int NativeAudio_IsXAPlaying(void);

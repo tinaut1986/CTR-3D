@@ -76,16 +76,34 @@ global_variable DirectEmitStats s_demit;
 
 #define DEMIT_WINDOW_FRAMES 64
 
+/* DirectEmit_WalkNode's `emit` argument. */
+enum
+{
+	DEMIT_PASS_DRY = 0,           /* validate + count, no side effects */
+	DEMIT_PASS_EMIT = 1,          /* emit only: the dry pass already ran */
+	DEMIT_PASS_COUNT_AND_EMIT = 2 /* single-prim node: validate, count, emit */
+};
+
 /*
  * One walker, two passes: emit=0 validates the whole node and counts content
- * (pure -- no state touched), emit=1 re-walks and emits. Sharing the walk
+ * (pure -- no state touched), emit=1 re-walks and emits. A node holding ONE
+ * prim takes a single pass instead (DEMIT_PASS_COUNT_AND_EMIT): every
+ * disqualifier is tested before that prim's first side effect, so there is
+ * nothing for a dry pass to protect -- see NativeDirectEmit_TryNode. Sharing the walk
  * keeps the layout tables single-copy; the dry pass guarantees the emit pass
  * cannot encounter a disqualifier after side effects have started.
  * Word layouts mirror ProcessFlatPoly/ProcessGouraudPoly exactly; a node
  * whose prim lengths do not tile tagLength is rejected, same guard as the
  * [OTPROF] shape walker.
  */
-internal int DirectEmit_WalkNode(const u32 *words, u32 len, int emit)
+/*
+ * knownCode: -1 for the generic walker; otherwise the caller guarantees the
+ * node is exactly one prim with this command byte, and the constant lets the
+ * compiler fold the shape decode and every branch that depends on it into a
+ * walker specialised for that one prim type (DirectEmit_WalkNodeG4). Same
+ * source, so the same bytes by construction.
+ */
+force_inline int DirectEmit_WalkNodeImpl(const u32 *words, u32 len, int emit, int knownCode)
 {
 	u32 w = 0;
 
@@ -107,7 +125,7 @@ internal int DirectEmit_WalkNode(const u32 *words, u32 len, int emit)
 	while (w < len)
 	{
 		const u32 cmd = words[w];
-		const u32 code = cmd >> 24;
+		const u32 code = (knownCode >= 0) ? (u32)knownCode : (cmd >> 24);
 
 		if ((code < 0x20u) || (code > 0x3Fu))
 		{
@@ -155,7 +173,9 @@ internal int DirectEmit_WalkNode(const u32 *words, u32 len, int emit)
 				return DEMIT_SKIP_FMT16;
 			}
 
-			if (!emit)
+			/* Counting runs on the dry pass (0) and on the single-pass form
+			 * (DEMIT_PASS_COUNT_AND_EMIT), never on a second, emit-only pass. */
+			if (emit != DEMIT_PASS_EMIT)
 			{
 				s_demit.framePrims++;
 				if (!gouraud && textured && !quadPrim && (xy[0] == 0xFFFFFFFFu) && (xy[1] == 0xFFFFFFFFu) && (xy[2] == 0xFFFFFFFFu))
@@ -168,7 +188,7 @@ internal int DirectEmit_WalkNode(const u32 *words, u32 len, int emit)
 				}
 			}
 #ifdef __3DS__
-			else
+			if (emit)
 			{
 				const s16 rawTPage = (s16)(uvw[1] >> 16);
 				const int isNullFT3 =
@@ -224,7 +244,18 @@ internal int DirectEmit_WalkNode(const u32 *words, u32 len, int emit)
 					u16 depthPerVert[4];
 					u16 depthPerVertPar[4];
 
+#if defined(CTR_INTERNAL)
+					const u64 profResolveStart = s_parseProfSampleNode ? PARSEPROF_TICK() : 0;
+					const int resolved = PacketDepth_ResolvePacked(xy, numVerts, &depthStamp, depthPerVert, depthPerVertPar);
+
+					if (s_parseProfSampleNode)
+					{
+						s_parseProf.demitResolveTicks += PARSEPROF_TICK() - profResolveStart;
+					}
+					if (resolved)
+#else
 					if (PacketDepth_ResolvePacked(xy, numVerts, &depthStamp, depthPerVert, depthPerVertPar))
+#endif
 					{
 						int v;
 
@@ -254,18 +285,92 @@ internal int DirectEmit_WalkNode(const u32 *words, u32 len, int emit)
 					const s16 clut = textured ? (s16)(uvw[0] >> 16) : 0;
 					const TexFormat fmt = textured ? GetTPageFormat((int)rawTPage) : TF_4_BIT;
 					const int numTris = quadPrim ? 2 : 1;
+					/* Each SOURCE vertex converted once: a quad's two
+					 * triangles share vertices 1 and 2, which the per-triangle
+					 * form converted twice (6 conversions for 4 vertices). Every
+					 * field but u/v depends only on the source vertex and this
+					 * prim's node flags, so the triangles copy these and only
+					 * u/v are written per triangle (they depend on the
+					 * triangle's own texture resolve). Same bytes as before. */
+					N3DS_Vertex srcVert[4];
 					int t;
+
+					for (v = 0; v < numVerts; v++)
+					{
+						const u32 xyWord = xy[v];
+						const u32 col = rgb[v];
+						s16 dx = (s16)((float)(s16)(xyWord & 0xFFFFu) + ofsX);
+						const s16 dz = zPerVertValid ? zPerVert[v] : z;
+						N3DS_Vertex *sv = &srcVert[v];
+
+						/* Widescreen UI relocation -- same rule as N3DS_ConvertTriangleVerts's:
+						 * UI-band stamps (biased z >= 32704 = raw 0xFFC0) get the X ramp
+						 * (NativeWide_UiShiftX). zPerVertValid doubles as the packet-depth-live
+						 * gate: an ordinal z cannot reach the band. No-op with wide off, so
+						 * PC/[DEMIT] goldens are untouched. */
+						if (zPerVertValid && (dz >= 32704))
+						{
+							extern int NativeWide_UiShiftX(int x);
+
+							dx = (s16)NativeWide_UiShiftX((int)dx);
+						}
+						/* s46: the horizon gradient is screen-space geometry hardcoded
+						 * to the retail 512-wide rect; stretch it to the wide ortho
+						 * window (identity with wide off). Glow slice only -- see
+						 * NativeWide_GlowStretchX for why the dome must not take this.
+						 * Mutually exclusive with the UI ramp above by depth: glow is
+						 * far-pinned. */
+						if (s_glowNodeActive)
+						{
+							extern int NativeWide_GlowStretchX(int x);
+
+							dx = (s16)NativeWide_GlowStretchX((int)dx);
+						}
+						/* Menu backdrop: same ramp as the window border these
+						 * strips sit inside, which is UI and already takes it --
+						 * see MakeVertexQuad's copy. Mutually exclusive with the
+						 * UI branch above by depth (the backdrop is midband). */
+						if (s_menubdNodeActive)
+						{
+							extern int NativeWide_UiShiftX(int x);
+
+							dx = (s16)NativeWide_UiShiftX((int)dx);
+						}
+						sv->x = dx;
+						sv->y = (s16)((float)(s16)(xyWord >> 16) + ofsY);
+						sv->z = dz;
+						/* Parallax channel: the resolver's second
+						 * output where it exists, otherwise the same value
+						 * as z -- an ordinal-stamped or unresolved prim has
+						 * no separate stereo depth to carry. */
+						sv->w = zPerVertValid ? wPerVert[v] : dz;
+						/* Untextured: the white cell, per vertex constant.
+						 * Textured: written per triangle below. */
+						sv->u = (s16)(((N3DS_WHITE_CELL_X * N3DS_DECODE_TEXTURE_DIM + (N3DS_DECODE_TEXTURE_DIM / 2)) << 1) + 1);
+						sv->v = (s16)(2047 - ((N3DS_WHITE_CELL_Y * N3DS_DECODE_TEXTURE_DIM + (N3DS_DECODE_TEXTURE_DIM / 2)) << 1));
+						if (noShade)
+						{
+							sv->r = 128;
+							sv->g = 128;
+							sv->b = 128;
+						}
+						else
+						{
+							sv->r = (u8)(col & 0xFFu);
+							sv->g = (u8)((col >> 8) & 0xFFu);
+							sv->b = (u8)((col >> 16) & 0xFFu);
+						}
+						sv->_pad = 0;
+					}
 
 					/* Packet-index triangles (0,1,2) and (1,2,3): what
 					 * MakeVertexQuad's x0,x1,x3,x2 argument order and
 					 * TriangulateQuad's element swaps net out to. */
 					for (t = 0; t < numTris; t++)
 					{
-						const int i0 = t, i1 = t + 1, i2 = t + 2;
 						int bin, atlasIdx = 0, pbU = 0, pbV = 0, oU = 0, oV = 0;
 						N3DS_Vertex *dst;
 						int k;
-						const int idx[3] = {i0, i1, i2};
 
 						if (textured)
 						{
@@ -279,8 +384,8 @@ internal int DirectEmit_WalkNode(const u32 *words, u32 len, int emit)
 
 							for (k = 0; k < 3; k++)
 							{
-								tv[k].u = (u8)(uvw[idx[k]] & 0xFFu);
-								tv[k].v = (u8)((uvw[idx[k]] >> 8) & 0xFFu);
+								tv[k].u = (u8)(uvw[t + k] & 0xFFu);
+								tv[k].v = (u8)((uvw[t + k] >> 8) & 0xFFu);
 							}
 							N3DS_ResolveTriangleTexture(&tv[0], &tv[1], &tv[2], texPage, clut, fmt, N3DS_TEXVIEW_OPAQUE, &atlasIdx, &pbU, &pbV, &oU,
 							                            &oV);
@@ -312,78 +417,19 @@ internal int DirectEmit_WalkNode(const u32 *words, u32 len, int emit)
 							dst = &s_mergeBinVerts[bin][s_mergeBinUsed[bin]];
 						}
 
-						for (k = 0; k < 3; k++)
+						/* Triangle t is source vertices t, t+1, t+2. */
+						dst[0] = srcVert[t];
+						dst[1] = srcVert[t + 1];
+						dst[2] = srcVert[t + 2];
+						if (textured)
 						{
-							const u32 xyWord = xy[idx[k]];
-							const u32 col = rgb[idx[k]];
-							s16 dx = (s16)((float)(s16)(xyWord & 0xFFFFu) + ofsX);
-							const s16 dz = zPerVertValid ? zPerVert[idx[k]] : z;
-
-							/* Widescreen UI relocation -- same rule as N3DS_ConvertTriangleVerts's:
-							 * UI-band stamps (biased z >= 32704 = raw 0xFFC0) get the X ramp
-							 * (NativeWide_UiShiftX). zPerVertValid doubles as the packet-depth-live
-							 * gate: an ordinal z cannot reach the band. No-op with wide off, so
-							 * PC/[DEMIT] goldens are untouched. */
-							if (zPerVertValid && (dz >= 32704))
+							for (k = 0; k < 3; k++)
 							{
-								extern int NativeWide_UiShiftX(int x);
-
-								dx = (s16)NativeWide_UiShiftX((int)dx);
-							}
-							/* s46: the horizon gradient is screen-space geometry hardcoded
-							 * to the retail 512-wide rect; stretch it to the wide ortho
-							 * window (identity with wide off). Glow slice only -- see
-							 * NativeWide_GlowStretchX for why the dome must not take this.
-							 * Mutually exclusive with the UI ramp above by depth: glow is
-							 * far-pinned. */
-							if (s_glowNodeActive)
-							{
-								extern int NativeWide_GlowStretchX(int x);
-
-								dx = (s16)NativeWide_GlowStretchX((int)dx);
-							}
-							/* Menu backdrop: same ramp as the window border these
-							 * strips sit inside, which is UI and already takes it --
-							 * see MakeVertexQuad's copy. Mutually exclusive with the
-							 * UI branch above by depth (the backdrop is midband). */
-							if (s_menubdNodeActive)
-							{
-								extern int NativeWide_UiShiftX(int x);
-
-								dx = (s16)NativeWide_UiShiftX((int)dx);
-							}
-							dst[k].x = dx;
-							dst[k].y = (s16)((float)(s16)(xyWord >> 16) + ofsY);
-							dst[k].z = dz;
-							/* Parallax channel: the resolver's second
-							 * output where it exists, otherwise the same value
-							 * as z -- an ordinal-stamped or unresolved prim has
-							 * no separate stereo depth to carry. */
-							dst[k].w = zPerVertValid ? wPerVert[idx[k]] : dz;
-							if (textured)
-							{
-								const int srcU = (int)(uvw[idx[k]] & 0xFFu);
-								const int srcV = (int)((uvw[idx[k]] >> 8) & 0xFFu);
+								const int srcU = (int)(uvw[t + k] & 0xFFu);
+								const int srcV = (int)((uvw[t + k] >> 8) & 0xFFu);
 
 								dst[k].u = (s16)(((pbU + (srcU - oU)) << 1) + 1);
 								dst[k].v = (s16)(2047 - ((pbV + (srcV - oV)) << 1));
-							}
-							else
-							{
-								dst[k].u = (s16)(((N3DS_WHITE_CELL_X * N3DS_DECODE_TEXTURE_DIM + (N3DS_DECODE_TEXTURE_DIM / 2)) << 1) + 1);
-								dst[k].v = (s16)(2047 - ((N3DS_WHITE_CELL_Y * N3DS_DECODE_TEXTURE_DIM + (N3DS_DECODE_TEXTURE_DIM / 2)) << 1));
-							}
-							if (noShade)
-							{
-								dst[k].r = 128;
-								dst[k].g = 128;
-								dst[k].b = 128;
-							}
-							else
-							{
-								dst[k].r = (u8)(col & 0xFFu);
-								dst[k].g = (u8)((col >> 8) & 0xFFu);
-								dst[k].b = (u8)((col >> 16) & 0xFFu);
 							}
 						}
 						/* Advance whichever buffer this tri went to. */
@@ -418,24 +464,29 @@ internal int DirectEmit_WalkNode(const u32 *words, u32 len, int emit)
 	return DEMIT_OK;
 }
 
-/*
- * Called from ParsePrimitivesLinkedList per OT node (after the tagLength
- * validity checks, before the parse loop). Returns 1 when the node was fully
- * emitted here and the parse loop must be skipped; 0 means parse normally
- * (ineligible node, fast path inactive, or PC count-only build).
- */
-internal int NativeDirectEmit_TryNode(const u8 *packet, u32 tagLength)
+internal int DirectEmit_WalkNode(const u32 *words, u32 len, int emit)
 {
-	const u32 *words = (const u32 *)packet + P_LEN;
-	int active;
-	int scan;
+	return DirectEmit_WalkNodeImpl(words, len, emit, -1);
+}
 
-	/* OFF leg of the A/B (and the PC default) stays truly zero-cost: no
-	 * scan, no counters. */
-	if (!g_dbg_directEmit)
-	{
-		return 0;
-	}
+/* Single-pass walker for a one-prim POLY_G4 node (code 0x38: gouraud quad,
+ * untextured, opaque, shaded) -- the shape of every menu/loading flag quad
+ * (RaceFlag_DrawSelf). */
+#define DEMIT_CODE_POLY_G4 0x38u
+#define DEMIT_LEN_POLY_G4  8u
+
+internal int DirectEmit_WalkNodeG4(const u32 *words)
+{
+	return DirectEmit_WalkNodeImpl(words, DEMIT_LEN_POLY_G4, DEMIT_PASS_COUNT_AND_EMIT, (int)DEMIT_CODE_POLY_G4);
+}
+
+/*
+ * Whether the fast path may emit the node the walk is on (per node: the UI
+ * band latch and the hud-shine tag change during a walk). PC: never.
+ */
+internal int DirectEmit_NodeActive(void)
+{
+	int active;
 
 #ifdef __3DS__
 	active = s_mergeActive && (s_gpu.overrideTexture == 0) && !s_gpu.drawPrimMode && !g_dbg_texturelessMode && !g_dbg_forceSingleTexture &&
@@ -478,7 +529,87 @@ internal int NativeDirectEmit_TryNode(const u8 *packet, u32 tagLength)
 	active = 0;
 #endif
 
-	scan = DirectEmit_WalkNode(words, tagLength, 0);
+	return active;
+}
+
+/*
+ * Called from ParsePrimitivesLinkedList per OT node (after the tagLength
+ * validity checks, before the parse loop). Returns 1 when the node was fully
+ * emitted here and the parse loop must be skipped; 0 means parse normally
+ * (ineligible node, fast path inactive, or PC count-only build).
+ */
+internal int NativeDirectEmit_TryNode(const u8 *packet, u32 tagLength)
+{
+	const u32 *words = (const u32 *)packet + P_LEN;
+	int active;
+	int scan;
+
+	/* OFF leg of the A/B (and the PC default) stays truly zero-cost: no
+	 * scan, no counters. */
+	if (!g_dbg_directEmit)
+	{
+		return 0;
+	}
+
+	active = DirectEmit_NodeActive();
+
+#ifdef __3DS__
+	/*
+	 * Single-prim node (the menu flag's ~1000 quads are one POLY_G4 each, and
+	 * most race nodes hold one prim): one pass validates, counts and emits.
+	 * The dry pass exists so a LATER prim's disqualifier cannot surface after
+	 * an earlier prim's side effects; with one prim every test runs before
+	 * its first side effect, and a rejected node returns having touched
+	 * nothing, exactly as the dry pass would. Counters and bins come out
+	 * identical; the saving is the second decode of the packet.
+	 */
+	if (active)
+	{
+		const u32 code = words[0] >> 24;
+
+		if ((code >= 0x20u) && (code <= 0x3Fu))
+		{
+			const int numVerts = (code & 0x08u) ? 4 : 3;
+			const u32 primLen = 1u + (u32)numVerts * ((code & 0x04u) ? 2u : 1u) + ((code & 0x10u) ? (u32)(numVerts - 1) : 0u);
+
+			if (primLen == tagLength)
+			{
+				s_demit.frameNodes++;
+				if (g_dbg_perfTriScopes)
+				{
+					NativePerf_BeginScope(NATIVE_PERF_BUCKET_DIRECT_EMIT);
+				}
+				scan = ((code == DEMIT_CODE_POLY_G4) && (tagLength == DEMIT_LEN_POLY_G4)) ? DirectEmit_WalkNodeG4(words)
+				                                                                          : DirectEmit_WalkNode(words, tagLength, DEMIT_PASS_COUNT_AND_EMIT);
+				if (g_dbg_perfTriScopes)
+				{
+					NativePerf_EndScope(NATIVE_PERF_BUCKET_DIRECT_EMIT);
+				}
+				if (scan != DEMIT_OK)
+				{
+					s_demit.frameSkip[scan]++;
+					return 0;
+				}
+				s_demit.frameElig++;
+				return 1;
+			}
+		}
+	}
+#endif
+
+#if defined(CTR_INTERNAL) && defined(__3DS__)
+	{
+		const u64 profScanStart = s_parseProfSampleNode ? PARSEPROF_TICK() : 0;
+
+		scan = DirectEmit_WalkNode(words, tagLength, DEMIT_PASS_DRY);
+		if (s_parseProfSampleNode)
+		{
+			s_parseProf.demitScanTicks += PARSEPROF_TICK() - profScanStart;
+		}
+	}
+#else
+	scan = DirectEmit_WalkNode(words, tagLength, DEMIT_PASS_DRY);
+#endif
 	s_demit.frameNodes++;
 	if (scan != DEMIT_OK)
 	{
@@ -499,15 +630,99 @@ internal int NativeDirectEmit_TryNode(const u8 *packet, u32 tagLength)
 	if (g_dbg_perfTriScopes)
 	{
 		NativePerf_BeginScope(NATIVE_PERF_BUCKET_DIRECT_EMIT);
-		DirectEmit_WalkNode(words, tagLength, 1);
+		DirectEmit_WalkNode(words, tagLength, DEMIT_PASS_EMIT);
 		NativePerf_EndScope(NATIVE_PERF_BUCKET_DIRECT_EMIT);
 		return 1;
 	}
 #endif
 
-	DirectEmit_WalkNode(words, tagLength, 1);
+	DirectEmit_WalkNode(words, tagLength, DEMIT_PASS_EMIT);
 	return 1;
 }
+
+#ifdef __3DS__
+/*
+ * Runtime A/B for the G4 run below (dumpreq 'g4run'); both legs produce the
+ * same bins, so a flip mid-frame only splits that frame between them.
+ */
+int g_dbg_g4Run = 1;
+
+/*
+ * POLY_G4 run. The menu/loading flag (RaceFlag_DrawSelf) links its ~1000
+ * quads one per OT node, back to back, so the walk's generic per-node work --
+ * tag tests, the fast-path predicate, the shape decode, three function
+ * frames -- costs more than the quad itself. Called by the walk right after
+ * NativeDirectEmit_TryNode emitted `packet`: while the next node is another
+ * one-prim POLY_G4 node the generic loop would hand to the same single-pass
+ * walker, this does for it exactly what one generic iteration does -- link
+ * validation, GTECapture_MarkOTNode, the tag test, the fast-path predicate,
+ * the counters, DirectEmit_WalkNodeG4 -- and moves on. It stops BEFORE the
+ * first node that needs anything else (tag range, UI band latch, another
+ * shape, the end of the OT, a bad link, the cycle guard) and returns the last
+ * node it emitted, so the walk's own tail and next iteration take over there
+ * unchanged (MarkOTNode is idempotent for the node it re-marks). The node the
+ * walk handed in must itself be outside every tag range, so the walk's tag
+ * flags are all zero and stay zero across the run.
+ */
+internal u8 *NativeDirectEmit_G4Run(u8 *packet, u32 tagLength, u32 *walkIterations, u32 *runNodes)
+{
+	u8 *node = packet;
+
+	*runNodes = 0;
+	if (!g_dbg_g4Run || g_dbg_perfTriScopes || (tagLength != DEMIT_LEN_POLY_G4) ||
+	    ((((const u32 *)packet)[P_LEN] >> 24) != DEMIT_CODE_POLY_G4) || NativeGpu_InTagEnvelope((uintptr_t)packet))
+	{
+		return node;
+	}
+
+	for (;;)
+	{
+		u8 *next;
+		int scan;
+
+		if (isendprim(node))
+		{
+			return node;
+		}
+		next = nextPrim(node);
+		if (!NativeGpu_IsValidOTLink((uintptr_t)next))
+		{
+			return node; /* the walk's tail logs it */
+		}
+		if ((getlen(next) != DEMIT_LEN_POLY_G4) || ((((const u32 *)next)[P_LEN] >> 24) != DEMIT_CODE_POLY_G4))
+		{
+			return node;
+		}
+		if (*walkIterations >= 65536)
+		{
+			return node; /* the walk's cycle guard reports it */
+		}
+
+		GTECapture_MarkOTNode(next);
+		if (NativeGpu_InTagEnvelope((uintptr_t)next) || !g_dbg_directEmit || !DirectEmit_NodeActive())
+		{
+			return node;
+		}
+
+		(*walkIterations)++;
+		node = next;
+		s_demit.frameNodes++;
+		scan = DirectEmit_WalkNodeG4((const u32 *)node + P_LEN);
+		if (scan != DEMIT_OK)
+		{
+			/* Unreachable for an opaque untextured G4 of the right length;
+			 * counted the way TryNode would, and the node is still handled
+			 * here rather than parsed twice. */
+			s_demit.frameSkip[scan]++;
+		}
+		else
+		{
+			s_demit.frameElig++;
+		}
+		(*runNodes)++;
+	}
+}
+#endif
 
 /*
  * Per content-frame fold + 64-frame window report, called from ClearSplits
