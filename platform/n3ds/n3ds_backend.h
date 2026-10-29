@@ -772,14 +772,16 @@ int N3DS_ExtraCoresUsable(void);    /* New 3DS and not simulating an Old one */
  * down: 2 emulated vblanks (30 fps) is retail. Platform_FlipVBlanks
  * (native_platform.c) measures each frame's WORK -- flip to flip minus the
  * time the pacer slept -- hands it to N3DS_FramePaceNoteFrame and returns
- * N3DS_FramePaceFlipVBlanks: 2 or 3 (20 fps). Option (cfg `fpscap`):
- * 0 AUTO, 1 30 FPS, 2 20 FPS. AUTO is 30 on a New 3DS (unchanged) and, on an
- * Old 3DS / 2DS or the simulation, 20 while a quarter of the frames would miss
- * 30 and back to 30 once they all fit with margin, so the cadence is a steady 3
- * vblanks instead of a 2/3 judder. Game logic is time-based (elapsedTimeMS
- * from the root counter, clamped at 64 ms) and HOWL runs per vblank, so the
- * cap changes neither game speed nor music tempo; retail drops to 20 itself on
- * heavy frames.
+ * N3DS_FramePaceNextFlip: 1 (60 fps), 2 or 3 (20 fps). Option FRAME SKIP
+ * (g_dbg_frameCap, cfg `fpsmode`; the old `fpscap` is migrated): 0 AUTO, 1 30
+ * FPS, 2 OFF. AUTO, on every console: 60 while the frames fit, one step down
+ * (30, then 20) while a quarter of them miss, back up once they all fit with
+ * margin; OFF: 1 vblank whenever the context allows it, each frame taking the
+ * vblanks it needs; 30: retail. A frame is only ever shown for 1 vblank where
+ * the game allows 60 (g_fps60Allowed: racing, not menus / pause / cutscenes /
+ * loads); the frame after it runs its logic at 60 Hz (game/MAIN/MainFps60.c,
+ * include/ctr_fps60.h), so game speed holds at every rate. HOWL runs per
+ * vblank, so music tempo never changes.
  *
  * g_dbg_stereo: 0 off, 1 on, 2 AUTO (the Old-3DS default): on an Old 3DS the
  * right eye is dropped while it alone makes the frame miss the cap the frame
@@ -787,11 +789,12 @@ int N3DS_ExtraCoresUsable(void);    /* New 3DS and not simulating an Old one */
  * cost fits again. On a New 3DS 2 behaves as 1.
  */
 void N3DS_FramePaceNoteFrame(unsigned workUs);
+int N3DS_FramePaceNextFlip(void);         /* the interval for the frame just submitted */
 int N3DS_FramePaceFlipVBlanks(void);
 int N3DS_FramePaceOldClass(void);          /* Old 3DS / 2DS, or simulating one */
 int N3DS_FramePaceStereoSuppressed(void);  /* AUTO stereo has the right eye off */
 void N3DS_FramePaceFormat(char *out, int outSize); /* [PACE] window line, resets */
-extern int g_dbg_frameCap;                 /* 0 AUTO, 1 30 fps, 2 20 fps (cfg fpscap) */
+extern int g_dbg_frameCap;                 /* FRAME SKIP: 0 AUTO, 1 30 fps, 2 OFF (cfg fpsmode) */
 
 /* Read-only state for the bottom-screen UI (n3ds_bottomui.c). */
 int N3DS_StereoFrameActive(void);   /* this frame rendered both eyes */

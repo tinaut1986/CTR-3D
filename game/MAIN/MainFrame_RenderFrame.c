@@ -107,7 +107,8 @@ void MainFrame_RenderFrame(struct GameTracker *gGT, struct GamepadSystem *gGamep
 		{
 			if (lev != 0)
 			{
-				CTR_CycleTex_LEV(lev->ptr_anim_tex, gGT->timer);
+				// 60fps: retail frames (ModSDK CTR_04_CycleTex_LEV).
+				CTR_CycleTex_LEV(lev->ptr_anim_tex, Fps60_Timer30());
 			}
 		}
 	}
@@ -266,9 +267,12 @@ void MainFrame_RenderFrame(struct GameTracker *gGT, struct GamepadSystem *gGamep
 		if (sdata->Loading.stage == LOAD_IDLE)
 		{
 			// If game is not paused
-			if ((gGT->gameMode1 & PAUSE_ALL) == 0)
+			// 60fps: AI item use and its cooldowns are the 30 Hz world.
+			if (((gGT->gameMode1 & PAUSE_ALL) == 0) && g_fps60Full)
 			{
+				Fps60_Enter30();
 				PickupBots_Update();
+				Fps60_Leave30();
 			}
 
 #if defined(CTR_NATIVE)
@@ -604,7 +608,8 @@ void RenderAllWeather(struct GameTracker *gGT)
 		return;
 	}
 
-	RenderWeather(&gGT->pushBuffer[0], &gGT->backBuffer->primMem, &gGT->rainBuffer[0], numPlyrCurrGame, gGT->gameMode1 & PAUSE_ALL);
+	// 60fps: the drops move on 30 Hz-world frames only (nonzero = draw, no update).
+	RenderWeather(&gGT->pushBuffer[0], &gGT->backBuffer->primMem, &gGT->rainBuffer[0], numPlyrCurrGame, (gGT->gameMode1 & PAUSE_ALL) | (g_fps60Full ? 0 : 1));
 }
 
 void RenderAllConfetti(struct GameTracker *gGT)
@@ -1309,19 +1314,20 @@ void RenderAllLevelGeometry(struct GameTracker *gGT, struct Level *level1, struc
 
 		// === Temporary 60FPS macros ===
 		// Emulate 30fps on 60fps for SCVert and OVert
+		// 60fps: Fps60_Timer30() is that 30fps clock (here and 2P-4P below).
 
 		// if no SCVert
 		if ((level1->configFlags & 4) == 0)
 		{
 			// assume OVert (no primitives generated here)
-			AnimateWater1P(gGT->timer, level1->numWaterVertices, level1->ptr_water, level1->ptr_tex_waterEnvMap, gGT->visMem1->visOVertList[0]);
+			AnimateWater1P(Fps60_Timer30(), level1->numWaterVertices, level1->ptr_water, level1->ptr_tex_waterEnvMap, gGT->visMem1->visOVertList[0]);
 		}
 
 		// if SCVert
 		else
 		{
 			// draw SCVert (no primitives generated here
-			AnimateQuad(gGT->timer << 7, level1->numSCVert, level1->ptrSCVert, gGT->visMem1->visSCVertList[0]);
+			AnimateQuad(Fps60_Timer30() << 7, level1->numSCVert, level1->ptrSCVert, gGT->visMem1->visSCVertList[0]);
 		}
 
 		// camera of player 1
@@ -1477,7 +1483,7 @@ void RenderAllLevelGeometry(struct GameTracker *gGT, struct Level *level1, struc
 		if ((level1->configFlags & 4) == 0)
 		{
 			// assume OVert (no primitives generated here)
-			AnimateWater2P(gGT->timer, level1->numWaterVertices, level1->ptr_water, level1->ptr_tex_waterEnvMap, gGT->visMem1->visOVertList[0],
+			AnimateWater2P(Fps60_Timer30(), level1->numWaterVertices, level1->ptr_water, level1->ptr_tex_waterEnvMap, gGT->visMem1->visOVertList[0],
 			               gGT->visMem1->visOVertList[1]);
 		}
 
@@ -1507,14 +1513,14 @@ void RenderAllLevelGeometry(struct GameTracker *gGT, struct Level *level1, struc
 		if (numPlyrCurrGame == 3)
 		{
 			// assume OVert (no primitives generated here)
-			AnimateWater3P(gGT->timer, level1->numWaterVertices, level1->ptr_water, level1->ptr_tex_waterEnvMap, gGT->visMem1->visOVertList[0],
+			AnimateWater3P(Fps60_Timer30(), level1->numWaterVertices, level1->ptr_water, level1->ptr_tex_waterEnvMap, gGT->visMem1->visOVertList[0],
 			               gGT->visMem1->visOVertList[1], gGT->visMem1->visOVertList[2]);
 		}
 
 		else // 4P mode
 		{
 			// assume OVert (no primitives generated here)
-			AnimateWater4P(gGT->timer, level1->numWaterVertices, level1->ptr_water, level1->ptr_tex_waterEnvMap, gGT->visMem1->visOVertList[0],
+			AnimateWater4P(Fps60_Timer30(), level1->numWaterVertices, level1->ptr_water, level1->ptr_tex_waterEnvMap, gGT->visMem1->visOVertList[0],
 			               gGT->visMem1->visOVertList[1], gGT->visMem1->visOVertList[2], gGT->visMem1->visOVertList[3]);
 		}
 	}
@@ -1807,6 +1813,8 @@ void RenderSubmit(struct GameTracker *gGT)
 
 	// NOTE: 2 everywhere but the 3DS frame cap, which can ask for 3 (20fps)
 	// on an Old 3DS -- see Platform_FlipVBlanks.
+	// 60fps: tell the pacer whether this context may be shown at 60.
+	Fps60_BeforeSubmit(gGT);
 	sdata->vsyncTillFlip = Platform_FlipVBlanks();
 
 	// Native still renders immediately through PsyCross, so keep the host GPU's

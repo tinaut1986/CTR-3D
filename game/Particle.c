@@ -1544,6 +1544,16 @@ struct Particle *Particle_Init(u32 param_1, struct IconGroup *ig, struct Particl
 
 	(void)param_1;
 
+	// 60fps (ModSDK AltMods/60fps/mods7.c NewParticleInit): particles move
+	// in the 30 Hz world, so per-frame emitters in 60 Hz code would spawn
+	// twice as many. Drop their spawns on half the frames -- timer & 2, not
+	// & 1, so emitters alternating on timer & 1 (left/right wheels) keep
+	// both sides. One-shot bursts set g_fps60ForceParticle.
+	if (g_fps60 && (g_fps60In30 == 0) && (g_fps60ForceParticle == 0) && ((gGT->timer & 2) != 0))
+	{
+		return NULL;
+	}
+
 	p = (struct Particle *)LIST_RemoveFront(&gGT->JitPools.particle.free);
 	if (p == NULL)
 	{

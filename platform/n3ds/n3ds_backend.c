@@ -467,7 +467,17 @@ void N3DS_EarlyInit(void)
 			g_dbg_stereo = 2;
 		}
 		g_dbg_stereo = N3DS_ConfigGet("stereo", g_dbg_stereo);
-		g_dbg_frameCap = N3DS_ConfigGet("fpscap", g_dbg_frameCap);
+		/* FRAME SKIP (cfg `fpsmode`: 0 AUTO, 1 30, 2 OFF) replaced FRAME CAP
+		 * (`fpscap`: 0 AUTO, 1 30, 2 20): AUTO -> AUTO, 30 -> 30, 20 -> AUTO. */
+		{
+			const int oldCap = N3DS_ConfigGet("fpscap", 0);
+
+			g_dbg_frameCap = N3DS_ConfigGet("fpsmode", (oldCap == 1) ? 1 : 0);
+			if ((g_dbg_frameCap < 0) || (g_dbg_frameCap > 2))
+			{
+				g_dbg_frameCap = 0;
+			}
+		}
 	}
 
 	/* FTP: debug builds on by default, production only with dev-ftp.txt (see
@@ -1579,63 +1589,8 @@ unsigned long long N3DS_StereoLastRightEyeTicks(void)
 }
 
 /* ----------------------------------------------------------- frame pace --- */
-/*
- * See n3ds_backend.h's frame-pace block. Everything here runs on the game
- * thread, once per flip, from Platform_FlipVBlanks (RenderSubmit): no locks.
- *
- * AUTO cap (Old-3DS class only), decided per window of N3DS_PACE_WINDOW
- * flips:
- *   30 -> 20 when N3DS_PACE_MISS_DOWN or more frames of the window missed the
- *            2-vblank budget (each such frame is shown for 3 vblanks next to
- *            2-vblank neighbours: the judder the cap exists to remove);
- *   20 -> 30 when N3DS_PACE_UP_WINDOWS windows in a row had at most one frame
- *            over N3DS_PACE_UP_US (2 vblanks minus a 4 ms margin).
- * After any change the next N3DS_PACE_DWELL windows decide nothing, so the
- * two thresholds cannot chase each other. Frames over N3DS_PACE_IGNORE_US are
- * loads or stalls, not a frame rate, and are not counted.
- *
- * AUTO stereo (g_dbg_stereo == 2, Old-3DS class only), after the cap decision,
- * against the slowest cap the option allows (3 vblanks unless the player forced
- * 30: 3D at 20 beats 2D at 30, the slider is up): the right eye goes off when
- * the window missed that budget N3DS_PACE_MISS_DOWN times or more but its
- * average frame minus
- * the average right-eye cost would fit with N3DS_PACE_ST_MARGIN_US to spare;
- * it comes back when, N3DS_PACE_UP_WINDOWS windows in a row, the average
- * frame plus the last measured right-eye cost fits with the same margin. The
- * slider still gates frame by frame; a window without stereo frames (slider
- * down) decides nothing about stereo.
- */
-#define N3DS_PACE_WINDOW         32
-#define N3DS_PACE_MISS_DOWN      8
-#define N3DS_PACE_UP_WINDOWS     2
-#define N3DS_PACE_DWELL          2
-#define N3DS_PACE_VBLANK_US      16667u
-#define N3DS_PACE_UP_US          (2u * N3DS_PACE_VBLANK_US - 4000u)
-#define N3DS_PACE_IGNORE_US      250000u
-#define N3DS_PACE_ST_MARGIN_US   3000u
-
-int g_dbg_frameCap = 0;
-
-static int s_paceOldClass = -1;   /* lazily: APT_CheckNew3DS and the simulation */
-static int s_paceVbl = 2;         /* the AUTO cap's current flip interval */
-static int s_paceStereoOff = 0;   /* AUTO stereo dropped the right eye */
-static unsigned s_paceWinN;
-static unsigned s_paceWinOver2; /* frames over 2 vblanks (33.3 ms) */
-static unsigned s_paceWinOver3; /* frames over 3 vblanks (50 ms) */
-static unsigned s_paceWinOverUp;
-static unsigned long long s_paceWinWorkUs;
-static unsigned s_paceWinStereoN;
-static unsigned long long s_paceWinRightUs;
-static unsigned s_paceRightLastUs; /* average right-eye cost of the last stereo window */
-static int s_paceUpStreak;
-static int s_paceStereoUpStreak;
-static int s_paceDwell;
-/* [PACE] report window (the [PERF] cadence), separate from the decision window. */
-static unsigned s_paceRepN;
-static unsigned s_paceRepMiss;
-static unsigned s_paceRepMaxUs;
-static unsigned long long s_paceRepWorkUs;
-static unsigned s_paceRepChanges;
+/* The policy lives in n3ds_framepace.c (host-tested); the console bits here. */
+static int s_paceOldClass = -1; /* lazily: APT_CheckNew3DS and the simulation */
 
 int N3DS_FramePaceOldClass(void)
 {
@@ -1651,183 +1606,13 @@ int N3DS_FramePaceOldClass(void)
 	return s_paceOldClass || (s_o3dsSim != 0);
 }
 
-int N3DS_FramePaceFlipVBlanks(void)
+unsigned N3DS_FramePaceRightEyeUs(int *stereo)
 {
-	if (g_dbg_frameCap == 1)
-	{
-		return 2;
-	}
-	if (g_dbg_frameCap == 2)
-	{
-		return 3;
-	}
-	return N3DS_FramePaceOldClass() ? s_paceVbl : 2;
+	*stereo = (s_rightEyeLastTicks != 0);
+	return (unsigned)((s_rightEyeLastTicks * 1000000ull) / (unsigned long long)SYSCLOCK_ARM11);
 }
 
-int N3DS_FramePaceStereoSuppressed(void)
-{
-	return (g_dbg_stereo == 2) && s_paceStereoOff && N3DS_FramePaceOldClass();
-}
-
-static void N3DS_FramePaceDecide(void)
-{
-	const int oldClass = N3DS_FramePaceOldClass();
-	const unsigned avgWork = (s_paceWinN != 0) ? (unsigned)(s_paceWinWorkUs / s_paceWinN) : 0;
-	char msg[160];
-
-	if (!oldClass)
-	{
-		s_paceVbl = 2;
-		s_paceStereoOff = 0;
-		return;
-	}
-	if (s_paceDwell > 0)
-	{
-		s_paceDwell--;
-		return;
-	}
-
-	if (g_dbg_frameCap == 0)
-	{
-		if ((s_paceVbl == 2) && (s_paceWinOver2 >= N3DS_PACE_MISS_DOWN))
-		{
-			s_paceVbl = 3;
-			s_paceUpStreak = 0;
-			s_paceDwell = N3DS_PACE_DWELL;
-			s_paceRepChanges++;
-			snprintf(msg, sizeof(msg), "[PACE] auto cap 30 -> 20 fps (%u/%u frames over 2 vblanks, avg work %u us)", s_paceWinOver2, s_paceWinN, avgWork);
-			N3DS_DebugLog(msg);
-			return;
-		}
-		if (s_paceVbl == 3)
-		{
-			s_paceUpStreak = (s_paceWinOverUp <= 1) ? (s_paceUpStreak + 1) : 0;
-			if (s_paceUpStreak >= N3DS_PACE_UP_WINDOWS)
-			{
-				s_paceVbl = 2;
-				s_paceUpStreak = 0;
-				s_paceDwell = N3DS_PACE_DWELL;
-				s_paceRepChanges++;
-				snprintf(msg, sizeof(msg), "[PACE] auto cap 20 -> 30 fps (avg work %u us, %u frames over %u us)", avgWork, s_paceWinOverUp, N3DS_PACE_UP_US);
-				N3DS_DebugLog(msg);
-				return;
-			}
-		}
-	}
-
-	if (g_dbg_stereo != 2)
-	{
-		s_paceStereoOff = 0;
-		return;
-	}
-	{
-		/* The budget 3D is held to: the slowest cap AUTO would pick (3D at 20
-		 * beats 2D at 30 -- the player raised the slider), or the forced one. */
-		const int stVbl = (g_dbg_frameCap == 1) ? 2 : 3;
-		const unsigned budget = (unsigned)stVbl * N3DS_PACE_VBLANK_US;
-		const unsigned over = (stVbl == 2) ? s_paceWinOver2 : s_paceWinOver3;
-
-		if (!s_paceStereoOff && (s_paceWinStereoN * 2 >= s_paceWinN) && (s_paceWinStereoN != 0))
-		{
-			const unsigned avgRight = (unsigned)(s_paceWinRightUs / s_paceWinStereoN);
-
-			s_paceRightLastUs = avgRight;
-			if ((over >= N3DS_PACE_MISS_DOWN) && ((avgWork - ((avgRight < avgWork) ? avgRight : avgWork)) + N3DS_PACE_ST_MARGIN_US <= budget))
-			{
-				s_paceStereoOff = 1;
-				s_paceStereoUpStreak = 0;
-				s_paceDwell = N3DS_PACE_DWELL;
-				s_paceRepChanges++;
-				snprintf(msg, sizeof(msg), "[PACE] auto 3D: right eye OFF (%u/%u frames over %u us, avg work %u us, right eye %u us)", over, s_paceWinN,
-				         budget, avgWork, avgRight);
-				N3DS_DebugLog(msg);
-			}
-		}
-		else if (s_paceStereoOff)
-		{
-			s_paceStereoUpStreak = ((avgWork + s_paceRightLastUs + N3DS_PACE_ST_MARGIN_US) <= budget) ? (s_paceStereoUpStreak + 1) : 0;
-			if (s_paceStereoUpStreak >= N3DS_PACE_UP_WINDOWS)
-			{
-				s_paceStereoOff = 0;
-				s_paceStereoUpStreak = 0;
-				s_paceDwell = N3DS_PACE_DWELL;
-				s_paceRepChanges++;
-				snprintf(msg, sizeof(msg), "[PACE] auto 3D: right eye back ON (avg work %u us + right eye %u us fits %u us)", avgWork, s_paceRightLastUs,
-				         budget);
-				N3DS_DebugLog(msg);
-			}
-		}
-	}
-}
-
-void N3DS_FramePaceNoteFrame(unsigned workUs)
-{
-	const unsigned vbl = (unsigned)N3DS_FramePaceFlipVBlanks();
-	const unsigned rightUs = (unsigned)((s_rightEyeLastTicks * 1000000ull) / (unsigned long long)SYSCLOCK_ARM11);
-
-	if (workUs > N3DS_PACE_IGNORE_US)
-	{
-		return;
-	}
-
-	s_paceWinN++;
-	s_paceWinWorkUs += workUs;
-	if (workUs > (2u * N3DS_PACE_VBLANK_US))
-	{
-		s_paceWinOver2++;
-	}
-	if (workUs > (3u * N3DS_PACE_VBLANK_US))
-	{
-		s_paceWinOver3++;
-	}
-	if (workUs > N3DS_PACE_UP_US)
-	{
-		s_paceWinOverUp++;
-	}
-	if (s_rightEyeLastTicks != 0)
-	{
-		s_paceWinStereoN++;
-		s_paceWinRightUs += rightUs;
-	}
-
-	s_paceRepN++;
-	s_paceRepWorkUs += workUs;
-	s_paceRepMiss += (workUs > (vbl * N3DS_PACE_VBLANK_US)) ? 1u : 0u;
-	if (workUs > s_paceRepMaxUs)
-	{
-		s_paceRepMaxUs = workUs;
-	}
-
-	if (s_paceWinN >= N3DS_PACE_WINDOW)
-	{
-		N3DS_FramePaceDecide();
-		s_paceWinN = 0;
-		s_paceWinOver2 = 0;
-		s_paceWinOver3 = 0;
-		s_paceWinOverUp = 0;
-		s_paceWinWorkUs = 0;
-		s_paceWinStereoN = 0;
-		s_paceWinRightUs = 0;
-	}
-}
-
-void N3DS_FramePaceFormat(char *out, int outSize)
-{
-	const unsigned n = (s_paceRepN != 0) ? s_paceRepN : 1;
-
-	/* cap = the flip interval in force (fps), mode = the option, miss = frames
-	 * of the window over the cap's budget, 3d = the stereo option and whether
-	 * AUTO has the right eye off, rEye = last stereo window's right-eye cost. */
-	snprintf(out, (size_t)outSize, "[PACE] cap=%d mode=%s old=%d frames=%u avgWorkUs=%u maxWorkUs=%u miss=%u changes=%u 3d=%s%s rEyeUs=%u",
-	         60 / N3DS_FramePaceFlipVBlanks(), (g_dbg_frameCap == 1) ? "30" : (g_dbg_frameCap == 2) ? "20" : "auto", N3DS_FramePaceOldClass(),
-	         s_paceRepN, (unsigned)(s_paceRepWorkUs / n), s_paceRepMaxUs, s_paceRepMiss, s_paceRepChanges,
-	         (g_dbg_stereo == 0) ? "off" : (g_dbg_stereo == 2) ? "auto" : "on", N3DS_FramePaceStereoSuppressed() ? "(2D)" : "", s_paceRightLastUs);
-	s_paceRepN = 0;
-	s_paceRepMiss = 0;
-	s_paceRepMaxUs = 0;
-	s_paceRepWorkUs = 0;
-	s_paceRepChanges = 0;
-}
+#include "n3ds_framepace.c"
 
 #ifdef CTR_INTERNAL
 static unsigned long long s_endProfTicks[N3DS_ENDPROF_PHASES];

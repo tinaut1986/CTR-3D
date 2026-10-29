@@ -611,7 +611,8 @@ static const char *ui_stereo_text(void)
 	return ui_onoff(g_dbg_stereo);
 }
 
-/* FRAME CAP: AUTO shows the cap in force. */
+/* FRAME SKIP: OFF (60 whenever a frame fits), AUTO (60 / 30 / 20, adaptive;
+ * shows the rate in force) or 30 (retail). */
 static const char *ui_fpscap_text(void)
 {
 	if (g_dbg_frameCap == 1)
@@ -620,16 +621,24 @@ static const char *ui_fpscap_text(void)
 	}
 	if (g_dbg_frameCap == 2)
 	{
-		return "20";
+		return "OFF";
 	}
-	return (N3DS_FramePaceFlipVBlanks() == 3) ? "AUTO (20)" : "AUTO (30)";
+	switch (N3DS_FramePaceFlipVBlanks())
+	{
+	case 1:
+		return "AUTO (60)";
+	case 3:
+		return "AUTO (20)";
+	default:
+		return "AUTO (30)";
+	}
 }
 
 static void ui_draw_options(void)
 {
 	ui_draw_option(OPT_BTMMAP, TR("MINIMAP BELOW", "MAPA ABAJO"), g_dbg_btmMap, ui_onoff(g_dbg_btmMap));
 	ui_draw_option(OPT_STEREO, TR("3D EFFECT", "EFECTO 3D"), g_dbg_stereo, ui_stereo_text());
-	ui_draw_option(OPT_FPSCAP, TR("FRAME CAP", "LIMITE FPS"), 1, ui_fpscap_text());
+	ui_draw_option(OPT_FPSCAP, TR("FRAME SKIP", "SALTO FRAMES"), 1, ui_fpscap_text());
 	if (s_isNew3DS < 0)
 	{
 		bool n = false;
@@ -1149,9 +1158,9 @@ static void ui_press_option(int i)
 		N3DS_ConfigSet("stereo", g_dbg_stereo);
 		break;
 	case OPT_FPSCAP:
-		/* AUTO -> 30 -> 20 -> AUTO. */
+		/* AUTO -> 30 -> OFF -> AUTO. */
 		g_dbg_frameCap = (g_dbg_frameCap + 1) % 3;
-		N3DS_ConfigSet("fpscap", g_dbg_frameCap);
+		N3DS_ConfigSet("fpsmode", g_dbg_frameCap);
 		break;
 	case OPT_CPU804:
 		if (s_isNew3DS > 0)
