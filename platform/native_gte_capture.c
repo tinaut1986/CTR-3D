@@ -264,9 +264,17 @@ void GTECapture_NoteMatrix(const void *words8)
 {
 	GTECaptureBuffer *buf = &s_gteCaptureBuf[s_gteCaptureWriteIdx];
 
-	if (s_gteMtxShadowValid && (memcmp(s_gteMtxShadow, words8, sizeof(s_gteMtxShadow)) == 0))
+	/* Word compare, not memcmp: this runs once per projecting GTE op and the
+	 * matrix is almost always unchanged. Same answer as the byte compare. */
+	if (s_gteMtxShadowValid)
 	{
-		return;
+		const u32 *w = (const u32 *)words8;
+
+		if (((s_gteMtxShadow[0] ^ w[0]) | (s_gteMtxShadow[1] ^ w[1]) | (s_gteMtxShadow[2] ^ w[2]) | (s_gteMtxShadow[3] ^ w[3]) |
+		     (s_gteMtxShadow[4] ^ w[4]) | (s_gteMtxShadow[5] ^ w[5]) | (s_gteMtxShadow[6] ^ w[6]) | (s_gteMtxShadow[7] ^ w[7])) == 0)
+		{
+			return;
+		}
 	}
 
 	memcpy(s_gteMtxShadow, words8, sizeof(s_gteMtxShadow));

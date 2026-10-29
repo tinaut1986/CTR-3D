@@ -11,7 +11,16 @@
 
 extern u32 gte_leadingzerocount(u32 lzcs);
 
-u32 MFC2(s32 reg)
+/*
+ * The register accessors are always inlined: nearly every call passes a
+ * constant register number, so each folds to the one case it names instead
+ * of a call into a switch (one per GTE register move, several per projected
+ * triangle). The definitions keep their external linkage for any caller
+ * outside this unity TU.
+ */
+#define GTE_ACCESSOR __attribute__((always_inline)) inline
+
+GTE_ACCESSOR u32 MFC2(s32 reg)
 {
 	switch (reg)
 	{
@@ -46,7 +55,7 @@ u32 MFC2(s32 reg)
 	return gteRegs.CP2D.p[reg].d;
 }
 
-s32 MFC2_S(s32 reg)
+GTE_ACCESSOR s32 MFC2_S(s32 reg)
 {
 	// TODO(aalhendi): Confirm whether modifier reads should also use signed semantics.
 	switch (reg)
@@ -82,7 +91,7 @@ s32 MFC2_S(s32 reg)
 	return gteRegs.CP2D.p[reg].sd;
 }
 
-void MTC2(u32 value, s32 reg)
+GTE_ACCESSOR void MTC2(u32 value, s32 reg)
 {
 	switch (reg)
 	{
@@ -109,7 +118,7 @@ void MTC2(u32 value, s32 reg)
 	gteRegs.CP2D.p[reg].d = value;
 }
 
-void MTC2_S(s32 value, s32 reg)
+GTE_ACCESSOR void MTC2_S(s32 value, s32 reg)
 {
 	switch (reg)
 	{
@@ -136,7 +145,7 @@ void MTC2_S(s32 value, s32 reg)
 	gteRegs.CP2D.p[reg].sd = value;
 }
 
-void CTC2(u32 value, s32 reg)
+GTE_ACCESSOR void CTC2(u32 value, s32 reg)
 {
 	switch (reg)
 	{
@@ -162,7 +171,7 @@ void CTC2(u32 value, s32 reg)
 	gteRegs.CP2C.p[reg].d = value;
 }
 
-void CTC2_S(s32 value, s32 reg)
+GTE_ACCESSOR void CTC2_S(s32 value, s32 reg)
 {
 	switch (reg)
 	{
@@ -188,21 +197,88 @@ void CTC2_S(s32 value, s32 reg)
 	gteRegs.CP2C.p[reg].sd = value;
 }
 
-u32 CFC2(s32 reg)
+GTE_ACCESSOR u32 CFC2(s32 reg)
 {
 	// TODO(aalhendi): Verify CFC2 control-register edge cases against PS1 GTE behavior.
 
 	return gteRegs.CP2C.p[reg].d;
 }
 
-s32 CFC2_S(s32 reg)
+GTE_ACCESSOR s32 CFC2_S(s32 reg)
 {
 	// TODO(aalhendi): Verify CFC2 control-register edge cases against PS1 GTE behavior.
 
 	return gteRegs.CP2C.p[reg].sd;
 }
 
-s32 doCOP2(s32 op)
+/* native_gte_core.c's constant-op entries. */
+extern int GTE_OpRTPS(void);
+extern int GTE_OpRTPT(void);
+extern int GTE_OpNCLIP(void);
+extern int GTE_OpAVSZ3(void);
+extern int GTE_OpAVSZ4(void);
+extern int GTE_OpDPCT(void);
+extern int GTE_OpDPCS(void);
+extern int GTE_OpSQR0(void);
+extern int GTE_OpOP12(void);
+extern int GTE_OpMVMVA_RT_V0_TR(void);
+extern int GTE_OpMVMVA_RT_V0(void);
+extern int GTE_OpMVMVA_RT_V0_SF0(void);
+extern int GTE_OpMVMVA_RT_IR(void);
+extern int GTE_OpMVMVA_RT_IR_SF0(void);
+extern int GTE_OpMVMVA_LL_V0(void);
+extern int GTE_OpMVMVA_LC_V0(void);
+extern int GTE_OpMVMVA_LC_IR(void);
+
+/*
+ * Inlined into every gte_* macro: an op word known at compile time goes
+ * straight to its specialised copy (sf and lm folded, no dispatch), anything
+ * else to the generic GTE_operator. Both run the same arithmetic.
+ */
+GTE_ACCESSOR s32 doCOP2(s32 op)
 {
+	if (__builtin_constant_p(op))
+	{
+		switch (op & 0x1ffffff)
+		{
+		case 0x0180001:
+			return GTE_OpRTPS();
+		case 0x0280030:
+			return GTE_OpRTPT();
+		case 0x1400006:
+			return GTE_OpNCLIP();
+		case 0x158002D:
+			return GTE_OpAVSZ3();
+		case 0x168002E:
+			return GTE_OpAVSZ4();
+		case 0x0F8002A:
+			return GTE_OpDPCT();
+		case 0x0780010:
+			return GTE_OpDPCS();
+		case 0x0A00428:
+			return GTE_OpSQR0();
+		case 0x178000C:
+			return GTE_OpOP12();
+		case 0x0480012:
+			return GTE_OpMVMVA_RT_V0_TR();
+		case 0x0486012:
+			return GTE_OpMVMVA_RT_V0();
+		case 0x0406012:
+			return GTE_OpMVMVA_RT_V0_SF0();
+		case 0x049E012:
+			return GTE_OpMVMVA_RT_IR();
+		case 0x041E012:
+			return GTE_OpMVMVA_RT_IR_SF0();
+		case 0x04A6012:
+			return GTE_OpMVMVA_LL_V0();
+		case 0x04C6012:
+			return GTE_OpMVMVA_LC_V0();
+		case 0x04DE012:
+			return GTE_OpMVMVA_LC_IR();
+		default:
+			break;
+		}
+	}
+
 	return GTE_operator(op);
 }
