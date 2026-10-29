@@ -4855,6 +4855,86 @@ internal void OTProf_DryWalk(u8 *basePacket)
 }
 #endif /* CTR_NATIVE_OTWALK_PROFILE */
 
+#if defined(CTR_INTERNAL) && defined(__3DS__)
+/*
+ * [PARSEPROF] -- where draw_otag_parse_ms goes, per node class, on hardware.
+ * The scope only says the walk is expensive (24 ms of an 83 ms Old-3DS menu
+ * frame); this says which kind of node pays: empty OT slots (the walk's own
+ * per-node overhead), direct-emitted nodes (split into the dry scan, the depth
+ * resolve and the rest of the emit), and nodes that take the packet parse.
+ *
+ * Sampled, not per node: one node in PARSEPROF_SAMPLE_EVERY is timed with
+ * svcGetSystemTick (an SVC, a few hundred cycles), so the tax stays near 1% of
+ * the walk while a frame still yields ~100 samples. A class's cost is its full
+ * node count times its sampled mean. Ticks are SYSCLOCK_ARM11 (268 MHz) units,
+ * i.e. CPU cycles on an Old 3DS and a third of them on a New 3DS at 804 MHz.
+ * Always on in CTR_INTERNAL builds (no toggle to forget); one log line per 64
+ * walks, beside [PERF].
+ */
+#define PARSEPROF_SAMPLE_EVERY 16
+#define PARSEPROF_WINDOW_WALKS 64
+enum
+{
+	PARSEPROF_EMPTY = 0,
+	PARSEPROF_DEMIT,
+	PARSEPROF_PARSE,
+	PARSEPROF_CLASSES
+};
+global_variable struct
+{
+	u32 nodes[PARSEPROF_CLASSES];
+	u32 samples[PARSEPROF_CLASSES];
+	u64 ticks[PARSEPROF_CLASSES];
+	/* Inside the sampled DEMIT nodes only (same samples as ticks[DEMIT]). */
+	u64 demitScanTicks;
+	u64 demitResolveTicks;
+	u64 walkTicks; /* whole walks, every walk: the denominator */
+	u32 walks;
+} s_parseProf;
+/* Set by the walk for the node being sampled; read by the direct-emit scan and
+ * the emit's depth resolve to time their own parts of that same node. */
+global_variable int s_parseProfSampleNode;
+
+internal void ParseProf_FoldWalk(void)
+{
+	char line[256];
+	const double usPerTick = 1000000.0 / (double)N3DS_GetTickFrequency();
+	double estUs[PARSEPROF_CLASSES];
+	u32 perFrame[PARSEPROF_CLASSES];
+	u32 cyc[PARSEPROF_CLASSES];
+	u32 scanCyc;
+	u32 resolveCyc;
+	int c;
+
+	if (++s_parseProf.walks < PARSEPROF_WINDOW_WALKS)
+	{
+		return;
+	}
+
+	for (c = 0; c < PARSEPROF_CLASSES; c++)
+	{
+		const double mean = s_parseProf.samples[c] ? ((double)s_parseProf.ticks[c] / (double)s_parseProf.samples[c]) : 0.0;
+
+		cyc[c] = (u32)mean;
+		perFrame[c] = s_parseProf.nodes[c] / s_parseProf.walks;
+		estUs[c] = mean * (double)s_parseProf.nodes[c] * usPerTick / (double)s_parseProf.walks;
+	}
+	scanCyc = s_parseProf.samples[PARSEPROF_DEMIT] ? (u32)(s_parseProf.demitScanTicks / s_parseProf.samples[PARSEPROF_DEMIT]) : 0u;
+	resolveCyc = s_parseProf.samples[PARSEPROF_DEMIT] ? (u32)(s_parseProf.demitResolveTicks / s_parseProf.samples[PARSEPROF_DEMIT]) : 0u;
+
+	snprintf(line, sizeof(line),
+	         "[PARSEPROF] walks=%lu walkUs=%lu | empty n/f=%lu cyc=%lu us=%lu | demit n/f=%lu cyc=%lu (scan=%lu depth=%lu) us=%lu | parse n/f=%lu cyc=%lu us=%lu",
+	         (unsigned long)s_parseProf.walks, (unsigned long)((double)s_parseProf.walkTicks * usPerTick / (double)s_parseProf.walks),
+	         (unsigned long)perFrame[PARSEPROF_EMPTY], (unsigned long)cyc[PARSEPROF_EMPTY], (unsigned long)estUs[PARSEPROF_EMPTY],
+	         (unsigned long)perFrame[PARSEPROF_DEMIT], (unsigned long)cyc[PARSEPROF_DEMIT], (unsigned long)scanCyc, (unsigned long)resolveCyc,
+	         (unsigned long)estUs[PARSEPROF_DEMIT], (unsigned long)perFrame[PARSEPROF_PARSE], (unsigned long)cyc[PARSEPROF_PARSE],
+	         (unsigned long)estUs[PARSEPROF_PARSE]);
+	N3DS_DebugLog(line);
+	memset(&s_parseProf, 0, sizeof(s_parseProf));
+}
+#define PARSEPROF_TICK() N3DS_GetTickCount()
+#endif
+
 void ParsePrimitivesLinkedList(u32 *p, int singlePrimitive)
 {
 	if (!p)
@@ -4995,9 +5075,20 @@ void ParsePrimitivesLinkedList(u32 *p, int singlePrimitive)
 			s_gpu.minContentBucket = NATIVE_GPU_NO_CONTENT_BUCKET;
 		}
 
+#if defined(CTR_INTERNAL) && defined(__3DS__)
+		const u64 profWalkStart = PARSEPROF_TICK();
+#endif
+
 		while (true)
 		{
 			otWalkIterations++;
+#if defined(CTR_INTERNAL) && defined(__3DS__)
+			const int profSample = ((otWalkIterations % PARSEPROF_SAMPLE_EVERY) == 0);
+			const u64 profNodeStart = profSample ? PARSEPROF_TICK() : 0;
+			int profClass = PARSEPROF_EMPTY;
+
+			s_parseProfSampleNode = profSample;
+#endif
 			if (otWalkIterations > 65536)
 			{
 				char packetRegion[64];
@@ -5063,11 +5154,17 @@ void ParsePrimitivesLinkedList(u32 *p, int singlePrimitive)
 				if (NativeDirectEmit_TryNode(basePacket, (u32)tagLength))
 				{
 					// handled: nothing to parse
+#if defined(CTR_INTERNAL) && defined(__3DS__)
+					profClass = PARSEPROF_DEMIT;
+#endif
 				}
 				else
 #endif
 				{
 					u8 *currentPacket = basePacket;
+#if defined(CTR_INTERNAL) && defined(__3DS__)
+					profClass = PARSEPROF_PARSE;
+#endif
 					u8 *endPacket = basePacket + (tagLength + P_LEN) * sizeof(u32);
 					int primLength = 0;
 					int firstVertex = s_gpu.vertexIndex;
@@ -5171,8 +5268,22 @@ void ParsePrimitivesLinkedList(u32 *p, int singlePrimitive)
 				break;
 			}
 
+#if defined(CTR_INTERNAL) && defined(__3DS__)
+			s_parseProf.nodes[profClass]++;
+			if (profSample)
+			{
+				s_parseProf.samples[profClass]++;
+				s_parseProf.ticks[profClass] += PARSEPROF_TICK() - profNodeStart;
+			}
+#endif
 			basePacket = nextPacket;
 		}
+
+#if defined(CTR_INTERNAL) && defined(__3DS__)
+		s_parseProfSampleNode = 0;
+		s_parseProf.walkTicks += PARSEPROF_TICK() - profWalkStart;
+		ParseProf_FoldWalk();
+#endif
 	}
 
 	NativePerf_EndScope(NATIVE_PERF_BUCKET_DRAW_OTAG_PARSE);

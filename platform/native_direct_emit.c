@@ -224,7 +224,18 @@ internal int DirectEmit_WalkNode(const u32 *words, u32 len, int emit)
 					u16 depthPerVert[4];
 					u16 depthPerVertPar[4];
 
+#if defined(CTR_INTERNAL)
+					const u64 profResolveStart = s_parseProfSampleNode ? PARSEPROF_TICK() : 0;
+					const int resolved = PacketDepth_ResolvePacked(xy, numVerts, &depthStamp, depthPerVert, depthPerVertPar);
+
+					if (s_parseProfSampleNode)
+					{
+						s_parseProf.demitResolveTicks += PARSEPROF_TICK() - profResolveStart;
+					}
+					if (resolved)
+#else
 					if (PacketDepth_ResolvePacked(xy, numVerts, &depthStamp, depthPerVert, depthPerVertPar))
+#endif
 					{
 						int v;
 
@@ -478,7 +489,19 @@ internal int NativeDirectEmit_TryNode(const u8 *packet, u32 tagLength)
 	active = 0;
 #endif
 
+#if defined(CTR_INTERNAL) && defined(__3DS__)
+	{
+		const u64 profScanStart = s_parseProfSampleNode ? PARSEPROF_TICK() : 0;
+
+		scan = DirectEmit_WalkNode(words, tagLength, 0);
+		if (s_parseProfSampleNode)
+		{
+			s_parseProf.demitScanTicks += PARSEPROF_TICK() - profScanStart;
+		}
+	}
+#else
 	scan = DirectEmit_WalkNode(words, tagLength, 0);
+#endif
 	s_demit.frameNodes++;
 	if (scan != DEMIT_OK)
 	{
