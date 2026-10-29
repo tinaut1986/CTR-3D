@@ -48,7 +48,7 @@ PY
 fi
 "${BANNERTOOL}" makebanner -i "${BANNER_PNG}" -a "${BANNER_WAV}" -o "${OUT}/banner.bnr"
 
-"${MAKEROM}" -f cia -o "${OUT}/ctr3d.cia" -DAPP_ENCRYPTED=false \
+"${MAKEROM}" -f cia -o "${OUT}/ctr3d.cia" -DAPP_ENCRYPTED=false -DAPP_SYSTEM_MODE_EXT="${APP_SYSTEM_MODE_EXT}" \
     -elf "${ELF}" -rsf platform/n3ds/cia/ctr3d.rsf -exefslogo -target t \
     -icon "${SMDH}" -banner "${OUT}/banner.bnr" -major 1 -minor 0 -micro 0
 echo "Built ${OUT}/ctr3d.cia (SystemModeExt ${APP_SYSTEM_MODE_EXT})"
