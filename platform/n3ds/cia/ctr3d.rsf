@@ -57,9 +57,9 @@ AccessControlInfo:
 
   # Process Settings
   MemoryType                    : Application # Application/System/Base
-  SystemMode                    : $(APP_SYSTEM_MODE) # legacy mode (Old 3DS/2DS); package-cia.sh default 64MB, 80MB for the O3DS builds; a New 3DS uses SystemModeExt below
+  SystemMode                    : $(APP_SYSTEM_MODE) # legacy mode (Old 3DS/2DS); package-cia.sh default 80MB (96MB crashed the 2DS HOME menu in the author's other ports); a New 3DS uses SystemModeExt below
   IdealProcessor                : 0
-  AffinityMask                  : 3 # cores 0 and 1: the audio thread runs on core 1 (as sm-3ds / mzm)
+  AffinityMask                  : 3 # cores 0 and 1 (as the author's other ports); no thread of this port runs on core 1 (Rosalina hang, n3ds_audio_thread.c)
   Priority                      : 16
   MaxCpu                        : 0x9E # core 1 share ceiling = MaxCpu & 0x7F = 30 % (the audio thread's; more starves the system)
   HandleTableSize               : 0x200
@@ -74,7 +74,7 @@ AccessControlInfo:
   SpecialMemoryArrange          : true
 
   # New3DS Exclusive Process Settings
-  SystemModeExt                 : $(APP_SYSTEM_MODE_EXT) # Legacy (= use SystemMode above, the Old-3DS simulation CIA), 124MB or 178MB; package-cia.sh defaults to 178MB. The port needs far more than the 64MB legacy app region.
+  SystemModeExt                 : $(APP_SYSTEM_MODE_EXT) # Legacy (= use SystemMode above, the Old-3DS simulation CIA), 124MB or 178MB; package-cia.sh defaults to 178MB. One CIA for both consoles: a New 3DS reads this, an Old 3DS/2DS SystemMode.
   CpuSpeed                      : $(APP_CPU_SPEED) # 256MHz(Default)/804MHz
   EnableL2Cache                 : $(APP_L2_CACHE) # false(default)/true
   CanAccessCore2                : true

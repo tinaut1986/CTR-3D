@@ -9,7 +9,8 @@
 # the file is written as ctr3d.cia and as ctr3d-vX.Y.Z.cia (the name the updater expects).
 # Normally run by ./build3ds.sh (which builds the .3dsx too).
 # APP_SYSTEM_MODE_EXT=124MB|178MB picks the New 3DS app memory mode (default 178MB).
-# APP_SYSTEM_MODE=64MB|72MB|80MB|96MB is the legacy (Old 3DS/2DS) mode (default 64MB).
+# APP_SYSTEM_MODE=64MB|72MB|80MB|96MB is the legacy (Old 3DS/2DS) mode (default 80MB: one CIA for
+#   both consoles, as the author's other ports; 96MB crashed the 2DS HOME menu there).
 # O3DS_SIM=1 builds the Old-3DS SIMULATION CIA (ctr3d-o3dssim.cia): its own title ID
 #   (0x5A2C4, installs next to the normal one and shares sdmc:/3ds/ctr_native/),
 #   SystemModeExt Legacy + SystemMode ${O3DS_MEM:-80MB}, CpuSpeed 268MHz, no L2 cache.
@@ -37,7 +38,7 @@ if [[ "${O3DS_SIM:-0}" == "1" ]]; then
     CIA_NAME="ctr3d-o3dssim"
 fi
 APP_SYSTEM_MODE_EXT="${APP_SYSTEM_MODE_EXT:-178MB}"
-APP_SYSTEM_MODE="${APP_SYSTEM_MODE:-64MB}"
+APP_SYSTEM_MODE="${APP_SYSTEM_MODE:-80MB}"
 APP_CPU_SPEED="${APP_CPU_SPEED:-804MHz}"
 APP_L2_CACHE="${APP_L2_CACHE:-true}"
 APP_UNIQUE_ID="${APP_UNIQUE_ID:-0x5A2C3}"
