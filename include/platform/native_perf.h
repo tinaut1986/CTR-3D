@@ -193,6 +193,19 @@ enum NativePerfBucket
 	NATIVE_PERF_BUCKET_SUBMIT_FLIP,
 	NATIVE_PERF_BUCKET_SUBMIT_ENVS,
 	NATIVE_PERF_BUCKET_SUBMIT_DRAWOTAG,
+	/*
+	 * mainframe_setup_ms by part (MainFrame_RenderFrame): the VisMem refresh,
+	 * the animated-texture cycle, the active menu's input + state machine, and
+	 * the rest (rain, highlight, unplugged/final-lap messages, ElimBG). All
+	 * nest inside mainframe_setup_ms (not dominant candidates).
+	 */
+	NATIVE_PERF_BUCKET_SETUP_VISMEM,
+	NATIVE_PERF_BUCKET_SETUP_CYCLETEX,
+	NATIVE_PERF_BUCKET_SETUP_MENU,
+	NATIVE_PERF_BUCKET_SETUP_MISC,
+	NATIVE_PERF_BUCKET_STR_READ,
+	NATIVE_PERF_BUCKET_STR_DECODE,
+	NATIVE_PERF_BUCKET_STR_UPLOAD,
 	NATIVE_PERF_BUCKET_COUNT
 };
 

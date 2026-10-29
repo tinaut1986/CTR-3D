@@ -173,6 +173,14 @@ global_variable const struct NativePerfBucketInfo s_bucketInfo[NATIVE_PERF_BUCKE
     {"submit_flip_ms", 0},
     {"submit_envs_ms", 0},
     {"submit_drawotag_ms", 0},
+    /* dominantCandidate 0: the four nest inside mainframe_setup_ms. */
+    {"setup_vismem_ms", 0},
+    {"setup_cycletex_ms", 0},
+    {"setup_menu_ms", 0},
+    {"setup_misc_ms", 0},
+    {"str_read_ms", 0},
+    {"str_decode_ms", 0},
+    {"str_upload_ms", 0},
 };
 
 global_variable FILE *s_csvFile;
@@ -899,6 +907,14 @@ internal void NativePerf_Report3DSWindow(void)
 	         (int)(s_windowBucketMs[NATIVE_PERF_BUCKET_SUBMIT_ENVS] * toAvgUs), (int)(s_windowBucketMs[NATIVE_PERF_BUCKET_SUBMIT_DRAWOTAG] * toAvgUs),
 	         (int)(s_windowBucketMs[NATIVE_PERF_BUCKET_DRAW_OTAG] * toAvgUs), (int)(s_windowBucketMs[NATIVE_PERF_BUCKET_DRAW_OTAG_PARSE] * toAvgUs),
 	         (int)(s_windowBucketMs[NATIVE_PERF_BUCKET_PLATFORM_BEGIN_SCENE] * toAvgUs), (int)(s_windowBucketMs[NATIVE_PERF_BUCKET_PLATFORM_END_SCENE] * toAvgUs));
+	N3DS_DebugLog(out);
+	/* mainframe_setup_ms by part, avg us per frame. */
+	snprintf(out, sizeof(out), "[SETUPPROF] total=%d vismem=%d cycletex=%d menu=%d misc=%d strRead=%d strDec=%d strUp=%d",
+	         (int)(s_windowBucketMs[NATIVE_PERF_BUCKET_MAINFRAME_SETUP] * toAvgUs), (int)(s_windowBucketMs[NATIVE_PERF_BUCKET_SETUP_VISMEM] * toAvgUs),
+	         (int)(s_windowBucketMs[NATIVE_PERF_BUCKET_SETUP_CYCLETEX] * toAvgUs), (int)(s_windowBucketMs[NATIVE_PERF_BUCKET_SETUP_MENU] * toAvgUs),
+	         (int)(s_windowBucketMs[NATIVE_PERF_BUCKET_SETUP_MISC] * toAvgUs),
+	         (int)(s_windowBucketMs[NATIVE_PERF_BUCKET_STR_READ] * toAvgUs), (int)(s_windowBucketMs[NATIVE_PERF_BUCKET_STR_DECODE] * toAvgUs),
+	         (int)(s_windowBucketMs[NATIVE_PERF_BUCKET_STR_UPLOAD] * toAvgUs));
 	N3DS_DebugLog(out);
 	/* Frame cap / AUTO 3D state and the frame WORK the policy sees
 	 * (n3ds_backend.h's frame-pace block). */
