@@ -159,7 +159,7 @@ Rules the hardware enforces and emulators do not:
   the bottom screen (upload %, install %, 10 s countdown) and restarts into it.
 - CIA: `./build3ds.sh` builds the .3dsx and `build-3ds/cia/ctr3d.cia`
   (`package-cia.sh`; title ID 0x0004000005A2C300). One CIA for both consoles, as
-  the author's other ports: SystemModeExt 178MB on a New 3DS, SystemMode 80MB on
+  the author's other ports: SystemModeExt 124MB on a New 3DS (178MB made the return to HOME much slower), SystemMode 80MB on
   an Old 3DS / 2DS (exheader ARM11 caps +0xD low nibble = 2, +0xE high nibble = 3;
   96MB crashed the 2DS HOME menu in the other ports). See "Old 3DS / 2DS" below.
 - In any build, an empty `enable-log.txt` in `sdmc:/3ds/ctr_native/` turns on the SD log
@@ -171,7 +171,7 @@ Rules the hardware enforces and emulators do not:
 ## Old 3DS / 2DS (memory fits in 80 MB; CPU is the open part)
 
 Memory, measured from the code (`n3ds_heap.c` has the table): ~18 MiB of
-code+bss+stacks, then linear and heap. A New 3DS (178MB) keeps the full split
+code+bss+stacks, then linear and heap. A New 3DS (124MB) keeps the full split
 (linear 88 MiB, heap ~71 MiB, 11 decode atlases, 3 MiB hw-voice store, 32 MiB XA
 voice cache). A legacy region gets the lean split: linear 32 MiB holds the
 ~28.4 MiB Old-3DS linear budget (7 decode atlases = 14 MiB, 2 MiB hw-voice store,

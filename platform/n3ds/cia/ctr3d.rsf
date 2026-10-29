@@ -74,7 +74,7 @@ AccessControlInfo:
   SpecialMemoryArrange          : true
 
   # New3DS Exclusive Process Settings
-  SystemModeExt                 : $(APP_SYSTEM_MODE_EXT) # Legacy (= use SystemMode above, the Old-3DS simulation CIA), 124MB or 178MB; package-cia.sh defaults to 178MB. One CIA for both consoles: a New 3DS reads this, an Old 3DS/2DS SystemMode.
+  SystemModeExt                 : $(APP_SYSTEM_MODE_EXT) # Legacy (= use SystemMode above, the Old-3DS simulation CIA), 124MB or 178MB; package-cia.sh defaults to 124MB (178MB: slow return to HOME). One CIA for both consoles: a New 3DS reads this, an Old 3DS/2DS SystemMode.
   CpuSpeed                      : $(APP_CPU_SPEED) # 256MHz(Default)/804MHz
   EnableL2Cache                 : $(APP_L2_CACHE) # false(default)/true
   CanAccessCore2                : true

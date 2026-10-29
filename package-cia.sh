@@ -8,7 +8,7 @@
 # version fields are the build's X.Y.Z (platform/n3ds/tools/version.sh; CTR_VERSION overrides);
 # the file is written as ctr3d.cia and as ctr3d-vX.Y.Z.cia (the name the updater expects).
 # Normally run by ./build3ds.sh (which builds the .3dsx too).
-# APP_SYSTEM_MODE_EXT=124MB|178MB picks the New 3DS app memory mode (default 178MB).
+# APP_SYSTEM_MODE_EXT=124MB|178MB picks the New 3DS app memory mode (default 124MB: 178MB made the return to HOME much slower).
 # APP_SYSTEM_MODE=64MB|72MB|80MB|96MB is the legacy (Old 3DS/2DS) mode (default 80MB: one CIA for
 #   both consoles, as the author's other ports; 96MB crashed the 2DS HOME menu there).
 # O3DS_SIM=1 builds the Old-3DS SIMULATION CIA (ctr3d-o3dssim.cia): its own title ID
