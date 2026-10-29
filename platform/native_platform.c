@@ -1287,6 +1287,13 @@ int Platform_LastFrameVBlanks(void)
 #endif
 }
 
+/* The retail loading stage, for instruments outside the game TUs (the disc
+ * read log tags its slow reads with it). -1 before sdata exists. */
+int Platform_LoadStageForLog(void)
+{
+	return (sdata != NULL) ? (int)sdata->Loading.stage : -1;
+}
+
 int Platform_FlipVBlanks(void)
 {
 	const u64 now = SDL_GetPerformanceCounter();
