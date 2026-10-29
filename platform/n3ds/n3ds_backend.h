@@ -612,6 +612,11 @@ void N3DS_BottomUi_LogLine(const char *text);
  * cpu804. Set writes the file at once (a UI tap, never a frame path). */
 int N3DS_ConfigGet(const char *key, int def);
 void N3DS_ConfigSet(const char *key, int value);
+void N3DS_ConfigFlush(void);
+/* Exit sequence (Platform_Shutdown, 3DS): ExitBegin first, then the services in
+ * reverse order of start; every step is logged and flushed. */
+void N3DS_ExitBegin(void);
+void N3DS_ExitLog(const char *step);
 /* New 3DS 804MHz clock-up on/off (no-op on Old 3DS); persisted by the caller. */
 void N3DS_SetSpeedup(int on);
 

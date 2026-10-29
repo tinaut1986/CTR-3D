@@ -601,6 +601,14 @@ void Platform_Shutdown(void)
 
 	s_platformInitialized = 0;
 
+#ifdef __3DS__
+	// Exit order (the relaunch after SITE INSTALL crashed in ndsp when threads
+	// and services outlived each other): settings saved and the FTP thread
+	// joined first; then the render worker, the audio worker + ndsp, citro3d
+	// (frame sync, Fini) and gfx; socExit last (atexit, n3ds_backend.c).
+	N3DS_ExitBegin();
+#endif
+
 	// Drain and join the render worker before anything below tears down what
 	// its jobs touch. Posts STOP synchronously; no-op if it never came up.
 	NativeRenderQueue_Shutdown();

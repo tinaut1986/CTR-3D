@@ -98,7 +98,7 @@ typedef struct N3DS_FtpSession
 	unsigned long long rest; /* REST offset for the next RETR/STOR, 0 = none */
 } N3DS_FtpSession;
 
-static N3DS_FtpSession s_session;
+static N3DS_FtpSession s_session = {.ctrl = -1, .pasv = -1};
 
 /* ---- sockets ---- */
 
@@ -1128,23 +1128,50 @@ static void N3DS_FtpThreadMain(void *argument)
 	N3DS_FtpCloseSocket(&s_ftpListen);
 }
 
-/* Process exit: ask the thread to stop and give it a second. If it does not
- * end it is left alone (the kernel reaps it); see N3DS_FtpActive for socExit. */
+/*
+ * Exit: ask the thread to stop, wake it (shutdown() on a connected control or
+ * data socket makes a blocked read/send return), join it with a timeout, and
+ * only then close the listen socket. Called first of the exit sequence
+ * (N3DS_ExitBegin) -- the relaunch after SITE INSTALL included -- so the thread
+ * is gone before audio, GPU and the socket service are. If it does not end in
+ * 3 s it is left alone and socExit is skipped (N3DS_FtpActive); the kernel
+ * reaps it with the process.
+ */
+void N3DS_FtpShutdown(void)
+{
+	int fd;
+
+	s_ftpRun = 0;
+	if (s_ftpThread == NULL)
+	{
+		return;
+	}
+	fd = s_session.ctrl;
+	if (fd >= 0)
+	{
+		shutdown(fd, SHUT_RDWR);
+	}
+	fd = s_session.pasv;
+	if (fd >= 0)
+	{
+		shutdown(fd, SHUT_RDWR);
+	}
+	if (threadJoin(s_ftpThread, 3000000000ULL) == 0)
+	{
+		threadFree(s_ftpThread);
+		N3DS_FtpCloseSocket(&s_ftpListen);
+	}
+	else
+	{
+		s_ftpStuck = 1;
+		N3DS_DebugLog("[CTR-3DS] exit: ftp thread did not end in 3 s, left running");
+	}
+	s_ftpThread = NULL;
+}
+
 static void N3DS_FtpAtExit(void)
 {
-	s_ftpRun = 0;
-	if (s_ftpThread != NULL)
-	{
-		if (threadJoin(s_ftpThread, 1000000000ULL) == 0)
-		{
-			threadFree(s_ftpThread);
-		}
-		else
-		{
-			s_ftpStuck = 1;
-		}
-		s_ftpThread = NULL;
-	}
+	N3DS_FtpShutdown();
 }
 
 /* socExit is skipped by the backend when the thread would not end: with a client still

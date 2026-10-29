@@ -40,6 +40,9 @@ void N3DS_FtpBoot(void);
  * loop should quit so the new build starts. Arms the self-chainload. */
 int N3DS_FtpRelaunchDue(void);
 
+/* Exit sequence: stop the thread (join, 3 s timeout) and close its sockets. */
+void N3DS_FtpShutdown(void);
+
 /* Nonzero when the server thread did not end at exit (socExit must be skipped). */
 int N3DS_FtpActive(void);
 

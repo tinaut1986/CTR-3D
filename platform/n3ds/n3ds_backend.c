@@ -40,7 +40,7 @@
  *     because the working directory is not dependable this early.
  */
 #define N3DS_LOG_PATH "sdmc:/ctr3ds.log"
-#define N3DS_LOG_PREV_PATH "sdmc:/ctr3ds.prev.log"
+#define N3DS_LOG_PREV_PATH "sdmc:/ctr3ds-prev.log"
 
 static FILE *s_logFile = NULL;
 
@@ -257,9 +257,32 @@ int N3DS_ConfigGet(const char *key, int def)
 	return def;
 }
 
+static void N3DS_ConfigWrite(void)
+{
+	FILE *f = fopen(N3DS_APP_DIR "/ctr3d.cfg", "wb");
+	int i;
+
+	if (f != NULL)
+	{
+		for (i = 0; i < s_cfgCount; i++)
+		{
+			fprintf(f, "%s=%d\n", s_cfg[i].key, s_cfg[i].value);
+		}
+		fclose(f);
+	}
+}
+
+/* Before a relaunch/exit: the settings file is current even if a Set was lost. */
+void N3DS_ConfigFlush(void)
+{
+	if (s_cfgCount > 0)
+	{
+		N3DS_ConfigWrite();
+	}
+}
+
 void N3DS_ConfigSet(const char *key, int value)
 {
-	FILE *f;
 	int i;
 
 	for (i = 0; i < s_cfgCount; i++)
@@ -279,15 +302,7 @@ void N3DS_ConfigSet(const char *key, int value)
 		s_cfgCount++;
 	}
 	s_cfg[i].value = value;
-	f = fopen(N3DS_APP_DIR "/ctr3d.cfg", "wb");
-	if (f != NULL)
-	{
-		for (i = 0; i < s_cfgCount; i++)
-		{
-			fprintf(f, "%s=%d\n", s_cfg[i].key, s_cfg[i].value);
-		}
-		fclose(f);
-	}
+	N3DS_ConfigWrite();
 }
 
 void N3DS_EarlyInit(void)
@@ -700,6 +715,7 @@ void N3DS_GfxInit(void)
 void N3DS_GfxExit(void)
 {
 	gfxExit();
+	N3DS_ExitLog("gfx released");
 }
 
 /* Obsolete since the bottom screen stopped being CPU-drawn every frame (the old
@@ -1860,9 +1876,53 @@ int N3DS_C3DInit(void)
 	return 1;
 }
 
+/* Defined with their users further down; N3DS_C3DExit frees them. */
+static volatile int s_frameOpen;
+static C3D_RenderTarget *s_renderTargetBottom;
+static C3D_Tex s_bottomUiTex;
+static int s_bottomUiTexReady;
+
+/* One logged, flushed step of the exit sequence. The flush is the point: a
+ * crash during exit must leave the last step on the card (kept across the next
+ * boot as ctr3ds-prev.log). */
+void N3DS_ExitLog(const char *step)
+{
+	char msg[96];
+
+	snprintf(msg, sizeof(msg), "[CTR-3DS] exit: %s", step);
+	N3DS_DebugLog(msg);
+	N3DS_LogFlushNow();
+}
+
+/* First thing of the exit sequence (Platform_Shutdown): settings to disk, the
+ * FTP thread joined and its sockets closed, so nothing network-side outlives
+ * the services under it. The relaunch after SITE INSTALL and a normal quit
+ * both come through here. */
+void N3DS_ExitBegin(void)
+{
+	N3DS_ExitLog("begin");
+	N3DS_ConfigFlush();
+	N3DS_ExitLog("settings saved");
+	N3DS_FtpShutdown();
+	N3DS_ExitLog("ftp stopped");
+}
+
 void N3DS_C3DExit(void)
 {
 	int i;
+
+	/* Nothing may still be queued on the GPU when its textures, targets and
+	 * the command buffer go: close a frame left open (a quit mid-walk), then
+	 * wait for the queue to drain. C3D_FrameSync also covers the display
+	 * transfers of both screens. */
+	if (s_frameOpen)
+	{
+		s_frameOpen = 0;
+		C3D_FrameEnd(0);
+		N3DS_ExitLog("open frame closed");
+	}
+	C3D_FrameSync();
+	N3DS_ExitLog("gpu idle");
 
 #ifdef CTR_NATIVE_TRACK_RENDERER
 	N3DS_TrackGeom_Free();
@@ -1890,6 +1950,27 @@ void N3DS_C3DExit(void)
 		s_vertexBufferMem = NULL;
 	}
 
+	if (s_bottomUiTexReady)
+	{
+		C3D_TexDelete(&s_bottomUiTex);
+		s_bottomUiTexReady = 0;
+	}
+	if (s_renderTargetBottom != NULL)
+	{
+		C3D_RenderTargetDelete(s_renderTargetBottom);
+		s_renderTargetBottom = NULL;
+	}
+	if (s_renderTargetRight != NULL)
+	{
+		C3D_RenderTargetDelete(s_renderTargetRight);
+		s_renderTargetRight = NULL;
+	}
+	if (s_renderTarget != NULL)
+	{
+		C3D_RenderTargetDelete(s_renderTarget);
+		s_renderTarget = NULL;
+	}
+
 	shaderProgramFree(&s_shaderProgram);
 	if (s_shaderDvlb != NULL)
 	{
@@ -1897,7 +1978,9 @@ void N3DS_C3DExit(void)
 		s_shaderDvlb = NULL;
 	}
 
+	N3DS_ExitLog("gpu resources freed");
 	C3D_Fini();
+	N3DS_ExitLog("citro3d finalised");
 }
 
 /*
