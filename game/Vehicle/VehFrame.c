@@ -127,6 +127,15 @@ void VehFrameProc_Driving(struct Thread *t, struct Driver *d)
 	struct Instance *inst = t->inst;
 	u8 desiredAnim = VEH_FRAME_ANIM_DRIVE;
 
+	// 60fps: model anim data is not doubled, so the lean/steer/jump anim
+	// (animFrame interp by 1/2/6 per frame, and the jump matrixIndex that
+	// mirrors it) advances on 30 Hz ticks only. Replaces ModSDK's doubled
+	// anim data and its MainFrame_GameLogic jump `matrixIndex >> 1`.
+	if (!FPS60_HALF_RATE(sdata->gGT->timer))
+	{
+		return;
+	}
+
 	if ((d->instTntRecv == NULL) && (d->kartState != KS_WARP_PAD))
 	{
 		if (d->fireSpeed < 0)
@@ -217,7 +226,11 @@ void VehFrameProc_Driving(struct Thread *t, struct Driver *d)
 				targetFrame +=
 				    (((burnTimer >> VEH_FRAME_BURN_TIMER_SHIFT) % VEH_FRAME_BURN_FRAME_PERIOD) << VEH_FRAME_BURN_FRAME_SHIFT) - VEH_FRAME_BURN_FRAME_BIAS;
 				inst->animFrame = targetFrame;
+
+				// 60fps: already at 30 Hz (gated above), Particle_Init must not thin it
+				g_fps60ForceParticle = 1;
 				VehFrameProc_Driving_SpawnBurnSmoke(d);
+				g_fps60ForceParticle = 0;
 			}
 			else
 			{
@@ -283,6 +296,13 @@ void VehFrameProc_Spinning(struct Thread *t, struct Driver *d)
 	int numFrames = VehFrameInst_GetNumAnimFrames(inst, inst->animIndex);
 	int targetFrame;
 
+	// 60fps: anim data is not doubled, advance animFrame on 30 Hz ticks only
+	// (also covers VehFrameProc_LastSpin's call into here)
+	if (!FPS60_HALF_RATE(sdata->gGT->timer))
+	{
+		return;
+	}
+
 	if (numFrames <= 0)
 	{
 		return;
@@ -329,6 +349,13 @@ void VehFrameProc_Spinning(struct Thread *t, struct Driver *d)
 void VehFrameProc_LastSpin(struct Thread *t, struct Driver *d)
 {
 	struct Instance *inst = t->inst;
+
+	// 60fps: anim data is not doubled, advance animFrame on 30 Hz ticks only
+	// (replaces ModSDK VehFrameProc_4_LastSpin.c numFrames FPS_DOUBLE)
+	if (!FPS60_HALF_RATE(sdata->gGT->timer))
+	{
+		return;
+	}
 
 	if (inst->animIndex != VEH_FRAME_ANIM_DRIVE)
 	{

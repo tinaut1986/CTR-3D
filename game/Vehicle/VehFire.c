@@ -236,7 +236,8 @@ void VehFire_Increment(struct Driver *driver, int reserves, u32 type, int fireLe
 			//	- all others: -1 frames (255 = 'no' death)
 			if ((type & POWER_SLIDE_HANG_TIME) != 0)
 			{
-				count = VEH_FIRE_POWER_SLIDE_DISAPPEAR_FRAMES;
+				// 60fps: counted down per 60 Hz frame by VehTurbo_ThTick (ModSDK VehFire_1_Increment.c)
+				count = FPS_DOUBLE(VEH_FIRE_POWER_SLIDE_DISAPPEAR_FRAMES);
 			}
 			else
 			{

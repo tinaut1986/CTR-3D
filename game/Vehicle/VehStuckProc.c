@@ -275,6 +275,10 @@ void VehStuckProc_MaskGrab_Particles(struct Driver *d)
 {
 	struct Particle *p;
 
+	// 60fps: one-shot burst from 60 Hz driver code, Particle_Init must not
+	// thin it (not in ModSDK, same as the MaskGrab_Init burst)
+	g_fps60ForceParticle = 1;
+
 	for (int i = 10; i > 0; i--)
 	{
 		// Create instance in particle pool
@@ -282,6 +286,7 @@ void VehStuckProc_MaskGrab_Particles(struct Driver *d)
 
 		if (p == NULL)
 		{
+			g_fps60ForceParticle = 0;
 			return;
 		}
 
@@ -290,6 +295,8 @@ void VehStuckProc_MaskGrab_Particles(struct Driver *d)
 		p->axis[1].startVal = CTR_MipsAddLo(p->axis[1].startVal, d->posCurr.y);
 		p->axis[2].startVal = CTR_MipsAddLo(p->axis[2].startVal, d->posCurr.z);
 	}
+
+	g_fps60ForceParticle = 0;
 }
 
 
@@ -423,7 +430,12 @@ void VehStuckProc_MaskGrab_Animate(struct Thread *t, struct Driver *d)
 
 
 		// logic specific to maskgrab
-		frame = maskGrabAnimFrame + 1;
+		// 60fps: anim frame counter steps on 30 Hz ticks (ModSDK VehStuckProc_04_MaskGrab_Animate.c)
+		frame = maskGrabAnimFrame;
+		if (FPS60_HALF_RATE(gGT->timer))
+		{
+			frame = maskGrabAnimFrame + 1;
+		}
 
 		if (frame > VEH_STUCK_MASK_GRAB_CRASH_FRAME_CLAMP)
 		{
@@ -447,7 +459,8 @@ void VehStuckProc_MaskGrab_Animate(struct Thread *t, struct Driver *d)
 
 			if (d->NoInputTimer < VEH_STUCK_MASK_GRAB_SQUISH_DECREASE_LIMIT)
 			{
-				d->jumpSquishStretch = (s16)CTR_MipsSubLo((u16)d->jumpSquishStretch, VEH_STUCK_MASK_GRAB_SQUISH_DECREASE_STEP);
+				// 60fps: per-frame step, halved (not in ModSDK)
+				d->jumpSquishStretch = (s16)CTR_MipsSubLo((u16)d->jumpSquishStretch, FPS_HALF(VEH_STUCK_MASK_GRAB_SQUISH_DECREASE_STEP));
 				if (d->jumpSquishStretch < 0)
 				{
 					d->jumpSquishStretch = 0;
@@ -464,7 +477,8 @@ void VehStuckProc_MaskGrab_Animate(struct Thread *t, struct Driver *d)
 					d->KartStates.MaskGrab.boolParticlesSpawned = true;
 				}
 
-				d->jumpSquishStretch = (s16)CTR_MipsAddLo((u16)d->jumpSquishStretch, VEH_STUCK_MASK_GRAB_SQUISH_INCREASE_STEP);
+				// 60fps: per-frame step, halved (not in ModSDK)
+				d->jumpSquishStretch = (s16)CTR_MipsAddLo((u16)d->jumpSquishStretch, FPS_HALF(VEH_STUCK_MASK_GRAB_SQUISH_INCREASE_STEP));
 				if (d->jumpSquishStretch > VEH_STUCK_MASK_GRAB_SQUISH_MAX)
 				{
 					d->jumpSquishStretch = VEH_STUCK_MASK_GRAB_SQUISH_MAX;
@@ -595,6 +609,10 @@ void VehStuckProc_MaskGrab_Init(struct Thread *t, struct Driver *d)
 		{
 			d->KartStates.MaskGrab.AngleAxis_NormalVec = d->AxisAngle2_normalVec;
 
+			// 60fps: one-shot burst, Particle_Init must not thin it
+			// (ModSDK VehStuckProc_05_MaskGrab_Init.c sdata->UnusedPadding1)
+			g_fps60ForceParticle = 1;
+
 			for (int i = 10; i > 0; i--)
 			{
 				struct Particle *p = Particle_Init(0, gGT->iconGroup[9], &data.emSet_Falling[0]);
@@ -607,6 +625,8 @@ void VehStuckProc_MaskGrab_Init(struct Thread *t, struct Driver *d)
 				p->driverInst = d->instSelf;
 				p->driverID = d->driverID;
 			}
+
+			g_fps60ForceParticle = 0;
 		}
 		else
 		{
@@ -952,7 +972,8 @@ void VehStuckProc_RevEngine_PhysLinear(struct Thread *t, struct Driver *d)
 		return;
 	}
 
-	d->posCurr.y = CTR_MipsSubLo(d->posCurr.y, VEH_STUCK_REV_MASK_DESCENT_STEP);
+	// 60fps: per-frame descent, halved (ModSDK VehStuckProc_12_RevEngine_PhysLinear.c)
+	d->posCurr.y = CTR_MipsSubLo(d->posCurr.y, FPS_HALF(VEH_STUCK_REV_MASK_DESCENT_STEP));
 
 	// if maskObj exists
 	if (d->KartStates.RevEngine.maskObj != 0)
@@ -996,7 +1017,8 @@ void VehStuckProc_RevEngine_Animate(struct Thread *t, struct Driver *d)
 			fillStep = VEH_STUCK_REV_STEP_MIN;
 		}
 
-		int revLevel = VehCalc_InterpBySpeed(d->KartStates.RevEngine.fireLevel, fillStep, d->KartStates.RevEngine.boostMeter);
+		// 60fps: per-frame fill step, halved (ModSDK VehStuckProc_13_RevEngine_Animate.c)
+		int revLevel = VehCalc_InterpBySpeed(d->KartStates.RevEngine.fireLevel, FPS_HALF(fillStep), d->KartStates.RevEngine.boostMeter);
 
 		d->KartStates.RevEngine.fireLevel = revLevel;
 		d->KartStates.RevEngine.chargeState = REV_ENGINE_CHARGE_ACTIVE;
@@ -1037,7 +1059,8 @@ void VehStuckProc_RevEngine_Animate(struct Thread *t, struct Driver *d)
 	{
 		d->KartStates.RevEngine.chargeState = REV_ENGINE_CHARGE_IDLE;
 
-		int boostMeter = VehCalc_InterpBySpeed(d->KartStates.RevEngine.boostMeter, CTR_MipsAddLo(d->const_SacredFireSpeed / 3, 3),
+		// 60fps: per-frame step, halved (ModSDK VehStuckProc_13_RevEngine_Animate.c)
+		int boostMeter = VehCalc_InterpBySpeed(d->KartStates.RevEngine.boostMeter, FPS_HALF(CTR_MipsAddLo(d->const_SacredFireSpeed / 3, 3)),
 		                                       CTR_MipsAddLo(d->const_SacredFireSpeed, d->const_AccelSpeed_ClassStat));
 		d->KartStates.RevEngine.boostMeter = boostMeter;
 	}
@@ -1078,7 +1101,8 @@ void VehStuckProc_RevEngine_Animate(struct Thread *t, struct Driver *d)
 			decayStep = VEH_STUCK_REV_STEP_MIN;
 		}
 
-		int revLevel = CTR_MipsSubLo(d->KartStates.RevEngine.fireLevel, decayStep);
+		// 60fps: per-frame decay, halved (ModSDK VehStuckProc_13_RevEngine_Animate.c)
+		int revLevel = CTR_MipsSubLo(d->KartStates.RevEngine.fireLevel, FPS_HALF(decayStep));
 		d->KartStates.RevEngine.fireLevel = revLevel;
 
 		if (revLevel < 1)
@@ -1275,14 +1299,20 @@ void VehStuckProc_Tumble_PhysAngular(struct Thread *thread, struct Driver *drive
 
 	driver->numFramesSpentSteering = VEH_TUMBLE_STEERING_FRAME_SENTINEL;
 
-	driver->turnWobbleAngle = (s16)CTR_MipsSubLo((u16)driver->turnWobbleAngle, CTR_MipsSra(driver->turnWobbleAngle, VEH_TUMBLE_ANGULAR_DAMP_SHIFT));
-	driver->rotationSpinRate = (s16)CTR_MipsSubLo((u16)driver->rotationSpinRate, CTR_MipsSra(driver->rotationSpinRate, VEH_TUMBLE_ANGULAR_DAMP_SHIFT));
-	driver->turnAngleLerpVel = (s16)CTR_MipsSubLo((u16)driver->turnAngleLerpVel, CTR_MipsSra(driver->turnAngleLerpVel, VEH_TUMBLE_ANGULAR_DAMP_SHIFT));
+	// 60fps: per-frame 1/8 decay, on 30 Hz ticks only (ModSDK VehStuckProc_17_Tumble_PhysAngular.c)
+	if (FPS60_HALF_RATE(sdata->gGT->timer))
+	{
+		driver->turnWobbleAngle = (s16)CTR_MipsSubLo((u16)driver->turnWobbleAngle, CTR_MipsSra(driver->turnWobbleAngle, VEH_TUMBLE_ANGULAR_DAMP_SHIFT));
+		driver->rotationSpinRate = (s16)CTR_MipsSubLo((u16)driver->rotationSpinRate, CTR_MipsSra(driver->rotationSpinRate, VEH_TUMBLE_ANGULAR_DAMP_SHIFT));
+		driver->turnAngleLerpVel = (s16)CTR_MipsSubLo((u16)driver->turnAngleLerpVel, CTR_MipsSra(driver->turnAngleLerpVel, VEH_TUMBLE_ANGULAR_DAMP_SHIFT));
+	}
 
 	driver->ampTurnState = driver->rotationSpinRate;
 
+	// 60fps: turnAngleLerpVel is added per frame here (not scaled by
+	// elapsedTimeMS), halve it (not in ModSDK)
 	driver->turnAngleCurr = (s16)CTR_MipsSubLo(
-	    CTR_MipsAddLo(CTR_MipsAddLo((u16)driver->turnAngleCurr, (u16)driver->turnAngleLerpVel), VEH_TUMBLE_TURN_WRAP_BIAS) & VEH_TUMBLE_TURN_MASK,
+	    CTR_MipsAddLo(CTR_MipsAddLo((u16)driver->turnAngleCurr, (u16)FPS_HALF(driver->turnAngleLerpVel)), VEH_TUMBLE_TURN_WRAP_BIAS) & VEH_TUMBLE_TURN_MASK,
 	    VEH_TUMBLE_TURN_WRAP_BIAS);
 
 	driver->angle = (s16)(CTR_MipsAddLo((u16)driver->angle, CTR_MipsSra(CTR_MipsMulLo(driver->rotationSpinRate, elapsedTimeMS), VEH_TUMBLE_SPIN_RATE_SHIFT)) &
@@ -1766,25 +1796,27 @@ void VehStuckProc_Warp_PhysAngular(struct Thread *th, struct Driver *d)
 
 		d->KartStates.Warp.beamHeight = beamHeight;
 
-		d->KartStates.Warp.dustAngle = CTR_MipsSubLo(d->KartStates.Warp.dustAngle, VEH_WARP_DUST_ANGLE_STEP);
+		// 60fps: per-frame rotation step, halved (not in ModSDK)
+		d->KartStates.Warp.dustAngle = CTR_MipsSubLo(d->KartStates.Warp.dustAngle, FPS_HALF(VEH_WARP_DUST_ANGLE_STEP));
 
 		// add dust puff
 		VehStuckProc_Warp_AddDustPuff2(d, &d->KartStates.Warp);
 	}
 
 	warpTimer = d->KartStates.Warp.timer;
-	warpTimer = CTR_MipsAddLo(warpTimer, VEH_WARP_TIMER_STEP);
+	// 60fps: per-frame steps below are halved (ModSDK VehStuckProc_23_Warp_PhysAngular.c)
+	warpTimer = CTR_MipsAddLo(warpTimer, FPS_HALF(VEH_WARP_TIMER_STEP));
 
 	if (warpTimer <= VEH_WARP_TIMER_MAX)
 	{
 		for (s32 i = 0; i < 3; i++)
 		{
-			inst->scale.v[i] = VehCalc_InterpBySpeed(inst->scale.v[i], VEH_WARP_EXPAND_SCALE_SPEED, VEH_WARP_EXPAND_SCALE_TARGET_XZ >> (i & 1));
+			inst->scale.v[i] = VehCalc_InterpBySpeed(inst->scale.v[i], FPS_HALF(VEH_WARP_EXPAND_SCALE_SPEED), VEH_WARP_EXPAND_SCALE_TARGET_XZ >> (i & 1));
 		}
 
 		if (d->posCurr.y < CTR_MipsAddLo(d->quadBlockHeight, VEH_WARP_LIFT_HEIGHT_LIMIT))
 		{
-			d->posCurr.y = CTR_MipsAddLo(d->posCurr.y, VEH_WARP_LIFT_STEP);
+			d->posCurr.y = CTR_MipsAddLo(d->posCurr.y, FPS_HALF(VEH_WARP_LIFT_STEP));
 		}
 	}
 	else
@@ -1796,7 +1828,7 @@ void VehStuckProc_Warp_PhysAngular(struct Thread *th, struct Driver *d)
 
 		for (s32 i = 0; i < 3; i++)
 		{
-			inst->scale.v[i] = VehCalc_InterpBySpeed(inst->scale.v[i], (i == 1) ? VEH_WARP_SHRINK_SCALE_SPEED_Y : VEH_WARP_SHRINK_SCALE_SPEED_XZ,
+			inst->scale.v[i] = VehCalc_InterpBySpeed(inst->scale.v[i], (i == 1) ? FPS_HALF(VEH_WARP_SHRINK_SCALE_SPEED_Y) : FPS_HALF(VEH_WARP_SHRINK_SCALE_SPEED_XZ),
 			                                         VEH_WARP_SHRINK_SCALE_TARGET_Y * (i & 1));
 		}
 
@@ -1818,7 +1850,9 @@ void VehStuckProc_Warp_PhysAngular(struct Thread *th, struct Driver *d)
 			inst->flags |= HIDE_MODEL;
 		}
 
-		else
+		// 60fps: the accelerating launch runs on 30 Hz ticks only
+		// (ModSDK VehStuckProc_23_Warp_PhysAngular.c halfTime)
+		else if (FPS60_HALF_RATE(sdata->gGT->timer))
 		{
 			d->KartStates.Warp.heightOffset = CTR_MipsSubLo(d->KartStates.Warp.heightOffset, VEH_WARP_HEIGHT_OFFSET_STEP);
 			d->posCurr.y = CTR_MipsAddLo(d->posCurr.y, d->KartStates.Warp.heightOffset);
@@ -1826,7 +1860,8 @@ void VehStuckProc_Warp_PhysAngular(struct Thread *th, struct Driver *d)
 	}
 
 	// drift angle = ((drift angle + warp timer + 0x800) & 0xfff) - 0x800
-	s16 wrappedTurnAngle = (s16)CTR_MipsSubLo(CTR_MipsAddLo(CTR_MipsAddLo((u16)d->turnAngleCurr, (u16)warpTimer), VEH_WARP_TURN_WRAP_BIAS) & VEH_WARP_TURN_MASK,
+	// 60fps: warpTimer is the per-frame spin step, halve it (not in ModSDK)
+	s16 wrappedTurnAngle = (s16)CTR_MipsSubLo(CTR_MipsAddLo(CTR_MipsAddLo((u16)d->turnAngleCurr, (u16)FPS_HALF(warpTimer)), VEH_WARP_TURN_WRAP_BIAS) & VEH_WARP_TURN_MASK,
 	                                          VEH_WARP_TURN_WRAP_BIAS);
 	d->turnAngleCurr = wrappedTurnAngle;
 

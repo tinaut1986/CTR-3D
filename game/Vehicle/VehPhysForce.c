@@ -177,7 +177,11 @@ void VehPhysForce_OnGravity(struct Driver *driver, Vec3 *velocity)
 
 	Vec3 localVelocity = VehPhysForce_OnGravity_RotateVectorLocal(&driver->matrixMovingDir, (s16)velocity->x, (s16)velocity->y, (s16)velocity->z);
 	int originalLocalZ = localVelocity.z;
-	int gravityY = CTR_MipsNegLo(driver->const_Gravity);
+	// 60fps: ModSDK AltMods/60fps/mods5.c lowers data.metaPhys[0] (gravity,
+	// 900 for every class) to 850 at 60 fps, otherwise the finer integration
+	// step makes some jumps impossible (Hot Air Skyway C-T-R token, HAS USF
+	// startline jump). Applied at runtime here as 900 * 17 / 18 == 850.
+	int gravityY = CTR_MipsNegLo(FPS60 ? ((driver->const_Gravity * 17) / 18) : driver->const_Gravity);
 	struct QuadBlock *underDriver = driver->underDriver;
 
 	// NOTE(aalhendi): Retail does not branch before reading this flag. Native
@@ -869,6 +873,13 @@ static void VehPhysForce_TranslateMatrix_UpdateSquashStretch(struct Instance *in
 
 static void VehPhysForce_TranslateMatrix_UpdateMatrixAnimation(struct Driver *d)
 {
+	// 60fps: the baked wheelie / squish-recover matrix tables are anim data
+	// (not doubled), so matrixIndex steps through them on 30 Hz ticks only;
+	// state transitions (index resets / remaps) still run every frame (not
+	// in ModSDK, which let these run at 60 and only halved the jump anim
+	// matrixIndex in MainFrame_GameLogic)
+	int stepAnim = FPS60_HALF_RATE(sdata->gGT->timer);
+
 	if ((d->reserves == 0) || (d->fireSpeed < d->const_Speed_ClassStat) || ((d->actionsFlagSet & ACTION_TURBO_INPUT_LATCH) != 0))
 	{
 		if (d->matrixArray == BAKED_GTE_MATRIX_WHEELIE_HOLD)
@@ -881,7 +892,7 @@ static void VehPhysForce_TranslateMatrix_UpdateMatrixAnimation(struct Driver *d)
 			d->matrixIndex = VehPhysForce_TranslateMatrix_RemapIndex(d->matrixIndex, BAKED_GTE_MATRIX_WHEELIE_START, BAKED_GTE_MATRIX_WHEELIE_RECOVER);
 			d->matrixArray = BAKED_GTE_MATRIX_WHEELIE_RECOVER;
 		}
-		else if (d->matrixArray == BAKED_GTE_MATRIX_WHEELIE_RECOVER)
+		else if ((d->matrixArray == BAKED_GTE_MATRIX_WHEELIE_RECOVER) && stepAnim)
 		{
 			d->matrixIndex++;
 			if (d->matrixIndex >= data.bakedGteMath[BAKED_GTE_MATRIX_WHEELIE_RECOVER].numEntries)
@@ -894,11 +905,15 @@ static void VehPhysForce_TranslateMatrix_UpdateMatrixAnimation(struct Driver *d)
 	{
 		if (d->matrixArray == BAKED_GTE_MATRIX_WHEELIE_START)
 		{
-			d->matrixIndex++;
-			if (d->matrixIndex >= data.bakedGteMath[BAKED_GTE_MATRIX_WHEELIE_START].numEntries)
+			// 60fps: hold the current entry on the skipped frame
+			if (stepAnim)
 			{
-				d->matrixArray = BAKED_GTE_MATRIX_WHEELIE_HOLD;
-				d->matrixIndex = 0;
+				d->matrixIndex++;
+				if (d->matrixIndex >= data.bakedGteMath[BAKED_GTE_MATRIX_WHEELIE_START].numEntries)
+				{
+					d->matrixArray = BAKED_GTE_MATRIX_WHEELIE_HOLD;
+					d->matrixIndex = 0;
+				}
 			}
 		}
 		else if (d->matrixArray == BAKED_GTE_MATRIX_WHEELIE_RECOVER)
@@ -913,7 +928,7 @@ static void VehPhysForce_TranslateMatrix_UpdateMatrixAnimation(struct Driver *d)
 		}
 	}
 
-	if (d->matrixArray == BAKED_GTE_MATRIX_SQUISH_RECOVER)
+	if ((d->matrixArray == BAKED_GTE_MATRIX_SQUISH_RECOVER) && stepAnim)
 	{
 		d->matrixIndex++;
 		if (d->matrixIndex >= data.bakedGteMath[BAKED_GTE_MATRIX_SQUISH_RECOVER].numEntries)
@@ -1066,10 +1081,15 @@ static void VehPhysForce_TranslateMatrix_UpdateWake(struct Instance *inst, struc
 			{
 				int i;
 
+				// 60fps: one-shot burst, Particle_Init must not thin it (not in ModSDK)
+				g_fps60ForceParticle = 1;
+
 				for (i = VEH_PHYS_FORCE_WAKE_BURST_PARTICLE_COUNT; i > 0; i--)
 				{
 					VehPhysForce_TranslateMatrix_SpawnWakeParticle(d);
 				}
+
+				g_fps60ForceParticle = 0;
 			}
 		}
 	}
