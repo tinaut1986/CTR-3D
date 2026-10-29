@@ -74,7 +74,7 @@ AccessControlInfo:
   SpecialMemoryArrange          : true
 
   # New3DS Exclusive Process Settings
-  SystemModeExt                 : $(APP_SYSTEM_MODE_EXT) # 124MB or 178MB; package-cia.sh defaults to 178MB. The port needs far more than the 64MB legacy app region.
+  SystemModeExt                 : $(APP_SYSTEM_MODE_EXT) # 124MB or 178MB; package-cia.sh defaults to 124MB (178MB: slow return to HOME). The port needs far more than the 64MB legacy app region.
   CpuSpeed                      : 804MHz # 256MHz(Default)/804MHz
   EnableL2Cache                 : true # false(default)/true
   CanAccessCore2                : true

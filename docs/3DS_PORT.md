@@ -154,7 +154,7 @@ Rules the hardware enforces and emulators do not:
   `./build3ds.sh --install <ip>` uploads and installs the CIA; the game warns on
   the bottom screen (upload %, install %, 10 s countdown) and restarts into it.
 - CIA: `./build3ds.sh` builds the .3dsx and `build-3ds/cia/ctr3d.cia`
-  (`package-cia.sh`; title ID 0x0004000005A2C300, SystemModeExt 178MB on New 3DS,
+  (`package-cia.sh`; title ID 0x0004000005A2C300, SystemModeExt 124MB on New 3DS,
   SystemMode 64MB legacy = all an Old 3DS app gets). Old 3DS blockers: that 64MB
   region, and the FTP thread/render worker need New 3DS cores 2/3.
 - In any build, an empty `enable-log.txt` in `sdmc:/3ds/ctr_native/` turns on the SD log

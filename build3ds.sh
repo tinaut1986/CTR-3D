@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Builds the 3DS target: the .3dsx AND the installable .cia (the CIA is what the
 # author runs: a .3dsx under the Homebrew Launcher only gets the host title's
-# memory, the CIA's SystemModeExt 178MB gets the whole New 3DS app region).
+# memory, the CIA's SystemModeExt 124MB gets ~105 MB of the New 3DS app region).
 #
 #   ./build3ds.sh                       build/refresh both
 #   ./build3ds.sh --no-cia              .3dsx only

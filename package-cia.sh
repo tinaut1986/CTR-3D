@@ -8,7 +8,7 @@
 # version fields are the build's X.Y.Z (platform/n3ds/tools/version.sh; CTR_VERSION overrides);
 # the file is written as ctr3d.cia and as ctr3d-vX.Y.Z.cia (the name the updater expects).
 # Normally run by ./build3ds.sh (which builds the .3dsx too).
-# APP_SYSTEM_MODE_EXT=124MB|178MB picks the New 3DS app memory mode (default 178MB).
+# APP_SYSTEM_MODE_EXT=124MB|178MB picks the New 3DS app memory mode (default 124MB, as ../RSDKv5-Decompilation: 178MB made the return to HOME much slower and the game fits in 124MB).
 set -euo pipefail
 cd "$(dirname "$(readlink -f "$0")")"
 
@@ -19,7 +19,7 @@ SMDH="${BUILD}/ctr_native.smdh"
 OUT="${BUILD}/cia"
 VERSION="$(sh platform/n3ds/tools/version.sh)"
 IFS=. read -r V_MAJOR V_MINOR V_MICRO <<< "$(printf '%s' "${VERSION}" | sed -E 's/^([0-9]+)\.([0-9]+)\.([0-9]+).*/\1.\2.\3/')"
-export APP_SYSTEM_MODE_EXT="${APP_SYSTEM_MODE_EXT:-178MB}"
+export APP_SYSTEM_MODE_EXT="${APP_SYSTEM_MODE_EXT:-124MB}"
 
 find_tool() {
     local name="$1" var="${2:-}"
