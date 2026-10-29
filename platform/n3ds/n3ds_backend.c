@@ -1906,6 +1906,7 @@ static void N3DS_GpuAptHook(APT_HookType type, void *param)
 	int waited;
 
 	(void)param;
+	N3DS_FtpAptEvent((int)type);
 	if (!s_c3dUp)
 	{
 		return;

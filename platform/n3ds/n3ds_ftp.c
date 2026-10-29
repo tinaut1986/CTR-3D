@@ -76,6 +76,8 @@ static volatile int s_ftpRun = 0;
 static int s_ftpStuck = 0; /* the thread did not end at exit */
 static int s_ftpListen = -1;
 static uint32_t s_ftpIp = 0;
+static volatile unsigned s_ftpWakeGen = 0;    /* bumped by the APT hook on sleep/wake */
+static volatile unsigned s_ftpSessionGen = 0; /* generation the current listen belongs to */
 static unsigned char *s_ftpIo = NULL;
 static unsigned s_ftpNextPasv = 0;
 static int s_ftpAtExitSet = 0;
@@ -127,7 +129,7 @@ static int N3DS_FtpWaitFd(int fd, short events, int timeoutMs)
 {
 	int waited = 0;
 
-	while (s_ftpRun)
+	while (s_ftpRun && (s_ftpWakeGen == s_ftpSessionGen))
 	{
 		struct pollfd p;
 		int r;
@@ -138,7 +140,7 @@ static int N3DS_FtpWaitFd(int fd, short events, int timeoutMs)
 		r = poll(&p, 1, 0);
 		if (r > 0)
 		{
-			return (p.revents & (events | POLLHUP | POLLERR)) != 0;
+			return (p.revents & (events | POLLHUP | POLLERR | POLLNVAL)) != 0;
 		}
 		if (r < 0)
 		{
@@ -965,78 +967,190 @@ void N3DS_FtpScheduleRelaunch(void)
 
 /* ---- thread ---- */
 
+/* Opens the listen socket; -1 on failure (nothing left open). */
+static int N3DS_FtpOpenListen(void)
+{
+	struct sockaddr_in addr;
+	int yes = 1;
+	int fd = socket(AF_INET, SOCK_STREAM, IPPROTO_IP);
+
+	if (fd < 0)
+	{
+		return -1;
+	}
+	setsockopt(fd, SOL_SOCKET, SO_REUSEADDR, &yes, sizeof(yes));
+	memset(&addr, 0, sizeof(addr));
+	addr.sin_family = AF_INET;
+	addr.sin_port = htons(N3DS_FTP_PORT);
+	addr.sin_addr.s_addr = INADDR_ANY;
+	if ((bind(fd, (struct sockaddr *)&addr, sizeof(addr)) == 0) && (listen(fd, 1) == 0))
+	{
+		return fd;
+	}
+	N3DS_FtpCloseSocket(&fd);
+	return -1;
+}
+
+/* Sleeps up to ms, in slices, returning early when the server is told to stop. */
+static void N3DS_FtpNap(int ms)
+{
+	while ((ms > 0) && s_ftpRun)
+	{
+		int slice = (ms > 100) ? 100 : ms;
+
+		svcSleepThread((s64)slice * 1000000);
+		ms -= slice;
+	}
+}
+
+/*
+ * Called from the APT hook (main thread): sleep mode / suspend / wake / restore.
+ * The Wi-Fi link and the sockets do not survive the console's sleep, so the
+ * server tears the listen socket down and listens again. Never blocks.
+ */
+void N3DS_FtpAptEvent(int type)
+{
+	if ((type == APTHOOK_ONSLEEP) || (type == APTHOOK_ONWAKEUP))
+	{
+		s_ftpWakeGen++;
+	}
+}
+
 static void N3DS_FtpThreadMain(void *argument)
 {
+	int backoffMs = 1000;
+
 	(void)argument;
 
-	/* Wait for Wi-Fi (the game may start long before it is up), then listen. */
 	while (s_ftpRun)
 	{
-		struct sockaddr_in addr;
-		int yes = 1;
+		unsigned gen = s_ftpWakeGen;
+		int reason = 0; /* 1 dead socket, 2 wake, 3 Wi-Fi lost, 4 address changed */
+		int wifiLostMs = 0;
+		int checkMs = 0;
+		char msg[96];
+		struct in_addr ia;
 
+		s_ftpIp = 0;
+		/* Wait for Wi-Fi (the game may start long before it is up, or the link
+		 * may have dropped), then listen. */
 		if (osGetWifiStrength() == 0)
 		{
-			svcSleepThread(1000000000LL);
+			N3DS_FtpNap(1000);
 			continue;
 		}
-		s_ftpListen = socket(AF_INET, SOCK_STREAM, IPPROTO_IP);
-		if (s_ftpListen >= 0)
+		s_ftpListen = N3DS_FtpOpenListen();
+		ia.s_addr = (uint32_t)gethostid();
+		if ((s_ftpListen < 0) || (ia.s_addr == 0))
 		{
-			setsockopt(s_ftpListen, SOL_SOCKET, SO_REUSEADDR, &yes, sizeof(yes));
-			memset(&addr, 0, sizeof(addr));
-			addr.sin_family = AF_INET;
-			addr.sin_port = htons(N3DS_FTP_PORT);
-			addr.sin_addr.s_addr = INADDR_ANY;
-			if ((bind(s_ftpListen, (struct sockaddr *)&addr, sizeof(addr)) == 0) && (listen(s_ftpListen, 1) == 0))
-			{
-				break;
-			}
 			N3DS_FtpCloseSocket(&s_ftpListen);
+			snprintf(msg, sizeof(msg), "[CTR-3DS] ftp: listen failed (errno %d), retry in %d ms", errno, backoffMs);
+			N3DS_DebugLog(msg);
+			N3DS_FtpNap(backoffMs);
+			backoffMs = (backoffMs < 8000) ? (backoffMs * 2) : 8000;
+			continue;
 		}
-		svcSleepThread(2000000000LL);
-	}
-	if (!s_ftpRun)
-	{
-		return;
-	}
-
-	s_ftpIp = (uint32_t)gethostid();
-	{
-		struct in_addr ia;
-		char msg[64];
-
-		ia.s_addr = s_ftpIp;
+		backoffMs = 1000;
+		s_ftpSessionGen = gen;
+		s_ftpIp = ia.s_addr;
 		snprintf(msg, sizeof(msg), "[CTR-3DS] ftp: serving on %s:%d", inet_ntoa(ia), N3DS_FTP_PORT);
 		N3DS_DebugLog(msg);
-	}
 
-	while (s_ftpRun)
-	{
-		struct sockaddr_in peer;
-		socklen_t len = sizeof(peer);
-		int fd;
-
-		/* Nobody connected: a longer nap than a transfer's, to stay cheap. */
+		while (s_ftpRun && (reason == 0))
 		{
+			struct sockaddr_in peer;
+			socklen_t len = sizeof(peer);
 			struct pollfd p;
+			int fd;
+			int r;
 
+			if (s_ftpWakeGen != gen)
+			{
+				reason = 2;
+				break;
+			}
+			/* Once a second: is the link still there, with the same address? */
+			if (checkMs >= 1000)
+			{
+				uint32_t now;
+
+				checkMs = 0;
+				if (osGetWifiStrength() == 0)
+				{
+					wifiLostMs += 1000;
+					if (wifiLostMs >= 3000)
+					{
+						reason = 3;
+						break;
+					}
+				}
+				else
+				{
+					wifiLostMs = 0;
+					now = (uint32_t)gethostid();
+					if ((now != 0) && (now != s_ftpIp))
+					{
+						reason = 4;
+						break;
+					}
+				}
+			}
+
+			/* Nobody connected: a longer nap than a transfer's, to stay cheap. */
 			p.fd = s_ftpListen;
 			p.events = POLLIN;
 			p.revents = 0;
-			if (poll(&p, 1, 0) <= 0)
+			r = poll(&p, 1, 0);
+			if ((r < 0) || ((r > 0) && ((p.revents & (POLLERR | POLLNVAL | POLLHUP)) != 0)))
+			{
+				reason = 1;
+				break;
+			}
+			if (r == 0)
 			{
 				svcSleepThread((s64)N3DS_FTP_IDLE_NAP_MS * 1000000);
+				checkMs += N3DS_FTP_IDLE_NAP_MS;
 				continue;
 			}
+			fd = accept(s_ftpListen, (struct sockaddr *)&peer, &len);
+			if (fd < 0)
+			{
+				if ((errno == EAGAIN) || (errno == EWOULDBLOCK) || (errno == ECONNABORTED) || (errno == EINTR))
+				{
+					continue;
+				}
+				reason = 1;
+				break;
+			}
+			N3DS_FtpHandleSession(fd);
+			N3DS_FtpCloseSocket(&fd);
+			checkMs = 1000; /* check the link right after a session */
 		}
-		fd = accept(s_ftpListen, (struct sockaddr *)&peer, &len);
-		if (fd < 0)
+
+		N3DS_FtpCloseSocket(&s_ftpListen);
+		s_ftpIp = 0;
+		if (!s_ftpRun)
 		{
-			continue;
+			break;
 		}
-		N3DS_FtpHandleSession(fd);
-		N3DS_FtpCloseSocket(&fd);
+		switch (reason)
+		{
+		case 1:
+			snprintf(msg, sizeof(msg), "[CTR-3DS] ftp: listen socket dead (errno %d), re-listening", errno);
+			break;
+		case 2:
+			snprintf(msg, sizeof(msg), "[CTR-3DS] ftp: wake, re-listen");
+			break;
+		case 3:
+			snprintf(msg, sizeof(msg), "[CTR-3DS] ftp: Wi-Fi lost, waiting for it");
+			break;
+		default:
+			snprintf(msg, sizeof(msg), "[CTR-3DS] ftp: address changed, re-listen");
+			break;
+		}
+		N3DS_DebugLog(msg);
+		/* Let the link settle (after wake it needs a moment) before listening again. */
+		N3DS_FtpNap((reason == 2) ? 1500 : 500);
 	}
 	N3DS_FtpCloseSocket(&s_ftpListen);
 }
