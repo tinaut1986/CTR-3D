@@ -799,6 +799,7 @@ int N3DS_ExtraCoresUsable(void);    /* New 3DS and not simulating an Old one */
 void N3DS_FramePaceNoteFrame(unsigned workUs);
 int N3DS_FramePaceNextFlip(void);         /* the interval for the frame just submitted */
 int N3DS_FramePaceFlipVBlanks(void);
+unsigned int N3DS_SysMs(void);             /* wraps after ~49 days; for stage timers */
 int N3DS_FramePaceOldClass(void);          /* Old 3DS / 2DS, or simulating one */
 int N3DS_FramePaceStereoSuppressed(void);  /* AUTO stereo has the right eye off */
 void N3DS_FramePaceFormat(char *out, int outSize); /* [PACE] window line, resets */

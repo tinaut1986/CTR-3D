@@ -20,6 +20,11 @@ void LOAD_AppendQueue(struct BigHeader *bigfile, int type, int fileIndex, void *
 	sdata->queueLength++;
 }
 
+#ifdef __3DS__
+unsigned int N3DS_SysMs(void);
+void N3DS_DebugLog(const char *msg);
+#endif
+
 // NOTE(aalhendi): ASM-verified NTSC-U 926 0x80032d8c-0x80032dc0.
 void LOAD_CDRequestCallback(struct LoadQueueSlot *lqs)
 {
@@ -54,6 +59,9 @@ void LOAD_NextQueuedFile()
 			}
 		}
 
+#ifdef __3DS__
+		unsigned int fileT0 = N3DS_SysMs();
+#endif
 		switch (curr->type_UNUSED)
 		{
 		case LT_RAW:
@@ -72,6 +80,18 @@ void LOAD_NextQueuedFile()
 			break;
 		}
 
+#ifdef __3DS__
+		{
+			unsigned int fileMs = N3DS_SysMs() - fileT0;
+			if (fileMs >= 250)
+			{
+				char line[96];
+				snprintf(line, sizeof(line), "[LOADPROF] file type=%d idx=%d size=%u ms=%u", (int)curr->type_UNUSED, (int)curr->subfileIndex,
+				         (unsigned)curr->size_UNUSED, fileMs);
+				N3DS_DebugLog(line);
+			}
+		}
+#endif
 		sdata->queueLength--;
 	}
 
