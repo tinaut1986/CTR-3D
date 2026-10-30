@@ -4904,6 +4904,8 @@ internal int NativeAudio_XAStreamAheadCountNoLock(const struct NativeAudioXaStre
 // decodes exactly one more sector. Only drives xaStream (the live one) --
 // xaPendingStream is only filled by the priming/seek bursts in the Open*
 // functions below.
+int N3DS_FramePaceOldClass(void);
+
 internal void NativeAudio_XAStreamPump(void)
 {
 	int active;
@@ -4933,6 +4935,21 @@ internal void NativeAudio_XAStreamPump(void)
 
 		if (!active)
 		{
+			s_refilling = 0;
+			return;
+		}
+		if (N3DS_FramePaceOldClass() && !N3DS_AudioThreadIsRunning())
+		{
+			/* Old 3DS: this runs on the game thread (no audio worker), where a
+			 * burst of 24 sectors was a 90-205 ms stall every ~2 s ([SPIKE]
+			 * audioVbl). XA is consumed at ~0.3 sector per vblank and one sector
+			 * decodes in ~6 ms, so topping up one sector per vblank keeps the
+			 * ring full without a burst. The burst exists to cut SD contention
+			 * with a worker thread; there is none here. */
+			if (ahead < NATIVE_AUDIO_XA_RING_AHEAD_TARGET)
+			{
+				NativeAudio_XAStreamDecodeNextSector(&s_audio.xaStream);
+			}
 			s_refilling = 0;
 			return;
 		}
