@@ -132,9 +132,10 @@ Rules the hardware enforces and emulators do not:
 ## Debug surface and measuring
 
 - `CTR_INTERNAL` (CMake option, default ON; the release is built with it OFF)
-  compiles the debug surface: `sdmc:/dumpreq.txt`, a file of one word per line
-  polled on the first frame and every 64 frames after (`stereo`, `drawmerge`,
-  `sdlog`, ...), SELECT chords, `[PERF]` scope windows, screenshots and probes.
+  compiles the debug surface: the dumpreq words (`stereo`, `drawmerge`, `sdlog`,
+  ...) sent with `SITE DUMPREQ <word>` over FTP or from the DEBUG tab (there is no
+  file channel: polling `sdmc:/dumpreq.txt` stalled the frame for up to 230 ms
+  when the SD card was busy), SELECT chords, `[PERF]` scope windows, screenshots and probes.
   OFF strips all of it from the binary and changes no default.
 - Bottom screen (`platform/n3ds/n3ds_bottomui.c`, always on, from the first
   frame): graphics mode, no libctru console on it. Tabs ESTADO / MAPA /

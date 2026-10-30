@@ -972,7 +972,7 @@ static void ui_draw_dbg_actions(void)
 		ui_text(x + 6, y + 5, 1, COL_TEXT, name);
 		ui_text(x + 6, y + 22, 2, COL_TEXT, state);
 	}
-	ui_text(6, CONTENT_Y + 174, 1, COL_LABEL, TR("SAME SWITCHES AS DUMPREQ.TXT", "LOS MISMOS INTERRUPTORES QUE DUMPREQ.TXT"));
+	ui_text(6, CONTENT_Y + 174, 1, COL_LABEL, TR("SAME SWITCHES AS SITE DUMPREQ", "LOS MISMOS INTERRUPTORES QUE SITE DUMPREQ"));
 	if (N3DS_FtpStatus() == N3DS_FTP_STATUS_LISTENING)
 	{
 		char c[48];

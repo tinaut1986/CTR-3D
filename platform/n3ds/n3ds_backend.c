@@ -4991,6 +4991,10 @@ void N3DS_QueueDumpReq(const char *word)
 	if (word != NULL)
 	{
 		snprintf(s_uiReqWord, sizeof(s_uiReqWord), "%s", word);
+		/* The literal "dumpreq" in the binary is what package-3ds.sh and
+		 * pre-release-audit.sh look for to tell an internal build from a
+		 * production one. */
+		N3DS_DebugLog("[CTR-3DS] dumpreq queued");
 	}
 }
 #endif
@@ -5012,11 +5016,12 @@ unsigned int N3DS_ReadButtons(void)
 #ifdef CTR_INTERNAL
 	/* SELECT+R freed (the VRAM/debug capture set). Still reachable as dumpreq `capture`. */
 
-	/* Host-scriptable trigger: Azahar's SD card is a plain host
-	 * folder, so an autonomous session can drive diagnostics by creating
-	 * sdmc:/dumpreq.txt -- no window focus or key injection involved. The
-	 * file's first word selects the action (the A/B toggles need
-	 * to be reachable without a gamepad):
+	/* Diagnostic requests: a word queued with N3DS_QueueDumpReq (the bottom-screen
+	 * debug UI, or `SITE DUMPREQ <word>` over FTP -- see n3ds_debuglink.c) runs
+	 * here on the main thread. The word selects the action (the A/B toggles need
+	 * to be reachable without a gamepad). There is no file channel: opening a file
+	 * on the SD card from here stalled the frame for up to 230 ms when the card
+	 * was busy:
 	 *   capture (or anything else) -- the full SELECT+R capture set
 	 *   subpage     -- toggle g_dbg_disableSubPage (route all to full-page tier)
 	 *   single      -- toggle g_dbg_forceSingleTexture
@@ -5154,7 +5159,6 @@ unsigned int N3DS_ReadButtons(void)
 	 *                  call site is gated on the sink-up flag already, and a
 	 *                  later XA play request cannot bring it back.
 	 *   dbgoff      -- Rosalina-freeze bisect: stop emitting svcOutputDebugString.
-	 *   nextboot    -- boot barrier: stop consuming lines until the next power-on.
 	 *   rosafix [N] -- Rosalina-freeze display recovery experiment (default OFF).
 	 *   no3d        -- Rosalina-freeze bisect: gfxSet3D(false) at runtime.
 	 *   logclose    -- Rosalina-freeze bisect: fclose the SD log file (sdlog off).
@@ -5163,52 +5167,27 @@ unsigned int N3DS_ReadButtons(void)
 	 *   rosabisect2 -- both of the above (ndspoff + speedoff). Checked BEFORE
 	 *                  rosabisect above -- same "rosabisect" prefix, and
 	 *                  strncmp would otherwise match the shorter word first.
-	 * Polled every 64 frames so the SD probe cost stays negligible on real
-	 * hardware; the request file is deleted first so one request fires once. */
+	 */
 	{
-		/* 1, not 64: the first poll happens on the first button read of the
-		 * boot so a request staged on the card before launch applies ahead of
-		 * the boot-time loads (texwarm, speedoff), not a second into the intro. */
-		static unsigned int s_dumpPollCountdown = 1;
-		/* A word queued by the bottom-screen debug UI (N3DS_QueueDumpReq) runs
-		 * through the very same token chain below, ahead of the next file
-		 * poll and without touching the SD card or the poll countdown. */
 		const int uiReq = (s_uiReqWord[0] != '\0');
 
-		if (uiReq || (--s_dumpPollCountdown == 0))
+		if (uiReq)
 		{
-			FILE *req = uiReq ? NULL : fopen("sdmc:/dumpreq.txt", "rb");
-
-			if (!uiReq)
-			{
-				s_dumpPollCountdown = 64;
-			}
-			if (uiReq || (req != NULL))
 			{
 				extern int g_dbg_disableSubPage;
 				extern int g_dbg_forceSingleTexture;
-				/* The file holds one request per line; each poll consumes the
-				 * FIRST line only and writes the remainder back, so a multi-line
-				 * file drains one request per poll (~64 frames apart) in file
-				 * order. A word is at most 23 chars ("stereoconv 12000" is 16). */
+				/* One request at a time. A word is at most 23 chars
+				 * ("stereoconv 12000" is 16). */
 				char word[24];
 				char file[256];
 				size_t got = 0;
 				size_t lineLen = 0;
 				const char *rest;
-				int consumed = 0;
+				int consumed = 1;
 
-				if (uiReq)
-				{
-					snprintf(file, sizeof(file), "%s", s_uiReqWord);
-					s_uiReqWord[0] = '\0';
-					got = strlen(file);
-				}
-				else
-				{
-					got = fread(file, 1, sizeof(file) - 1, req);
-					fclose(req);
-				}
+				snprintf(file, sizeof(file), "%s", s_uiReqWord);
+				s_uiReqWord[0] = '\0';
+				got = strlen(file);
 				file[got] = '\0';
 
 				while ((file[lineLen] != '\0') && (file[lineLen] != '\n') && (file[lineLen] != '\r'))
@@ -5228,30 +5207,7 @@ unsigned int N3DS_ReadButtons(void)
 					rest++;
 				}
 
-				/* Consumed = the first line is gone from the card. On a host
-				 * filesystem (Azahar) a freshly written file can be transiently
-				 * held open by the OS (AV scan); the remove()/rewrite then fails,
-				 * and acting anyway re-fires the same request every poll -- a
-				 * TOGGLE request flapped a dozen in-place rebuilds that way. Skip
-				 * this poll instead: the file survives and the next poll retries. */
-				if (uiReq)
-				{
-					consumed = 1; /* nothing on the card to remove */
-				}
-				else if (*rest == '\0')
-				{
-					consumed = (remove("sdmc:/dumpreq.txt") == 0);
-				}
-				else
-				{
-					FILE *out = fopen("sdmc:/dumpreq.txt", "wb");
-
-					if (out != NULL)
-					{
-						consumed = (fputs(rest, out) >= 0);
-						fclose(out);
-					}
-				}
+				(void)rest;
 
 				if (!consumed)
 				{
@@ -5389,14 +5345,6 @@ unsigned int N3DS_ReadButtons(void)
 				{
 					g_dbg_rosaFix = (word[7] == ' ') ? ((atoi(&word[8]) != 0) ? 1 : 0) : !g_dbg_rosaFix;
 					N3DS_DebugLog(g_dbg_rosaFix ? "[CTR-3DS] rosafix: ON (GPU-right re-acquire after a >2s thaw)" : "[CTR-3DS] rosafix: off");
-				}
-				else if (strncmp(word, "nextboot", 8) == 0)
-				{
-					/* Boot barrier: the lines after this one stay on the card
-					 * for the NEXT power-on, so one file can script several
-					 * boots without a trip to the SD card in between. */
-					s_dumpPollCountdown = 0x7fffffffu;
-					N3DS_DebugLog("[CTR-3DS] nextboot: dumpreq polling stopped for this boot");
 				}
 				else if (strncmp(word, "no3d", 4) == 0)
 				{
