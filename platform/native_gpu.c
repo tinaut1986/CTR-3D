@@ -2479,6 +2479,8 @@ internal void PacketDepth_FillParallaxFromCapture(const s16 *xs, const s16 *ys, 
  * Returns 1 and writes *out whenever the feature is on (covered, miss and 2D
  * all produce a stamp); returns 0 only when the feature is off, which is the
  * caller's signal to keep its existing ordinal. */
+int NativeUiMap_RouteActive(void);
+
 internal int PacketDepth_ResolveXY(const s16 *xs, const s16 *ys, int n, u16 *out, u16 *perVert, u16 *perVertPar)
 {
 	u16 sz3s[4];
@@ -2606,7 +2608,9 @@ internal int PacketDepth_ResolveXY(const s16 *xs, const s16 *ys, int n, u16 *out
 	 * correct occlusion, but outside the band, so no widescreen X ramp and no
 	 * stereo flatten -- the burst stays at retail X while the fruit moves with
 	 * the wide window. */
-	if (GTECapture_LookupSuppressed() || (g_dbg_hudShine && s_hudshineNodeActive))
+	/* The race HUD's 3D instances (the big rank number, the fruit icon) are marked as HUD groups
+	 * too (RenderBucket_Execute): they take this 2D UI leg, so they get a group stamp like the 2D pieces. */
+	if (GTECapture_LookupSuppressed() || (g_dbg_hudShine && s_hudshineNodeActive) || ((s_uihudNodeGroup != 0) && NativeUiMap_RouteActive()))
 	{
 		/* 2D in the UI band: no depth exists, and it must stay on top of every
 		 * world stamp. Ordinal ordering is preserved WITHIN the band so UI

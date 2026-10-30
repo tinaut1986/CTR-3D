@@ -14,8 +14,7 @@ extern void NativeGpu_MarkHudShineRange(uintptr_t start, uintptr_t end);
 // One piece of the 1P race HUD for the bottom-screen HUD (groups below). The draw calls
 // allocate sequentially from primMem, so [cursor-before, cursor-after) is exactly the piece.
 extern void NativeGpu_MarkUiHudRange(uintptr_t start, uintptr_t end, int group);
-// Group 1 (position) is reserved: the big rank number is a 3D instance (instBigNum) that cannot be
-// routed yet, so the whole position stays on the top screen rather than split across two.
+#define HUD_GROUP_RANK 1
 #define HUD_GROUP_LAP 2
 #define HUD_GROUP_CLOCK 3
 #define HUD_GROUP_WUMPA 4
@@ -525,7 +524,7 @@ void UI_RenderFrame_Racing()
 
 				sVar1 = hudStructPtr[UI_HUD_SLOT_RANK].x;
 				sVar2 = hudStructPtr[UI_HUD_SLOT_RANK].y;
-				UI_DrawPosSuffix(sVar1, sVar2, playerStruct, (s16)partTimeVariable5);
+				HUD_GROUP(HUD_GROUP_RANK, UI_DrawPosSuffix(sVar1, sVar2, playerStruct, (s16)partTimeVariable5));
 
 				if (numPlyr > 2)
 				{
@@ -560,7 +559,7 @@ void UI_RenderFrame_Racing()
 				partTimeVariable5 = (u32)((Fps60_Timer30() & 1) == 0) << 2;
 
 				// Draw the "st", "nd", "rd" suffix after "1st, 2nd, 3rd, etc"
-				UI_DrawPosSuffix(hudStructPtr[UI_HUD_SLOT_RANK].x, hudStructPtr[UI_HUD_SLOT_RANK].y, playerStruct, (s16)partTimeVariable5);
+				HUD_GROUP(HUD_GROUP_RANK, UI_DrawPosSuffix(hudStructPtr[UI_HUD_SLOT_RANK].x, hudStructPtr[UI_HUD_SLOT_RANK].y, playerStruct, (s16)partTimeVariable5));
 
 				// Get Color Data
 				ptrColor = data.ptrColor[partTimeVariable5];
