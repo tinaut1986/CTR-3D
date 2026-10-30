@@ -181,6 +181,11 @@ global_variable const struct NativePerfBucketInfo s_bucketInfo[NATIVE_PERF_BUCKE
     {"str_read_ms", 0},
     {"str_decode_ms", 0},
     {"str_upload_ms", 0},
+    {"vbl_emit_ms", 0},
+    {"vbl_rcnt_ms", 0},
+    {"vbl_callback_ms", 0},
+    {"vbl_howl_ms", 0},
+    {"vbl_pollinput_ms", 0},
 };
 
 global_variable FILE *s_csvFile;
@@ -260,6 +265,15 @@ struct NativePerfSpike
 	f32 walkPatchMs;
 	f32 walkParseMs;
 	f32 walkSplitsMs;
+	f32 vsyncWaitMs;  /* VSYNC_WAIT, RENDER_VSYNC_DRAWSYNC, VOICE_CACHE_FILL for this frame */
+	f32 drawSyncMs;
+	f32 voiceFillMs;
+	f32 audioVblankMs;
+	f32 vblEmitMs;
+	f32 vblRcntMs;
+	f32 vblCallbackMs;
+	f32 vblHowlMs;
+	f32 vblPollMs;
 	s32 levelID;
 	u32 gameMode1;
 	enum NativePerfBucket dominantBucket;
@@ -1257,10 +1271,10 @@ internal void NativePerf_SpikeFlush(void)
 		{
 			const struct NativePerfSpike *s = &s_spikeRing[i];
 
-			fprintf(f, "[SPIKE] f=%lu total=%.1f work=%.1f dom=%s domMs=%.1f raw1=%s/%.1f raw2=%s/%.1f walk(p/pa/sp)=%.1f/%.1f/%.1f lvl=%ld mode=%08lx\n",
+			fprintf(f, "[SPIKE] f=%lu total=%.1f work=%.1f dom=%s domMs=%.1f raw1=%s/%.1f raw2=%s/%.1f walk(p/pa/sp)=%.1f/%.1f/%.1f vsyncWait=%.1f drawSync=%.1f voiceFill=%.1f audioVbl=%.1f emit=%.1f rcnt=%.1f cb=%.1f howl=%.1f poll=%.1f lvl=%ld mode=%08lx\n",
 			        (unsigned long)s->frameCounter, (double)s->totalMs, (double)s->workMs, NativePerf_BucketName(s->dominantBucket), (double)s->dominantMs,
 			        NativePerf_BucketName(s->rawTop1), (double)s->rawTop1Ms, NativePerf_BucketName(s->rawTop2), (double)s->rawTop2Ms, (double)s->walkPatchMs,
-			        (double)s->walkParseMs, (double)s->walkSplitsMs, (long)s->levelID, (unsigned long)s->gameMode1);
+			        (double)s->walkParseMs, (double)s->walkSplitsMs, (double)s->vsyncWaitMs, (double)s->drawSyncMs, (double)s->voiceFillMs, (double)s->audioVblankMs, (double)s->vblEmitMs, (double)s->vblRcntMs, (double)s->vblCallbackMs, (double)s->vblHowlMs, (double)s->vblPollMs, (long)s->levelID, (unsigned long)s->gameMode1);
 		}
 		fclose(f);
 	}
@@ -1358,6 +1372,15 @@ internal void NativePerf_SpikeRecord(f64 totalMs, f64 workMs, enum NativePerfBuc
 	s->walkPatchMs = s_spikeWalkPatchMs;
 	s->walkParseMs = s_spikeWalkParseMs;
 	s->walkSplitsMs = s_spikeWalkSplitsMs;
+	s->vsyncWaitMs = (f32)s_frameBucketMs[NATIVE_PERF_BUCKET_VSYNC_WAIT];
+	s->drawSyncMs = (f32)s_frameBucketMs[NATIVE_PERF_BUCKET_RENDER_VSYNC_DRAWSYNC];
+	s->voiceFillMs = (f32)s_frameBucketMs[NATIVE_PERF_BUCKET_VOICE_CACHE_FILL];
+	s->audioVblankMs = (f32)s_frameBucketMs[NATIVE_PERF_BUCKET_AUDIO_VBLANK];
+	s->vblEmitMs = (f32)s_frameBucketMs[NATIVE_PERF_BUCKET_VBL_EMIT];
+	s->vblRcntMs = (f32)s_frameBucketMs[NATIVE_PERF_BUCKET_VBL_RCNT];
+	s->vblCallbackMs = (f32)s_frameBucketMs[NATIVE_PERF_BUCKET_VBL_CALLBACK];
+	s->vblHowlMs = (f32)s_frameBucketMs[NATIVE_PERF_BUCKET_VBL_HOWL];
+	s->vblPollMs = (f32)s_frameBucketMs[NATIVE_PERF_BUCKET_VBL_POLLINPUT];
 	s_spikeSeenTotal++;
 }
 #endif
