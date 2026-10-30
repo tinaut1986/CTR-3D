@@ -2670,12 +2670,7 @@ internal int PacketDepth_ResolveXY(const s16 *xs, const s16 *ys, int n, u16 *out
 					{
 						*out = (u16)(PKTDEPTH_UI_STAMP_BTMHUD_BASE + (u32)s_uihudNodeGroup);
 					}
-					/* FPS glyphs route only, so they keep the bottom-screen
-					 * gate: unrouted they stay ordinary pinned UI. */
-					else if (g_dbg_btmMap && s_uifpsNodeActive)
-					{
-						*out = PKTDEPTH_UI_STAMP_BTMFPS;
-					}
+					/* (The FPS text is no longer routed: with SHOW FPS on it draws on the top screen.) */
 					/* The map stamp is NOT gated on the bottom-screen toggle:
 					 * besides routing the peel (which carries its own gate), it
 					 * keys the far-edge UV inset in N3DS_ConvertTriangleVerts,
@@ -6653,20 +6648,12 @@ int NativeUiMap_FpsOverlayText(char *buf, int bufSize)
 {
 #if defined(__3DS__)
 	extern unsigned long g_n3dsFpsX10;
-	extern int g_dbg_tireVtxLog;
-	extern unsigned long g_tirelogFrameNow;
+	extern int g_dbg_showFps;
 
-	if (!NativeUiMap_RouteActive() || (g_n3dsFpsX10 == 0))
+	/* OPTIONS: SHOW FPS. Drawn on the top screen, top centre, until the first measurement lands. */
+	if (!g_dbg_showFps || (g_n3dsFpsX10 == 0))
 	{
 		return 0;
-	}
-	/* Invisible-tire hunt (remove with the hunt): while the tirelog trace is
-	 * armed, show the renderer frame counter instead of FPS so a screen
-	 * capture can be matched to the [TV]/[TIREUP] log lines exactly. */
-	if (g_dbg_tireVtxLog)
-	{
-		snprintf(buf, (size_t)bufSize, "F %lu", g_tirelogFrameNow);
-		return 1;
 	}
 	snprintf(buf, (size_t)bufSize, "FPS %lu.%lu", g_n3dsFpsX10 / 10UL, g_n3dsFpsX10 % 10UL);
 	return 1;

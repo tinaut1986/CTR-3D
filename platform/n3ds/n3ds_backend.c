@@ -462,8 +462,10 @@ void N3DS_EarlyInit(void)
 	{
 		extern int g_dbg_stereo;
 		extern int g_dbg_hudAutoHide;
+		extern int g_dbg_showFps;
 
 		g_dbg_hudAutoHide = N3DS_ConfigGet("hudhide", g_dbg_hudAutoHide);
+		g_dbg_showFps = N3DS_ConfigGet("showfps", g_dbg_showFps);
 		/* AUTO 3D by default on an Old 3DS / 2DS (and in the simulation): the
 		 * right eye yields when it alone costs the frame its cap. A saved
 		 * choice wins either way. */

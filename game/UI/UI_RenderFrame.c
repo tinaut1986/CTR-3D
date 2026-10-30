@@ -20,6 +20,7 @@ extern void NativeGpu_MarkUiHudRange(uintptr_t start, uintptr_t end, int group);
 #define HUD_GROUP_WUMPA 4
 #define HUD_GROUP_SPEED 5
 #define HUD_GROUP_WEAPON 6
+#define HUD_GROUP_LIST 7
 #define HUD_GROUP(group, ...)                                                                               \
 	do                                                                                                      \
 	{                                                                                                       \
@@ -161,7 +162,7 @@ void UI_RenderFrame_Racing()
 	// and not in time trial
 	if ((gameMode1 & (RELIC_RACE | TIME_TRIAL | BATTLE_MODE)) == 0)
 	{
-		UI_DrawRankedDrivers();
+		HUD_GROUP(HUD_GROUP_LIST, UI_DrawRankedDrivers());
 	}
 
 	// pointer to first Player thread

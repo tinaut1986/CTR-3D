@@ -57,6 +57,8 @@ extern int g_dbg_btmMap;
 /* HUD AUTO-HIDE (OPTIONS): while the MAPA tab is up, the race HUD is drawn below beside the
  * map and left off the top screen. Saved as "hudhide" in ctr3d.cfg. */
 int g_dbg_hudAutoHide = 0;
+/* SHOW FPS (OPTIONS): the fps readout on the top screen. Saved as "showfps". */
+int g_dbg_showFps = 0;
 #ifdef CTR_INTERNAL
 extern int g_dbg_drawMerge;
 extern int g_dbg_renderThread;
@@ -329,6 +331,7 @@ enum
 	OPT_HUDHIDE = 0,
 	OPT_STEREO,
 	OPT_FPSCAP,
+	OPT_SHOWFPS,
 	OPT_CPU804,
 	OPT_COUNT
 };
@@ -695,6 +698,7 @@ static void ui_draw_options(void)
 	ui_draw_option(OPT_HUDHIDE, TR("AUTO-HIDE HUD", "HUD AUTOOCULTO"), g_dbg_hudAutoHide, ui_onoff(g_dbg_hudAutoHide));
 	ui_draw_option(OPT_STEREO, TR("3D EFFECT", "EFECTO 3D"), g_dbg_stereo, ui_stereo_text());
 	ui_draw_option(OPT_FPSCAP, TR("FRAME SKIP", "SALTO FRAMES"), 1, ui_fpscap_text());
+	ui_draw_option(OPT_SHOWFPS, TR("SHOW FPS", "VER FPS"), g_dbg_showFps, ui_onoff(g_dbg_showFps));
 	if (s_isNew3DS < 0)
 	{
 		bool n = false;
@@ -1210,6 +1214,10 @@ static void ui_press_option(int i)
 		/* AUTO -> 30 -> OFF -> AUTO. */
 		g_dbg_frameCap = (g_dbg_frameCap + 1) % 3;
 		N3DS_ConfigSet("fpsmode", g_dbg_frameCap);
+		break;
+	case OPT_SHOWFPS:
+		g_dbg_showFps ^= 1;
+		N3DS_ConfigSet("showfps", g_dbg_showFps);
 		break;
 	case OPT_CPU804:
 		if (s_isNew3DS > 0)

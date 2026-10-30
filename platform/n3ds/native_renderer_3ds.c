@@ -3458,7 +3458,10 @@ internal N3DS_Vertex *N3DS_BtmHudAppend(int group, int blendMode, int doubling, 
  * rect[g] = x, y, w, h in panel px; present[g] says whether the group exists this frame.
  */
 #define N3DS_BTMH_GAP 6
-#define N3DS_BTMH_FPS_H 16
+#define N3DS_BTMH_FPS_H 4
+#define N3DS_BTMH_G_RANK 1
+#define N3DS_BTMH_G_WUMPA 4
+#define N3DS_BTMH_G_LIST 7 /* the ranked-driver list */
 #define N3DS_BTMH_CORNER_W 100
 
 internal void N3DS_BtmHudLayout(int dspW, int dspH, float rect[PKTDEPTH_UI_HUD_GROUPS][4], int present[PKTDEPTH_UI_HUD_GROUPS])
@@ -3473,32 +3476,59 @@ internal void N3DS_BtmHudLayout(int dspW, int dspH, float rect[PKTDEPTH_UI_HUD_G
 	int cnt[4] = {0, 0, 0, 0};
 	float f = 1.5f;
 	float maxW = 1.0f;
+	int rankBesideList;
 	int g;
 	int c;
 
 	for (g = 1; g < (int)PKTDEPTH_UI_HUD_GROUPS; g++)
 	{
+		/* Some pieces read better smaller than the common scale (the big rank number, the fruit). */
+		const float m = ((g == N3DS_BTMH_G_RANK) || (g == N3DS_BTMH_G_WUMPA)) ? 0.7f : 1.0f;
+
 		present[g] = s_btmhHasBox[g];
 		if (!present[g])
 		{
 			continue;
 		}
-		pw[g] = (float)(s_btmhBox[g][2] - s_btmhBox[g][0]) * bx;
-		ph[g] = (float)(s_btmhBox[g][3] - s_btmhBox[g][1]) * by;
+		pw[g] = (float)(s_btmhBox[g][2] - s_btmhBox[g][0]) * bx * m;
+		ph[g] = (float)(s_btmhBox[g][3] - s_btmhBox[g][1]) * by * m;
 		if (ph[g] < 1.0f) { ph[g] = 1.0f; }
-		if (pw[g] > maxW) { maxW = pw[g]; }
+		if (g == N3DS_BTMH_G_LIST)
+		{
+			corner[g] = 2; /* the driver list is the bottom-left piece */
+		}
+		else
 		{
 			const int right = ((s_btmhBox[g][0] + s_btmhBox[g][2]) * 0.5f) > ((float)dspW * 0.5f);
 			const int bottom = ((s_btmhBox[g][1] + s_btmhBox[g][3]) * 0.5f) > ((float)dspH * 0.5f);
 
 			corner[g] = (bottom ? 2 : 0) + (right ? 1 : 0);
 		}
+	}
+
+	/* The big rank number sits just right of the driver list, bottom aligned, not stacked with it. */
+	rankBesideList = present[N3DS_BTMH_G_LIST] && present[N3DS_BTMH_G_RANK];
+	if (rankBesideList)
+	{
+		corner[N3DS_BTMH_G_RANK] = -1;
+	}
+	for (g = 1; g < (int)PKTDEPTH_UI_HUD_GROUPS; g++)
+	{
+		if (!present[g] || (corner[g] < 0))
+		{
+			continue;
+		}
 		sumH[corner[g]] += ph[g];
 		cnt[corner[g]]++;
+		if (pw[g] > maxW) { maxW = pw[g]; }
 	}
 
 	/* One scale for everything: the widest piece fits its column, and every stack fits its height. */
 	f = fminf(f, (float)N3DS_BTMH_CORNER_W / maxW);
+	if (rankBesideList)
+	{
+		f = fminf(f, ((float)N3DS_BTMH_CORNER_W - (float)N3DS_BTMH_GAP) / (pw[N3DS_BTMH_G_LIST] + pw[N3DS_BTMH_G_RANK]));
+	}
 	for (c = 0; c < 4; c++)
 	{
 		if (cnt[c] > 0)
@@ -3514,7 +3544,7 @@ internal void N3DS_BtmHudLayout(int dspW, int dspH, float rect[PKTDEPTH_UI_HUD_G
 		const int right = c & 1;
 		const int bottom = c >> 1;
 		float stack = sumH[c] * f + (float)((cnt[c] > 0 ? cnt[c] - 1 : 0) * N3DS_BTMH_GAP);
-		float y = bottom ? (H - 4.0f - stack) : (right ? (float)N3DS_BTMH_FPS_H : 4.0f);
+		float y = bottom ? (H - 4.0f - stack) : (float)N3DS_BTMH_FPS_H;
 
 		for (g = 1; g < (int)PKTDEPTH_UI_HUD_GROUPS; g++)
 		{
@@ -3528,6 +3558,13 @@ internal void N3DS_BtmHudLayout(int dspW, int dspH, float rect[PKTDEPTH_UI_HUD_G
 			rect[g][1] = y;
 			y += rect[g][3] + (float)N3DS_BTMH_GAP;
 		}
+	}
+	if (rankBesideList)
+	{
+		rect[N3DS_BTMH_G_RANK][2] = pw[N3DS_BTMH_G_RANK] * f;
+		rect[N3DS_BTMH_G_RANK][3] = ph[N3DS_BTMH_G_RANK] * f;
+		rect[N3DS_BTMH_G_RANK][0] = rect[N3DS_BTMH_G_LIST][0] + rect[N3DS_BTMH_G_LIST][2] + (float)N3DS_BTMH_GAP;
+		rect[N3DS_BTMH_G_RANK][1] = (rect[N3DS_BTMH_G_LIST][1] + rect[N3DS_BTMH_G_LIST][3]) - rect[N3DS_BTMH_G_RANK][3];
 	}
 }
 
