@@ -348,6 +348,7 @@ enum
 	ACT_FLUSH,
 	ACT_FTP,
 	ACT_O3DSSIM,
+	ACT_SDLOG,
 	ACT_COUNT
 };
 
@@ -939,6 +940,7 @@ static void ui_act_label(int i, const char **name, const char **state, u16 *col)
 	case ACT_DRAWMERGE: *name = "DRAW MERGE"; on = g_dbg_drawMerge; break;
 	case ACT_RTHREAD: *name = "RENDER THREAD"; on = g_dbg_renderThread; break;
 	case ACT_FLUSH: *name = "LOG"; *state = "FLUSH"; return;
+	case ACT_SDLOG: *name = TR("LOG TO SD", "LOG A LA SD"); on = g_dbg_sdLog; break;
 	case ACT_O3DSSIM:
 		*name = "OLD 3DS SIM";
 		on = (N3DS_O3dsSimActive() != 0);
@@ -1285,6 +1287,10 @@ static void ui_press_action(int i)
 	case ACT_FLUSH:
 		N3DS_LogFlushNow();
 		ui_set_msg("LOG FLUSHED");
+		break;
+	case ACT_SDLOG:
+		N3DS_SetSdLogEnabled(!g_dbg_sdLog);
+		ui_set_msg(g_dbg_sdLog ? TR("SD LOG ON (CAN CAUSE HITCHES)", "LOG EN SD ACTIVO (PUEDE DAR TIRONES)") : TR("SD LOG OFF", "LOG EN SD APAGADO"));
 		break;
 	case ACT_O3DSSIM:
 		if (N3DS_O3dsSimToggleFile() == 2)
