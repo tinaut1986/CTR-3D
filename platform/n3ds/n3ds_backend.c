@@ -7077,15 +7077,11 @@ static void N3DS_BeatMainTick(void)
 	static unsigned int s_beatPrevRwCounter;
 	static u64 s_beatMainStallStartTick;
 	static unsigned int s_beatPostThawFrames;
-	static unsigned int s_memSampleDiv;
 	const u64 now = svcGetSystemTick();
 
-	/* Every 512th call, not 8th: the sample (sbrk + linearSpaceFree) was seen
-	 * costing 15-140 ms on an Old 3DS (the [SPIKE] beat= field), every ~12 frames. */
-	if ((++s_memSampleDiv & 511u) == 0)
-	{
-		N3DS_MemSample(); /* heap extent / linear free water marks, see N3DS_MemLog */
-	}
+	/* No periodic N3DS_MemSample() here: linearSpaceFree() was seen stalling the main
+	 * thread for 0.1-1.2 s every 512th call (the [BEAT] THAW gapMs lines). The water marks
+	 * are still sampled when a level begins (N3DS_MemLevelBegin). */
 
 	if (s_beatLastTick != 0)
 	{

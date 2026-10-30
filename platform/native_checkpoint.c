@@ -105,6 +105,7 @@ struct NativeCheckpointHeader
 
 global_variable void *s_nativeCheckpointPointerSlots[NATIVE_CHECKPOINT_POINTER_SLOT_CAP];
 global_variable u32 s_nativeCheckpointPointerSlotCount;
+global_variable b32 s_nativeCheckpointPointerSlotsFull;
 
 internal int NativeCheckpoint_InitHeader(struct NativeCheckpointHeader *header);
 
@@ -148,6 +149,7 @@ internal void NativeCheckpoint_WriteU32Slot(void *slot, u32 value)
 void NativeCheckpoint_OnMempackArenaReset(void)
 {
 	s_nativeCheckpointPointerSlotCount = 0;
+	s_nativeCheckpointPointerSlotsFull = 0;
 }
 
 internal int NativeCheckpoint_CompareSlots(const void *a, const void *b)
@@ -193,9 +195,16 @@ void NativeCheckpoint_RegisterPointerSlot(void *slot)
 	}
 	if (s_nativeCheckpointPointerSlotCount >= NATIVE_CHECKPOINT_POINTER_SLOT_CAP)
 	{
+		/* Once per arena: a list still full after dedupe stays full (the old code dropped
+		 * the registration too); normalizing again per call would sort 65536 entries each time. */
+		if (s_nativeCheckpointPointerSlotsFull)
+		{
+			return;
+		}
 		NativeCheckpoint_NormalizePointerSlots();
 		if (s_nativeCheckpointPointerSlotCount >= NATIVE_CHECKPOINT_POINTER_SLOT_CAP)
 		{
+			s_nativeCheckpointPointerSlotsFull = 1;
 			return;
 		}
 	}
@@ -1952,6 +1961,7 @@ internal int NativeCheckpoint_ApplyPointerSlotState(const struct NativeCheckpoin
 	}
 
 	s_nativeCheckpointPointerSlotCount = 0;
+	s_nativeCheckpointPointerSlotsFull = 0;
 
 	for (u32 i = 0; i < state->count; i++)
 	{
