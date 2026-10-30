@@ -5,6 +5,10 @@
 #endif
 
 // NOTE(aalhendi): ASM-verified NTSC-U 926 0x800326b4-0x80032700.
+#ifdef __3DS__
+void MainFrame_PumpLoadingFrame(void);
+#endif
+
 void LOAD_RunPtrMap(char *origin, int *patchArr, int numPtrs)
 {
 	int *ptrCurrOffset = patchArr;
@@ -13,6 +17,12 @@ void LOAD_RunPtrMap(char *origin, int *patchArr, int numPtrs)
 	{
 		int offset = (*ptrCurrOffset >> 2) << 2;
 		*(int *)&origin[offset] = *(int *)&origin[offset] + (int)origin;
+#ifdef __3DS__
+		if ((((ptrCurrOffset - patchArr) & 0xfff) == 0xfff))
+		{
+			MainFrame_PumpLoadingFrame();
+		}
+#endif
 #if defined(CTR_NATIVE) && defined(CTR_INTERNAL)
 		NativeCheckpoint_RegisterPointerSlot(&origin[offset]);
 #endif

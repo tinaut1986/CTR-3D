@@ -1888,3 +1888,77 @@ void RenderSubmit(struct GameTracker *gGT)
 	NativePerf_EndScope(NATIVE_PERF_BUCKET_RENDER_SUBMIT);
 #endif
 }
+
+#ifdef __3DS__
+unsigned int N3DS_SysMs(void);
+int N3DS_FramePaceOldClass(void);
+
+/*
+ * Present one loading-screen frame from inside a long load step.
+ *
+ * The game loads one stage per frame and draws between stages, so a step that runs for
+ * hundreds of milliseconds (a disc read chunk, a pointer patch, a mesh build) freezes the
+ * checkered flag and the LOADING letters until it returns. Long steps call this between
+ * their chunks. It is one ordinary frame -- ResetDB, RenderFrame, submit -- with only the
+ * flag left in renderFlags, so nothing of the half-loaded level is touched or drawn.
+ *
+ * Old 3DS / 2DS only (New 3DS loads fast enough), rate-limited to ~30 fps, and never
+ * re-entered: RenderFrame itself does not load anything.
+ */
+void MainFrame_PumpLoadingFrame(void)
+{
+	static int s_inPump;
+	static unsigned int s_lastMs;
+	struct GameTracker *gGT = sdata->gGT;
+	unsigned int now;
+	u32 savedRenderFlags;
+
+	if (s_inPump || (gGT == NULL) || (sdata->Loading.stage == LOAD_IDLE) || ((gGT->renderFlags & RENDER_FLAG_CHECKERED_FLAG) == 0) ||
+	    !N3DS_FramePaceOldClass())
+	{
+		return;
+	}
+
+	now = N3DS_SysMs();
+	if ((unsigned int)(now - s_lastMs) < 33u)
+	{
+		return;
+	}
+	s_lastMs = now;
+	s_inPump = 1;
+
+	/* Only what the flag needs. MainFrame_RenderFrame as a whole also runs menu input
+	 * (RECTMENU_CollectInput), weather, highlights... none of which may re-enter while a
+	 * file is half-read. */
+	savedRenderFlags = gGT->renderFlags;
+	gGT->renderFlags = RENDER_FLAG_CHECKERED_FLAG;
+
+#ifdef CTR_INTERNAL
+	{
+		static int s_pumpLogged;
+		extern void N3DS_LogFlushNow(void);
+		extern void N3DS_DebugLog(const char *msg);
+		char line[48];
+
+		if (s_pumpLogged < 4)
+		{
+			s_pumpLogged++;
+			snprintf(line, sizeof(line), "[PUMP] frame %d stage=%d", s_pumpLogged, (int)sdata->Loading.stage);
+			N3DS_DebugLog(line);
+			N3DS_LogFlushNow();
+		}
+	}
+#endif
+
+	MainFrame_ResetDB(gGT);
+	Platform_BeginFrame();
+	RaceFlag_DrawSelf();
+	RenderDispEnv_UI(gGT);
+	RenderVSYNC(gGT);
+	RenderSubmit(gGT);
+	Platform_EndFrame();
+
+	gGT->renderFlags = savedRenderFlags;
+	s_inPump = 0;
+}
+#endif

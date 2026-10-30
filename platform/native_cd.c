@@ -482,6 +482,33 @@ internal s32 NativeCD_ReadSectors(s32 sectors, void *dst)
 		s_nativeDiscIoSiteCd++;
 		s_nativeDiscIoSiteCdSectors += (u32)sectors;
 #endif
+#if defined(__3DS__)
+		{
+			/* One slice at a time, with a loading-screen frame between slices: a big file
+			 * read otherwise freezes the flag animation for its whole duration. */
+			extern void MainFrame_PumpLoadingFrame(void);
+			u8 *out = (u8 *)dst;
+			s32 left = sectors;
+
+			while (left > 0)
+			{
+				s32 n = (left > 64) ? 64 : left;
+
+				if (!NativeDiscImage_ReadDataSectors(&s_nativeCdFiles[s_nativeCdCurrentFile].discFile, (u32)s_nativeCdCurrentSector, (u32)n, out))
+				{
+					return 0;
+				}
+				s_nativeCdCurrentSector += n;
+				out += (size_t)n * NATIVE_CD_SECTOR_SIZE;
+				left -= n;
+				if (left > 0)
+				{
+					MainFrame_PumpLoadingFrame();
+				}
+			}
+			return 1;
+		}
+#else
 		if (!NativeDiscImage_ReadDataSectors(&s_nativeCdFiles[s_nativeCdCurrentFile].discFile, (u32)s_nativeCdCurrentSector, (u32)sectors, dst))
 		{
 			return 0;
@@ -489,6 +516,7 @@ internal s32 NativeCD_ReadSectors(s32 sectors, void *dst)
 
 		s_nativeCdCurrentSector += sectors;
 		return 1;
+#endif
 	}
 
 	return fread(dst, 1, byteCount, s_nativeCdFiles[s_nativeCdCurrentFile].hostFile) == byteCount;
