@@ -35,6 +35,7 @@
 #include <netinet/in.h>
 #include <stdio.h>
 #include <string.h>
+#include <time.h>
 
 #include "n3ds_backend.h"
 #include "n3ds_bottomui.h"
@@ -68,10 +69,9 @@ extern int g_dbg_renderThread;
 
 enum
 {
-	TAB_STATUS = 0,
-	TAB_MAP,
-	TAB_OPTIONS,
+	TAB_MAP = 0,
 	TAB_UPDATER,
+	TAB_OPTIONS,
 #ifdef CTR_INTERNAL
 	TAB_DEBUG,
 #endif
@@ -91,7 +91,7 @@ enum
 static int s_es = 0; /* Spanish labels */
 #define TR(en, es) (s_es ? (es) : (en))
 
-static volatile int s_tab = TAB_STATUS;
+static volatile int s_tab = TAB_MAP;
 static volatile int s_dirty = 1;
 static volatile int s_gpuOwned = 0;
 static int s_frameSeen = 0; /* the renderer runs: the CPU never blits again, the GPU pass will present */
@@ -112,13 +112,12 @@ static unsigned int s_drawsPerFrame = 0, s_vertsPerFrame = 0;
 static char s_msg[40];
 static int s_pressBtn = -1;
 static int s_pressFrames = 0;
-static int s_isNew3DS = -1;
 static unsigned s_ftpSig = 0;
 /* In-game updater page (updater.h). The release notes are word-wrapped once on
  * the game thread when a check finishes (Update_FormatNotes keeps a 12 KB buffer
  * on the stack, too much for the render worker that paints), then only drawn. */
 #define NOTE_LINES 384
-#define NOTE_ROWS 6
+#define NOTE_ROWS 4
 static unsigned s_updRev = 0;
 static int s_updState = -1;
 static int s_updNew = 0; /* a newer build was found: the tab says so */
@@ -139,24 +138,64 @@ static u16 s_pix[UI_W * UI_H];
 static u16 s_tiled[N3DS_BOTTOM_UI_TEX_W * N3DS_BOTTOM_UI_TEX_H] __attribute__((aligned(32)));
 
 #define RGB(r, g, b) ((u16)((((r) >> 3) << 11) | (((g) >> 3) << 6) | (((b) >> 3) << 1) | 1))
-#define COL_BG RGB(0x10, 0x12, 0x1A)
-#define COL_MAPBG RGB(0x08, 0x0A, 0x10)
-#define COL_TEXT RGB(0xFF, 0xFF, 0xFF)
-#define COL_LABEL RGB(0x9A, 0xA6, 0xC0)
-#define COL_GOOD RGB(0x50, 0xE0, 0x80)
-#define COL_WARN RGB(0xFF, 0xC0, 0x40)
-#define COL_BAD RGB(0xFF, 0x60, 0x60)
-#define COL_BAR RGB(0x0A, 0x0C, 0x14)
-#define COL_TAB_ON RGB(0x2A, 0x6F, 0xDB)
-#define COL_TAB_OFF RGB(0x24, 0x28, 0x36)
-#define COL_SEP RGB(0x4A, 0x52, 0x6A)
-#define COL_ACCENT RGB(0xFF, 0xD7, 0x00)
-#define COL_BTN_ON RGB(0x1C, 0x7A, 0x3A)
-#define COL_BTN_OFF RGB(0x5A, 0x24, 0x28)
-#define COL_BTN_ACT RGB(0x2C, 0x44, 0x80)
-#define COL_PRESS RGB(0xFF, 0xFF, 0x60)
-#define COL_EDGE RGB(0x80, 0x88, 0xA0)
-#define COL_PANEL RGB(0x18, 0x1C, 0x2A)
+/* Themes: the palette of the whole panel, named after the game (CRASH is the
+ * default: wumpa orange on crate brown). Every COL_* below reads the current
+ * one, so a theme change repaints everything. Saved as "uitheme" in ctr3d.cfg. */
+struct UiTheme
+{
+	const char *name;
+	u16 bg, bar, cell, cellEdge, tab, tabEdge, on, onEdge, onBody;
+	u16 accent, text, dim, faint, good, warn, bad, btn, btnEdge;
+};
+
+static const struct UiTheme s_themes[] = {
+	{ "CRASH", RGB(26, 18, 12), RGB(14, 9, 6), RGB(58, 38, 20), RGB(120, 78, 34), RGB(44, 30, 16), RGB(96, 64, 30), RGB(236, 126, 24),
+	  RGB(255, 200, 80), RGB(120, 58, 10), RGB(255, 170, 40), RGB(250, 240, 220), RGB(180, 150, 110), RGB(110, 84, 54), RGB(150, 230, 90),
+	  RGB(255, 210, 70), RGB(240, 90, 70), RGB(46, 110, 60), RGB(110, 200, 110) },
+	{ "NITRO", RGB(10, 20, 12), RGB(6, 12, 8), RGB(18, 48, 26), RGB(46, 140, 60), RGB(14, 36, 20), RGB(36, 100, 48), RGB(110, 240, 70),
+	  RGB(200, 255, 120), RGB(30, 100, 30), RGB(130, 255, 80), RGB(230, 255, 225), RGB(130, 180, 130), RGB(60, 100, 64), RGB(130, 255, 90),
+	  RGB(255, 225, 60), RGB(255, 90, 110), RGB(60, 40, 110), RGB(160, 110, 240) },
+	{ "TNT", RGB(24, 10, 10), RGB(12, 5, 5), RGB(60, 18, 18), RGB(150, 40, 36), RGB(44, 14, 14), RGB(110, 30, 28), RGB(240, 60, 44),
+	  RGB(255, 170, 100), RGB(130, 24, 20), RGB(255, 214, 60), RGB(255, 236, 220), RGB(190, 140, 130), RGB(110, 64, 60), RGB(160, 235, 100),
+	  RGB(255, 214, 60), RGB(255, 110, 90), RGB(150, 36, 30), RGB(255, 150, 90) },
+	{ "OXIDE", RGB(10, 12, 34), RGB(6, 7, 22), RGB(20, 28, 70), RGB(60, 90, 200), RGB(16, 22, 56), RGB(46, 66, 150), RGB(60, 220, 255),
+	  RGB(190, 250, 255), RGB(16, 80, 130), RGB(80, 230, 255), RGB(230, 240, 255), RGB(130, 150, 200), RGB(64, 76, 130), RGB(110, 240, 170),
+	  RGB(255, 210, 90), RGB(255, 100, 130), RGB(70, 40, 130), RGB(190, 120, 255) },
+};
+#define UI_THEMES ((int)(sizeof(s_themes) / sizeof(s_themes[0])))
+static volatile int s_theme = 0;
+static int s_themeLoaded = 0;
+#define TH (&s_themes[s_theme])
+
+/* A colour darkened (num/16 of it; > 16 lightens, clamped). */
+static u16 ui_shade(u16 c, int num)
+{
+	int r = (((c >> 11) & 31) * num) / 16, g = (((c >> 6) & 31) * num) / 16, b = (((c >> 1) & 31) * num) / 16;
+
+	r = (r > 31) ? 31 : r;
+	g = (g > 31) ? 31 : g;
+	b = (b > 31) ? 31 : b;
+	return (u16)((r << 11) | (g << 6) | (b << 1) | 1);
+}
+
+#define COL_BG (TH->bg)
+#define COL_MAPBG ui_shade(TH->bg, 8)
+#define COL_TEXT (TH->text)
+#define COL_LABEL (TH->dim)
+#define COL_GOOD (TH->good)
+#define COL_WARN (TH->warn)
+#define COL_BAD (TH->bad)
+#define COL_BAR (TH->bar)
+#define COL_TAB_ON (TH->onBody)
+#define COL_TAB_OFF (TH->tab)
+#define COL_SEP (TH->cellEdge)
+#define COL_ACCENT (TH->accent)
+#define COL_BTN_ON (TH->btn)
+#define COL_BTN_OFF (TH->cell)
+#define COL_BTN_ACT (TH->cell)
+#define COL_PRESS (TH->onEdge)
+#define COL_EDGE (TH->cellEdge)
+#define COL_PANEL (TH->cell)
 
 static void ui_rect(int x, int y, int w, int h, u16 c)
 {
@@ -179,14 +218,6 @@ static void ui_rect(int x, int y, int w, int h, u16 c)
 			p[col] = c;
 		}
 	}
-}
-
-static void ui_frame(int x, int y, int w, int h, int t, u16 c)
-{
-	ui_rect(x, y, w, t, c);
-	ui_rect(x, y + h - t, w, t, c);
-	ui_rect(x, y, t, h, c);
-	ui_rect(x + w - t, y, t, h, c);
 }
 
 /* 5x7 glyph rows (bit 4 = leftmost column). Digits/letters/punctuation are the
@@ -261,22 +292,34 @@ static const u8 *ui_glyph(char c)
 /* Returns the x after the text. scale 1 = 5x7 (6 px advance), 2 = 10x14 (12 px). */
 static int ui_text(int x, int y, int scale, u16 c, const char *s)
 {
-	for (; *s != '\0'; s++)
-	{
-		const u8 *g = ui_glyph(*s);
-		int row, col;
+	const u16 shadow = ui_shade(COL_BG, 4);
+	int pass;
+	const int x0 = x;
 
-		for (row = 0; row < 7; row++)
+	/* Pass 0 is a 1 px drop shadow (the game's own text is outlined), pass 1 the text. */
+	for (pass = 0; pass < 2; pass++)
+	{
+		const char *t = s;
+		const int o = (pass == 0) ? scale : 0;
+
+		x = x0;
+		for (; *t != '\0'; t++)
 		{
-			for (col = 0; col < 5; col++)
+			const u8 *g = ui_glyph(*t);
+			int row, col;
+
+			for (row = 0; row < 7; row++)
 			{
-				if (g[row] & (0x10 >> col))
+				for (col = 0; col < 5; col++)
 				{
-					ui_rect(x + (col * scale), y + (row * scale), scale, scale, c);
+					if (g[row] & (0x10 >> col))
+					{
+						ui_rect(x + (col * scale) + o, y + (row * scale) + o, scale, scale, (pass == 0) ? shadow : c);
+					}
 				}
 			}
+			x += 6 * scale;
 		}
-		x += 6 * scale;
 	}
 	return x;
 }
@@ -301,29 +344,124 @@ static int ui_tab_list(int *ids)
 {
 	int n = 0;
 
-	ids[n++] = TAB_STATUS;
 	ids[n++] = TAB_MAP;
-	ids[n++] = TAB_OPTIONS;
 	ids[n++] = TAB_UPDATER;
+	ids[n++] = TAB_OPTIONS;
 #ifdef CTR_INTERNAL
 	ids[n++] = TAB_DEBUG;
 #endif
 	return n;
 }
 
-/* Short enough for a 53 px tab at scale 1 (<= 8 characters). The full name is
- * the page's own title. There is no ACHIEVEMENTS tab: this port has no
+/* Tab buttons: icons only, like the author's other ports (sm-3ds, mzm). Slot i
+ * is a 30x21 button at x = 4 + 34 * i; the right part of the bar holds the
+ * battery, wifi and clock. There is no ACHIEVEMENTS tab: this port has no
  * achievement system, and a dead tab would only mislead. */
-static const char *ui_tab_name(int id)
+#define TABBTN_X0 4
+#define TABBTN_PITCH 34
+#define TABBTN_W 30
+#define TABBTN_H 21
+
+static void ui_tab_rect(int slot, int *x, int *y, int *w, int *h)
 {
+	*x = TABBTN_X0 + (slot * TABBTN_PITCH);
+	*y = 2;
+	*w = TABBTN_W;
+	*h = TABBTN_H;
+}
+
+/* 14x14 glyphs made of rectangles, centred on (x, y). */
+static void ui_tab_icon(int id, int x, int y, u16 c)
+{
+#define R(dx, dy, w, h) ui_rect(x + (dx), y + (dy), (w), (h), c)
 	switch (id)
 	{
-	case TAB_STATUS: return TR("STATUS", "ESTADO");
-	case TAB_MAP: return TR("MAP", "MAPA");
-	case TAB_OPTIONS: return TR("OPTIONS", "OPCIONES");
-	case TAB_UPDATER: return s_updNew ? TR("UPDATE!", "NUEVA!") : TR("UPDATER", "ACTUALIZ");
-	default: return "DEBUG";
+	case TAB_MAP: /* floor plan: 3x3 rooms, hollow centre */
+		R(-7, -7, 4, 4); R(-2, -7, 4, 4); R(3, -7, 4, 4);
+		R(-7, -2, 4, 4);                  R(3, -2, 4, 4);
+		R(-7, 3, 4, 4);  R(-2, 3, 4, 4);  R(3, 3, 4, 4);
+		break;
+	case TAB_UPDATER: /* arrow down into a tray */
+		R(-1, -7, 3, 7); R(-5, -1, 11, 1); R(-4, 0, 9, 1); R(-3, 1, 7, 1); R(-2, 2, 5, 1);
+		R(-6, 4, 13, 1); R(-6, 4, 1, 3); R(6, 4, 1, 3); R(-6, 6, 13, 1);
+		break;
+	case TAB_OPTIONS: /* sliders */
+		R(-6, -4, 12, 1); R(-6, 0, 12, 1); R(-6, 4, 12, 1);
+		R(-2, -5, 3, 3); R(2, -1, 3, 3); R(-5, 3, 3, 3);
+		break;
+#ifdef CTR_INTERNAL
+	default: /* bug */
+		R(-1, -7, 1, 2); R(1, -7, 1, 2); R(-2, -5, 4, 2);
+		R(-3, -3, 3, 8); R(1, -3, 3, 8); R(-2, -4, 4, 1); R(-2, 5, 4, 1);
+		R(-6, -2, 3, 1); R(-6, 1, 3, 1); R(-6, 4, 3, 1);
+		R(3, -2, 3, 1); R(3, 1, 3, 1); R(3, 4, 3, 1);
+		break;
+#else
+	default: break;
+#endif
 	}
+#undef R
+}
+
+/* Battery, wifi and clock at the right of the bar. Polled by Frame (s_sys*). */
+static int s_sysBattery = 5, s_sysCharging = 0, s_sysWifi = 0, s_sysPtm = 0;
+static char s_sysClock[8] = "--:--";
+static int ui_poll_system(void);
+
+static void ui_draw_system(void)
+{
+	const u16 frame = COL_LABEL, dim = TH->faint;
+	const int cy = 13;
+	const int bx = 299, by = cy - 4;
+	const int wx = bx - 16;
+	int i;
+
+	ui_rect(bx, by, 15, 1, frame);
+	ui_rect(bx, by + 7, 15, 1, frame);
+	ui_rect(bx, by, 1, 8, frame);
+	ui_rect(bx + 14, by, 1, 8, frame);
+	ui_rect(bx + 15, by + 2, 2, 4, frame);
+	if (s_sysPtm)
+	{
+		const int w = (s_sysBattery * 11) / 5;
+		const u16 fill = s_sysCharging ? RGB(90, 210, 120)
+		                 : (s_sysBattery <= 1) ? RGB(230, 80, 60)
+		                 : (s_sysBattery == 2) ? RGB(235, 190, 70)
+		                                       : RGB(110, 205, 130);
+
+		if (w > 0)
+		{
+			ui_rect(bx + 2, by + 2, w, 4, fill);
+		}
+		if (s_sysCharging)
+		{
+			/* plugged in: a lightning bolt over the battery (5x8, bit 4 = left) */
+			static const u8 bolt[8] = { 0x03, 0x06, 0x0C, 0x1E, 0x07, 0x06, 0x0C, 0x18 };
+			int row, col;
+
+			for (row = 0; row < 8; row++)
+			{
+				for (col = 0; col < 5; col++)
+				{
+					if (bolt[row] & (0x10 >> col))
+					{
+						ui_rect(bx + 5 + col, by + row, 1, 1, RGB(255, 245, 160));
+					}
+				}
+			}
+		}
+	}
+	else
+	{
+		ui_rect(bx + 5, by + 3, 4, 2, dim);
+	}
+	for (i = 0; i < 3; i++)
+	{
+		const int h = 3 + (i * 2);
+
+		ui_rect(wx + (i * 4), cy + 4 - h, 2, h, (i < s_sysWifi) ? frame : dim);
+	}
+	ui_text(wx - 4 - ui_text_w(1, s_sysClock), cy - 3, 1, COL_TEXT, s_sysClock);
 }
 
 enum
@@ -333,16 +471,51 @@ enum
 	OPT_FPSCAP,
 	OPT_SHOWFPS,
 	OPT_CPU804,
+	OPT_THEME,
 	OPT_COUNT
 };
 
-/* Rows of 34 px at a 37 px pitch, clear of the message line at UI_H - 12. */
+static int s_isNew3DS = -1;
+
+static int ui_is_new3ds(void)
+{
+	if (s_isNew3DS < 0)
+	{
+		bool n = false;
+
+		APT_CheckNew3DS(&n);
+		s_isNew3DS = n ? 1 : 0;
+	}
+	return s_isNew3DS;
+}
+
+/* Two columns of 151x24 cells: the four display switches, then (below the
+ * SYSTEM header) CPU 804MHZ (New 3DS only) and the THEME. */
 static void ui_opt_rect(int i, int *x, int *y, int *w, int *h)
 {
-	*x = 6;
-	*y = CONTENT_Y + 6 + (i * 37);
-	*w = 308;
-	*h = 34;
+	int slot = 0;
+
+	*w = 151;
+	*h = 24;
+	if (i <= OPT_SHOWFPS)
+	{
+		*x = 6 + ((i & 1) * 157);
+		*y = 44 + ((i >> 1) * 27);
+		return;
+	}
+	if (i == OPT_CPU804)
+	{
+		if (!ui_is_new3ds())
+		{
+			*w = 0; /* no cell on an Old 3DS: nothing to hit */
+		}
+	}
+	else
+	{
+		slot = ui_is_new3ds() ? 1 : 0;
+	}
+	*x = 6 + (slot * 157);
+	*y = 114;
 }
 
 #ifdef CTR_INTERNAL
@@ -382,7 +555,7 @@ static void ui_act_rect(int i, int *x, int *y, int *w, int *h)
 static void ui_cancel_rect(int *x, int *y, int *w, int *h)
 {
 	*x = 232;
-	*y = CONTENT_Y + 172;
+	*y = 212;
 	*w = 82;
 	*h = 26;
 }
@@ -404,11 +577,11 @@ static void ui_upd_rect(int i, int *x, int *y, int *w, int *h)
 {
 	switch (i)
 	{
-	case UPD_CHANNEL: *x = 6; *y = CONTENT_Y + 22; *w = 151; *h = 22; break;
-	case UPD_AUTO: *x = 163; *y = CONTENT_Y + 22; *w = 151; *h = 22; break;
-	case UPD_ACTION: *x = 6; *y = CONTENT_Y + 48; *w = 308; *h = 24; break;
-	case UPD_UP: *x = 270; *y = CONTENT_Y + 104; *w = 44; *h = 32; break;
-	default: *x = 270; *y = CONTENT_Y + 140; *w = 44; *h = 32; break;
+	case UPD_CHANNEL: *x = 6; *y = 44; *w = 151; *h = 24; break;
+	case UPD_AUTO: *x = 163; *y = 44; *w = 151; *h = 24; break;
+	case UPD_ACTION: *x = 6; *y = 72; *w = 308; *h = 24; break;
+	case UPD_UP: *x = 280; *y = 154; *w = 34; *h = 26; break;
+	default: *x = 280; *y = 182; *w = 34; *h = 26; break;
 	}
 }
 
@@ -439,9 +612,9 @@ static void ui_fmt_ms(char *out, size_t cap, u32 us)
 
 static void ui_kv(int y, const char *label, const char *value, u16 vcol)
 {
-	const int x = ui_text(6, y, 2, COL_LABEL, label);
+	const int x = ui_text(6, y, 1, COL_LABEL, label);
 
-	ui_text(x + 12, y, 2, vcol, value);
+	ui_text(x + 8, y, 1, vcol, value);
 }
 
 static void ui_ring_stats(u32 *minUs, u32 *maxUs, u32 *avgUs)
@@ -467,18 +640,6 @@ static void ui_ring_stats(u32 *minUs, u32 *maxUs, u32 *avgUs)
  * showing the single latest frame (s_lastDtUs) read one random frame per
  * repaint: on the New 3DS, where the game thread's call interval is not
  * vblank-locked, that swung 28-80 while the presented rate sat at a steady 30. */
-static u32 ui_ring_recent_avg(int n)
-{
-	unsigned long long sum = 0;
-	int i, k = (n < s_ringCount) ? n : s_ringCount;
-
-	for (i = 1; i <= k; i++)
-	{
-		sum += s_ring[(s_ringHead - i + (UI_RING * 2)) % UI_RING];
-	}
-	return (k > 0) ? (u32)(sum / (unsigned)k) : 0;
-}
-
 int N3DS_BottomUi_Snapshot(unsigned char *bgr)
 {
 	int x, y;
@@ -516,10 +677,64 @@ static u16 ui_time_col(u32 us)
 	return (us <= 34000U) ? COL_GOOD : (us <= 50000U) ? COL_WARN : COL_BAD;
 }
 
+/* A crate-style cell: 1 px edge, a lit top and a shaded bottom inside, and a stud in each corner. */
+static void ui_cell(int x, int y, int w, int h, u16 body, u16 edge)
+{
+	ui_rect(x, y, w, h, edge);
+	ui_rect(x + 1, y + 1, w - 2, h - 2, body);
+	if ((w >= 16) && (h >= 12))
+	{
+		ui_rect(x + 1, y + 1, w - 2, 1, ui_shade(body, 20));
+		ui_rect(x + 1, y + h - 2, w - 2, 1, ui_shade(body, 11));
+		ui_rect(x + 2, y + 2, 1, 1, edge);
+		ui_rect(x + w - 3, y + 2, 1, 1, edge);
+		ui_rect(x + 2, y + h - 3, 1, 1, edge);
+		ui_rect(x + w - 3, y + h - 3, 1, 1, edge);
+	}
+}
+
 static void ui_button(int x, int y, int w, int h, u16 body, int pressed)
 {
-	ui_rect(x, y, w, h, body);
-	ui_frame(x, y, w, h, pressed ? 3 : 1, pressed ? COL_PRESS : COL_EDGE);
+	ui_cell(x, y, w, h, body, pressed ? COL_PRESS : COL_EDGE);
+}
+
+/* A section title in the accent colour with a rule to its right (and, optionally, a note at the far right). */
+static void ui_header(int y, const char *title, const char *right)
+{
+	const int x = ui_text(6, y, 1, COL_ACCENT, title) + 6;
+	const int rw = (right != NULL) ? ui_text_w(1, right) + 6 : 0;
+
+	ui_rect(x, y + 3, 314 - rw - x + 1, 1, COL_EDGE);
+	if (right != NULL)
+	{
+		ui_text(314 - ui_text_w(1, right) + 1, y, 1, COL_LABEL, right);
+	}
+}
+
+/* The wumpa fruit, 9x9, in its own colours whatever the theme. */
+static void ui_wumpa(int x, int y)
+{
+	static const char *const art[9] = { "..GGG....", ".GG.GG...", "..OOOO...", ".OYOOOO..", "OYOOOORO.",
+	                                    "OOOOOORO.", "OOOOORRO.", ".OOOORO..", "..OOOO..." };
+	int r, c;
+
+	for (r = 0; r < 9; r++)
+	{
+		for (c = 0; c < 9; c++)
+		{
+			u16 col;
+
+			switch (art[r][c])
+			{
+			case 'G': col = RGB(90, 200, 70); break;
+			case 'O': col = RGB(240, 130, 20); break;
+			case 'Y': col = RGB(255, 210, 90); break;
+			case 'R': col = RGB(170, 70, 10); break;
+			default: continue;
+			}
+			ui_rect(x + c, y + r, 1, 1, col);
+		}
+	}
 }
 
 static void ui_ftp_address(char *out, size_t cap)
@@ -553,114 +768,50 @@ static unsigned ui_ftp_signature(void)
 
 /* ------------------------------------------------------------------- pages --- */
 
-static void ui_draw_status(void)
+/* The pre-game "label NN%" status ("loading audio 40%"...) as a modal box over
+ * whichever tab is up, instead of bare text in the middle of the screen. */
+static void ui_draw_status_modal(void)
 {
-	char a[24], b[24], c[80];
-	u32 mn, mx, av;
-	int y = CONTENT_Y + 8;
-	const int ftp = N3DS_FtpStatus();
+	const int w = 232, h = 56;
+	const int x = (UI_W - w) / 2, y = (UI_H - h) / 2;
 
-	ui_ring_stats(&mn, &mx, &av);
-
+	if (s_status[0] == '\0')
 	{
-		const u32 recent = ui_ring_recent_avg(15); /* ~0.5 s at 30 fps */
-
-		ui_fmt10(a, sizeof(a), (recent > 0) ? (10000000ULL / recent) : 0ULL);
+		return;
 	}
-	ui_fmt10(b, sizeof(b), (av > 0) ? (10000000ULL / av) : 0ULL);
-	snprintf(c, sizeof(c), "%s  AVG %s", a, b);
-	ui_kv(y, "FPS", c, ui_time_col(av));
-	y += 17;
-
-	ui_fmt_mb(a, sizeof(a), N3DS_LinearFreeBytes());
-	snprintf(c, sizeof(c), "%sMB", a);
-	ui_kv(y, TR("LINEAR FREE", "LINEAL LIBRE"), c, COL_TEXT);
-	y += 17;
-
-	{
-		ui_fmt_mb(a, sizeof(a), (unsigned long long)N3DS_HeapUsedBytes());
-		ui_fmt_mb(b, sizeof(b), (unsigned long long)N3DS_HeapFreeBytes());
-		snprintf(c, sizeof(c), "%sMB / %sMB FREE", a, b);
-		ui_kv(y, "HEAP", c, COL_TEXT);
-		y += 17;
-	}
-
-	if (s_isNew3DS < 0)
-	{
-		bool n = false;
-
-		APT_CheckNew3DS(&n);
-		s_isNew3DS = n ? 1 : 0;
-	}
-	snprintf(c, sizeof(c), "%s %s%s", s_isNew3DS ? "NEW" : "OLD", (s_isNew3DS && N3DS_SpeedupEnabled()) ? "804MHZ" : "268MHZ",
-	         N3DS_O3dsSimActive() ? " SIM" : "");
-	ui_kv(y, "3DS", c, (s_isNew3DS && !N3DS_SpeedupEnabled()) ? COL_WARN : COL_TEXT);
-	y += 17;
-
-	{
-		const float sl = N3DS_StereoSliderState();
-
-		snprintf(c, sizeof(c), "%d.%02d %s", (int)sl, (int)(sl * 100.0f) % 100,
-		         !g_dbg_stereo                     ? TR("OFF (OPTIONS)", "NO (OPCIONES)")
-		         : N3DS_FramePaceStereoSuppressed() ? TR("2D (AUTO, SLOW)", "2D (AUTO, LENTO)")
-		         : N3DS_StereoFrameActive()         ? "3D"
-		                                            : "2D");
-		ui_kv(y, TR("3D SLIDER", "SLIDER 3D"), c, COL_TEXT);
-		y += 17;
-	}
-
-	snprintf(c, sizeof(c), "%d  MODE %X", s_gi.levelID, (unsigned)s_gi.gameMode);
-	ui_kv(y, TR("LEVEL", "NIVEL"), c, COL_TEXT);
-	y += 17;
-
-	if (ftp == N3DS_FTP_STATUS_LISTENING)
-	{
-		ui_ftp_address(c, sizeof(c));
-		ui_kv(y, N3DS_FtpInstallOnly() ? "FTP (INSTALL)" : "FTP", c, COL_GOOD);
-	}
-	else
-	{
-		ui_kv(y, "FTP", ui_ftp_state_text(ftp), (ftp == N3DS_FTP_STATUS_OFF) ? COL_LABEL : COL_WARN);
-	}
-	y += 17;
-
-	if (s_status[0] != '\0')
-	{
-		ui_text(6, y + 2, 1, COL_WARN, s_status);
-	}
-	else
-	{
-		ui_text(6, y + 2, 1, COL_LABEL, "CTR 3D " CTR_NATIVE_VERSION);
-	}
+	ui_cell(x - 2, y - 2, w + 4, h + 4, ui_shade(COL_BG, 4), COL_EDGE); /* the dimmed halo */
+	ui_cell(x, y, w, h, COL_PANEL, COL_ACCENT);
+	ui_text_c(UI_W / 2, y + 12, 1, COL_LABEL, TR("PLEASE WAIT", "ESPERA UN MOMENTO"));
+	ui_rect(x + 10, y + 24, w - 20, 1, COL_SEP);
+	ui_text_c(UI_W / 2, y + 34, 1, COL_WARN, s_status);
 }
 
 static void ui_draw_map(void)
 {
 	ui_rect(0, CONTENT_Y, UI_W, UI_H - CONTENT_Y, COL_MAPBG);
-	if (!g_dbg_btmMap)
+	if (!g_dbg_btmMap || !s_mapLive)
 	{
-		ui_text_c(UI_W / 2, 100, 1, COL_WARN, TR("MINIMAP ON THE TOP SCREEN", "MAPA EN LA PANTALLA SUPERIOR"));
-		ui_text_c(UI_W / 2, 114, 1, COL_LABEL, TR("SWITCHED OFF IN DEBUG", "DESACTIVADO EN DEBUG"));
-	}
-	else if (!s_mapLive)
-	{
-		ui_text_c(UI_W / 2, 100, 2, COL_LABEL, TR("NO MAP NOW", "SIN MAPA AHORA"));
-		ui_text_c(UI_W / 2, 124, 1, COL_LABEL, TR("IT SHOWS HERE DURING A RACE", "SE VE AQUI EN CARRERA"));
+		ui_cell(60, 86, 200, 68, COL_PANEL, COL_EDGE);
+		ui_wumpa(UI_W / 2 - 4, 94);
+		ui_text_c(UI_W / 2, 110, 1, COL_TEXT, g_dbg_btmMap ? TR("NO MAP NOW", "SIN MAPA AHORA") : TR("MINIMAP ON THE TOP SCREEN", "MAPA EN LA PANTALLA SUPERIOR"));
+		ui_text_c(UI_W / 2, 124, 1, COL_LABEL,
+		          g_dbg_btmMap ? TR("IT SHOWS HERE DURING A RACE", "SE VE AQUI DURANTE UNA CARRERA") : TR("SWITCHED OFF IN DEBUG", "DESACTIVADO EN DEBUG"));
 	}
 }
 
-static void ui_draw_option(int i, const char *label, int on, const char *stateText)
+static int s_optSel = -1; /* the last cell touched: its help shows under the cells */
+
+/* One settings cell: the name dimmed above, the value below (green for on, faint for off). */
+static void ui_draw_option(int i, const char *label, const char *stateText, u16 vcol)
 {
 	int x, y, w, h;
 
 	ui_opt_rect(i, &x, &y, &w, &h);
-	ui_button(x, y, w, h, on ? COL_BTN_ON : COL_BTN_OFF, (i == s_pressBtn));
-	ui_text(x + 10, y + 10, 2, COL_TEXT, label);
-	ui_text(x + w - 10 - ui_text_w(2, stateText), y + 10, 2, COL_TEXT, stateText);
+	ui_cell(x, y, w, h, COL_PANEL, (i == s_pressBtn) ? COL_PRESS : (i == s_optSel) ? COL_ACCENT : COL_EDGE);
+	ui_text(x + 6, y + 4, 1, COL_LABEL, label);
+	ui_text(x + 6, y + 13, 1, vcol, stateText);
 }
 
-/* 3D EFFECT: OFF / ON / AUTO (the Old-3DS default: the right eye yields when it
- * alone costs the frame its cap, see n3ds_backend.h's frame-pace block). */
 static const char *ui_stereo_text(void)
 {
 	if (g_dbg_stereo == 2)
@@ -695,38 +846,75 @@ static const char *ui_fpscap_text(void)
 
 static void ui_draw_options(void)
 {
-	ui_draw_option(OPT_HUDHIDE, TR("AUTO-HIDE HUD", "HUD AUTOOCULTO"), g_dbg_hudAutoHide, ui_onoff(g_dbg_hudAutoHide));
-	ui_draw_option(OPT_STEREO, TR("3D EFFECT", "EFECTO 3D"), g_dbg_stereo, ui_stereo_text());
-	ui_draw_option(OPT_FPSCAP, TR("FRAME SKIP", "SALTO FRAMES"), 1, ui_fpscap_text());
-	ui_draw_option(OPT_SHOWFPS, TR("SHOW FPS", "VER FPS"), g_dbg_showFps, ui_onoff(g_dbg_showFps));
-	if (s_isNew3DS < 0)
-	{
-		bool n = false;
+	static const char *const help[OPT_COUNT][2] = {
+		{ "WITH THE MAP TAB UP THE RACE HUD MOVES HERE", "AND LEAVES THE TOP SCREEN CLEAR." },
+		{ "USES THE CONSOLE 3D SLIDER. AUTO TURNS IT", "OFF WHEN THE GAME RUNS SLOW." },
+		{ "AUTO PICKS THE FRAME RATE THE CONSOLE CAN", "HOLD; 30 LOCKS IT; OFF DRAWS EVERY FRAME." },
+		{ "FPS COUNTER ON THE TOP SCREEN, TOP CENTRE.", "" },
+		{ "NEW 3DS ONLY. OFF SHOWS HOW THE GAME RUNS", "ON AN OLD 3DS." },
+		{ "COLOURS OF THIS SCREEN: CRASH, NITRO, TNT", "AND OXIDE. TAP TO CHANGE." },
+	};
+	static const char *const helpEs[OPT_COUNT][2] = {
+		{ "CON LA PESTANA MAPA, EL HUD DE CARRERA PASA", "AQUI Y LA PANTALLA SUPERIOR QUEDA LIBRE." },
+		{ "USA EL CONTROL 3D DE LA CONSOLA. AUTO LO", "APAGA SI EL JUEGO VA LENTO." },
+		{ "AUTO ELIGE EL RITMO QUE AGUANTA LA CONSOLA;", "30 LO FIJA; OFF DIBUJA TODOS LOS FRAMES." },
+		{ "CONTADOR DE FPS ARRIBA, EN EL CENTRO.", "" },
+		{ "SOLO NEW 3DS. APAGADO MUESTRA COMO VA EL", "JUEGO EN UNA OLD 3DS." },
+		{ "COLORES DE ESTA PANTALLA: CRASH, NITRO, TNT", "Y OXIDE. TOCA PARA CAMBIAR." },
+	};
+	char c[32];
+	const int newConsole = ui_is_new3ds();
 
-		APT_CheckNew3DS(&n);
-		s_isNew3DS = n ? 1 : 0;
-	}
-	/* CPU 804 MHZ is a New 3DS switch; an Old 3DS has no clock-up, so it has no row
-	 * (STATUS says which console and clock this is). */
-	if (s_isNew3DS)
+	ui_header(32, TR("DISPLAY", "PANTALLA"), NULL);
+	ui_draw_option(OPT_HUDHIDE, TR("AUTO-HIDE HUD", "HUD AUTOOCULTO"), ui_onoff(g_dbg_hudAutoHide), g_dbg_hudAutoHide ? COL_GOOD : TH->faint);
+	ui_draw_option(OPT_STEREO, TR("3D EFFECT", "EFECTO 3D"), ui_stereo_text(), g_dbg_stereo ? COL_TEXT : TH->faint);
+	ui_draw_option(OPT_FPSCAP, TR("FRAME SKIP", "SALTO DE FRAMES"), ui_fpscap_text(), COL_TEXT);
+	ui_draw_option(OPT_SHOWFPS, TR("SHOW FPS", "VER FPS"), ui_onoff(g_dbg_showFps), g_dbg_showFps ? COL_GOOD : TH->faint);
+	ui_header(102, TR("SYSTEM", "SISTEMA"), NULL);
+	/* CPU 804 MHZ is a New 3DS switch; an Old 3DS has no clock-up, so it has no cell. */
+	if (newConsole)
 	{
-		ui_draw_option(OPT_CPU804, "CPU 804MHZ", N3DS_SpeedupEnabled(), ui_onoff(N3DS_SpeedupEnabled()));
+		ui_draw_option(OPT_CPU804, "CPU 804 MHZ", ui_onoff(N3DS_SpeedupEnabled()), N3DS_SpeedupEnabled() ? COL_GOOD : TH->faint);
 	}
+	snprintf(c, sizeof(c), "< %s >", TH->name);
+	ui_draw_option(OPT_THEME, TR("THEME", "TEMA"), c, COL_ACCENT);
+	ui_header(145, TR("HELP", "AYUDA"), NULL);
+	if ((s_optSel >= 0) && (s_optSel < OPT_COUNT))
+	{
+		ui_text(6, 160, 1, COL_LABEL, s_es ? helpEs[s_optSel][0] : help[s_optSel][0]);
+		ui_text(6, 171, 1, COL_LABEL, s_es ? helpEs[s_optSel][1] : help[s_optSel][1]);
+	}
+	else
+	{
+		ui_text(6, 160, 1, COL_LABEL, TR("TAP A SETTING TO CHANGE IT.", "TOCA UN AJUSTE PARA CAMBIARLO."));
+	}
+	ui_wumpa(6, 223);
 	if (s_msg[0] != '\0')
 	{
-		ui_text(6, UI_H - 12, 1, COL_GOOD, s_msg);
+		ui_text(20, 224, 1, COL_GOOD, s_msg);
+	}
+	else
+	{
+		ui_text(20, 224, 1, TH->faint, "CTR 3D " CTR_NATIVE_VERSION);
 	}
 }
 
+/* A progress bar in hazard stripes (the TNT crates' paint): lit up to the progress, dim beyond it. */
 static void ui_draw_bar(int x, int y, int w, int h, unsigned long long done, unsigned long long total, u16 fill)
 {
-	ui_frame(x, y, w, h, 1, COL_EDGE);
-	ui_rect(x + 1, y + 1, w - 2, h - 2, COL_PANEL);
-	if (total > 0)
-	{
-		const int fw = (int)(((unsigned long long)(w - 2) * (done > total ? total : done)) / total);
+	const int fw = (total > 0) ? (int)(((unsigned long long)w * (done > total ? total : done)) / total) : 0;
+	const u16 dark = ui_shade(COL_BG, 6);
+	int i, j;
 
-		ui_rect(x + 1, y + 1, fw, h - 2, fill);
+	for (i = 0; i < w; i++)
+	{
+		for (j = 0; j < h; j++)
+		{
+			const int stripe = (((i + j) / 4) & 1);
+			const u16 lit = stripe ? fill : dark;
+
+			ui_rect(x + i, y + j, 1, 1, (i < fw) ? lit : ui_shade(lit, 5));
+		}
 	}
 }
 
@@ -739,59 +927,67 @@ static void ui_draw_updater(void)
 	const int ftp = N3DS_FtpStatus();
 
 	Updater_GetStatus(&st);
-	ui_text(6, CONTENT_Y + 4, 2, COL_ACCENT, TR("UPDATER", "ACTUALIZADOR"));
-	ui_text(314 - ui_text_w(1, CTR_NATIVE_VERSION), CONTENT_Y + 8, 1, COL_LABEL, CTR_NATIVE_VERSION);
+	ui_header(32, TR("UPDATER", "ACTUALIZADOR"), CTR_NATIVE_VERSION);
 
-	/* Channel and auto-check toggles. */
+	/* Channel and auto-check, as settings cells. */
 	ui_upd_rect(UPD_CHANNEL, &x, &y, &w, &h);
-	ui_button(x, y, w, h, busy ? COL_PANEL : COL_BTN_ACT, (s_pressBtn == UPD_BTN_BASE + UPD_CHANNEL));
-	ui_text_c(x + (w / 2), y + 7, 1, COL_TEXT, st.betas ? TR("CHANNEL: + BETAS", "CANAL: + BETAS") : TR("CHANNEL: STABLE", "CANAL: ESTABLE"));
+	ui_cell(x, y, w, h, COL_PANEL, (s_pressBtn == UPD_BTN_BASE + UPD_CHANNEL) ? COL_PRESS : COL_EDGE);
+	ui_text(x + 6, y + 4, 1, COL_LABEL, TR("CHANNEL", "CANAL"));
+	ui_text(x + 6, y + 13, 1, busy ? TH->faint : COL_ACCENT, st.betas ? TR("+ BETAS", "+ BETAS") : TR("STABLE", "ESTABLE"));
 	ui_upd_rect(UPD_AUTO, &x, &y, &w, &h);
 	{
 		const int on = Updater_AutoCheckEnabled();
 
-		ui_button(x, y, w, h, on ? COL_BTN_ON : COL_BTN_OFF, (s_pressBtn == UPD_BTN_BASE + UPD_AUTO));
-		snprintf(c, sizeof(c), "%s %s", TR("AUTO CHECK:", "AUTO BUSCAR:"), ui_onoff(on));
-		ui_text_c(x + (w / 2), y + 7, 1, COL_TEXT, c);
+		ui_cell(x, y, w, h, COL_PANEL, (s_pressBtn == UPD_BTN_BASE + UPD_AUTO) ? COL_PRESS : COL_EDGE);
+		ui_text(x + 6, y + 4, 1, COL_LABEL, TR("CHECK AT START", "BUSCAR AL ABRIR"));
+		ui_text(x + 6, y + 13, 1, on ? COL_GOOD : TH->faint, ui_onoff(on));
 	}
 
 	/* The action button follows the state. */
 	{
 		const char *label = TR("CHECK FOR UPDATES", "BUSCAR ACTUALIZACION");
 		u16 col = COL_BTN_ACT;
+		int lit = 0;
 
 		if (st.state == UPDATE_CHECKING)
 		{
 			label = TR("CHECKING...", "BUSCANDO...");
-			col = COL_PANEL;
+			col = ui_shade(COL_PANEL, 12);
 		}
 		else if (st.state == UPDATE_AVAILABLE)
 		{
 			label = TR("DOWNLOAD AND INSTALL", "DESCARGAR E INSTALAR");
 			col = COL_BTN_ON;
+			lit = 1;
 		}
 		else if (st.state == UPDATE_DOWNLOADING)
 		{
 			label = TR("CANCEL DOWNLOAD", "CANCELAR DESCARGA");
-			col = COL_BTN_OFF;
+			col = COL_BAD;
+			col = ui_shade(col, 8);
 		}
 		else if ((st.state == UPDATE_VERIFYING) || (st.state == UPDATE_INSTALLING))
 		{
 			label = TR("INSTALLING...", "INSTALANDO...");
-			col = COL_PANEL;
+			col = ui_shade(COL_PANEL, 12);
 		}
 		else if (st.state == UPDATE_DONE)
 		{
 			label = TR("RESTARTING...", "REINICIANDO...");
-			col = COL_PANEL;
+			col = ui_shade(COL_PANEL, 12);
 		}
 		ui_upd_rect(UPD_ACTION, &x, &y, &w, &h);
-		ui_button(x, y, w, h, col, (s_pressBtn == UPD_BTN_BASE + UPD_ACTION));
-		ui_text_c(x + (w / 2), y + 5, 2, COL_TEXT, label);
+		ui_cell(x, y, w, h, col, (s_pressBtn == UPD_BTN_BASE + UPD_ACTION) ? COL_PRESS : lit ? TH->btnEdge : COL_EDGE);
+		ui_text_c(x + (w / 2), y + 8, 1, COL_TEXT, label);
+		if (lit)
+		{
+			ui_wumpa(x + 8, y + 7);
+			ui_wumpa(x + w - 17, y + 7);
+		}
 	}
 
 	/* Status line, found version and progress. */
-	y = CONTENT_Y + 78;
+	y = 103;
 	{
 		u16 col = (st.state == UPDATE_ERROR) ? COL_BAD : (st.state == UPDATE_AVAILABLE || st.state == UPDATE_DONE) ? COL_GOOD : COL_TEXT;
 
@@ -804,14 +1000,18 @@ static void ui_draw_updater(void)
 	}
 	if ((st.state == UPDATE_DOWNLOADING) || (st.state == UPDATE_VERIFYING) || (st.state == UPDATE_INSTALLING))
 	{
-		ui_draw_bar(6, CONTENT_Y + 90, 308, 9, st.progress, 100, COL_GOOD);
+		ui_draw_bar(6, 115, 308, 8, st.progress, 100, COL_WARN);
+		snprintf(c, sizeof(c), "%u%%", (unsigned)st.progress);
+		ui_text(6, 126, 1, COL_LABEL, c);
 	}
 	else if (Updater_CannotInstall())
 	{
-		ui_text(6, CONTENT_Y + 91, 1, COL_WARN, TR("RUN THE INSTALLED CIA TO UPDATE", "USA EL CIA INSTALADO PARA ACTUALIZAR"));
+		ui_text(6, 116, 1, COL_WARN, TR("RUN THE INSTALLED CIA TO UPDATE", "USA EL CIA INSTALADO PARA ACTUALIZAR"));
 	}
 
 	/* Release notes (the newer releases of the channel, or the whole changelog when up to date). */
+	ui_header(142, TR("WHAT'S NEW", "NOVEDADES"), NULL);
+	ui_cell(6, 154, 270, 54, ui_shade(COL_BG, 14), COL_EDGE);
 	if (s_noteCount > 0)
 	{
 		for (i = 0; i < NOTE_ROWS; i++)
@@ -820,22 +1020,26 @@ static void ui_draw_updater(void)
 
 			if (line < s_noteCount)
 			{
-				ui_text(6, CONTENT_Y + 104 + (i * 11), 1, COL_LABEL, s_noteLines[line]);
+				ui_text(10, 159 + (i * 11), 1, COL_LABEL, s_noteLines[line]);
 			}
 		}
 		if (s_noteCount > NOTE_ROWS)
 		{
 			ui_upd_rect(UPD_UP, &x, &y, &w, &h);
 			ui_button(x, y, w, h, COL_TAB_OFF, (s_pressBtn == UPD_BTN_BASE + UPD_UP));
-			ui_text_c(x + (w / 2), y + 12, 1, COL_TEXT, "UP");
+			ui_text_c(x + (w / 2), y + 9, 1, COL_TEXT, "+");
 			ui_upd_rect(UPD_DOWN, &x, &y, &w, &h);
 			ui_button(x, y, w, h, COL_TAB_OFF, (s_pressBtn == UPD_BTN_BASE + UPD_DOWN));
-			ui_text_c(x + (w / 2), y + 12, 1, COL_TEXT, "DOWN");
+			ui_text_c(x + (w / 2), y + 9, 1, COL_TEXT, "-");
 		}
+	}
+	else
+	{
+		ui_text(10, 159, 1, TH->faint, TR("NOTHING TO SHOW YET.", "NADA QUE MOSTRAR TODAVIA."));
 	}
 
 	/* The FTP side (developers): address while it listens, CANCEL in install-only mode. */
-	y = CONTENT_Y + 172;
+	y = 212;
 	if (ftp == N3DS_FTP_STATUS_LISTENING)
 	{
 		char a[48];
@@ -892,7 +1096,7 @@ static void ui_draw_dbg_perf(void)
 	ui_fmt10(a, sizeof(a), (av > 0) ? (10000000ULL / av) : 0ULL);
 	ui_fmt_ms(b, sizeof(b), av);
 	snprintf(c, sizeof(c), "%s FPS  %sMS", a, b);
-	ui_text(6, y, 2, ui_time_col(av), c);
+	ui_text(6, y, 1, ui_time_col(av), c);
 	y += 16;
 	ui_fmt_ms(a, sizeof(a), mx);
 	ui_fmt_ms(b, sizeof(b), mn);
@@ -970,7 +1174,7 @@ static void ui_draw_dbg_actions(void)
 		ui_act_label(i, &name, &state, &col);
 		ui_button(x, y, w, h, col, (100 + i == s_pressBtn));
 		ui_text(x + 6, y + 5, 1, COL_TEXT, name);
-		ui_text(x + 6, y + 22, 2, COL_TEXT, state);
+		ui_text(x + 6, y + 22, 1, COL_TEXT, state);
 	}
 	ui_text(6, CONTENT_Y + 174, 1, COL_LABEL, TR("SAME SWITCHES AS SITE DUMPREQ", "LOS MISMOS INTERRUPTORES QUE SITE DUMPREQ"));
 	if (N3DS_FtpStatus() == N3DS_FTP_STATUS_LISTENING)
@@ -1062,32 +1266,41 @@ static void ui_draw_all(void)
 {
 	int ids[TAB_COUNT];
 	const int n = ui_tab_list(ids);
-	const int tw = UI_W / n;
 	const int tab = s_tab;
 	int i;
 
+	if (!s_themeLoaded)
+	{
+		s_themeLoaded = 1;
+		s_theme = N3DS_ConfigGet("uitheme", 0);
+		if ((s_theme < 0) || (s_theme >= UI_THEMES))
+		{
+			s_theme = 0;
+		}
+	}
 	ui_rect(0, 0, UI_W, UI_H, COL_BG);
-	/* Tab bar: a dark strip, one block per tab with a gap, the selected one
-	 * lit with a gold underline, separators between, and a rule under the bar. */
+	/* Tab bar: icon buttons on the left (the selected one lit), battery, wifi
+	 * and clock on the right, and a rule under the bar. */
 	ui_rect(0, 0, UI_W, TAB_H, COL_BAR);
 	for (i = 0; i < n; i++)
 	{
-		const char *nm = ui_tab_name(ids[i]);
 		const int on = (ids[i] == tab);
-		const int x = i * tw;
-		const int w = (i == n - 1) ? (UI_W - x) : tw;
+		int x, y, w, h;
 
-		ui_rect(x + 1, 1, w - 2, TAB_H - 4, on ? COL_TAB_ON : COL_TAB_OFF);
+		ui_tab_rect(i, &x, &y, &w, &h);
+		ui_rect(x, y, w, h, on ? TH->onEdge : TH->tabEdge);
+		ui_rect(x + 1, y + 1, w - 2, h - 2, on ? TH->onBody : TH->tab);
 		if (on)
 		{
-			ui_rect(x + 1, TAB_H - 5, w - 2, 3, COL_ACCENT);
+			ui_rect(x + 1, y + 1, w - 2, 1, TH->on);
 		}
-		if (i > 0)
+		ui_tab_icon(ids[i], x + (w / 2), y + (h / 2), on ? COL_TEXT : COL_LABEL);
+		if ((ids[i] == TAB_UPDATER) && s_updNew)
 		{
-			ui_rect(x, 0, 1, TAB_H - 2, COL_SEP);
+			ui_rect(x + w - 7, y + 2, 5, 5, COL_WARN); /* a newer build was found */
 		}
-		ui_text_c(x + (w / 2), 8, 1, on ? COL_TEXT : COL_LABEL, nm);
 	}
+	ui_draw_system();
 	ui_rect(0, TAB_H - 2, UI_W, 2, COL_SEP);
 
 	switch (tab)
@@ -1098,9 +1311,10 @@ static void ui_draw_all(void)
 #ifdef CTR_INTERNAL
 	case TAB_DEBUG: ui_draw_debug(); break;
 #endif
-	default: ui_draw_status(); break;
+	default: break;
 	}
 	ui_draw_banner();
+	ui_draw_status_modal();
 }
 
 /* ------------------------------------------------- picture -> texture/panel --- */
@@ -1191,6 +1405,7 @@ static void ui_set_msg(const char *m)
 
 static void ui_press_option(int i)
 {
+	s_optSel = i;
 	switch (i)
 	{
 	case OPT_HUDHIDE:
@@ -1226,6 +1441,10 @@ static void ui_press_option(int i)
 			N3DS_ConfigSet("cpu804", N3DS_SpeedupEnabled());
 			ui_set_msg(N3DS_SpeedupEnabled() ? TR("CPU 804MHZ", "CPU 804MHZ") : TR("OLD 3DS SPEED: SLOWER", "VELOCIDAD OLD 3DS: MAS LENTO"));
 		}
+		break;
+	case OPT_THEME:
+		s_theme = (s_theme + 1) % UI_THEMES;
+		N3DS_ConfigSet("uitheme", s_theme);
 		break;
 	default:
 		break;
@@ -1367,14 +1586,13 @@ void N3DS_BottomUi_Touch(void)
 	if (t.py < TAB_H)
 	{
 		n = ui_tab_list(ids);
-		i = t.px / (UI_W / n);
-		if (i >= n)
+		i = (t.px - TABBTN_X0) / TABBTN_PITCH;
+		if ((t.px >= TABBTN_X0) && (i < n) && (((t.px - TABBTN_X0) % TABBTN_PITCH) < TABBTN_W))
 		{
-			i = n - 1;
+			s_tab = ids[i];
+			s_msg[0] = '\0';
+			s_dirty = 1;
 		}
-		s_tab = ids[i];
-		s_msg[0] = '\0';
-		s_dirty = 1;
 		return;
 	}
 	switch (s_tab)
@@ -1474,6 +1692,8 @@ void N3DS_BottomUi_Init(void)
 		cfguExit();
 	}
 	s_es = (lang == CFG_LANGUAGE_ES);
+	s_sysPtm = R_SUCCEEDED(ptmuInit());
+	ui_poll_system();
 
 	s_dirty = 1;
 	/* Both buffers get the first picture, so the first swap shows it whichever
@@ -1481,6 +1701,42 @@ void N3DS_BottomUi_Init(void)
 	ui_cpu_present();
 	s_dirty = 1;
 	ui_cpu_present();
+}
+
+/* Battery, wifi and clock; true when what the bar shows changed. The console's
+ * clock is local time. */
+static int ui_poll_system(void)
+{
+	int bat = s_sysBattery, chg = s_sysCharging;
+	const int wifi = (int)osGetWifiStrength();
+	char clk[8] = "--:--";
+	time_t tt = time(NULL);
+	const struct tm *tm = gmtime(&tt);
+	int changed;
+
+	if (s_sysPtm)
+	{
+		u8 lv = 0, c = 0;
+
+		if (R_SUCCEEDED(PTMU_GetBatteryLevel(&lv)))
+		{
+			bat = lv;
+		}
+		if (R_SUCCEEDED(PTMU_GetBatteryChargeState(&c)))
+		{
+			chg = c;
+		}
+	}
+	if (tm != NULL)
+	{
+		snprintf(clk, sizeof(clk), "%02d:%02d", tm->tm_hour, tm->tm_min);
+	}
+	changed = (bat != s_sysBattery) || (chg != s_sysCharging) || (wifi != s_sysWifi) || (strcmp(clk, s_sysClock) != 0);
+	s_sysBattery = bat;
+	s_sysCharging = chg;
+	s_sysWifi = wifi;
+	memcpy(s_sysClock, clk, sizeof(clk));
+	return changed;
 }
 
 /* Game thread, once per frame: repaint when the updater's status changed, load the
@@ -1595,9 +1851,21 @@ void N3DS_BottomUi_Frame(const struct N3DS_BottomUiGameInfo *gi)
 			s_dirty = 1;
 		}
 	}
+	{
+		static u64 s_lastSysTick = 0;
+
+		if ((now - s_lastSysTick) >= (u64)SYSCLOCK_ARM11)
+		{
+			s_lastSysTick = now;
+			if (ui_poll_system())
+			{
+				s_dirty = 1;
+			}
+		}
+	}
 	if ((now - s_lastLiveTick) >= liveTicks)
 	{
-		int live = (tab == TAB_STATUS);
+		int live = 0;
 
 #ifdef CTR_INTERNAL
 		live |= (tab == TAB_DEBUG) && (s_dbgPage != DBG_ACTIONS);
