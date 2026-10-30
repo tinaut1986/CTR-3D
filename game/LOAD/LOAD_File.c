@@ -1,5 +1,15 @@
 #include <common.h>
 
+#ifdef __3DS__
+unsigned int N3DS_SysMs(void);
+void N3DS_DebugLog(const char *msg);
+#define LOADPROF_BEGIN(t0) unsigned int t0 = N3DS_SysMs()
+#define LOADPROF_END(t0, what, idx) do { unsigned int d_ = N3DS_SysMs() - (t0); if (d_ >= 250) { char l_[80]; snprintf(l_, sizeof(l_), "[LOADPROF] %s idx=%d ms=%u", what, (int)(idx), d_); N3DS_DebugLog(l_); } } while (0)
+#else
+#define LOADPROF_BEGIN(t0) (void)0
+#define LOADPROF_END(t0, what, idx) (void)0
+#endif
+
 // NOTE(aalhendi): ASM-verified NTSC-U 926 0x80031c1c-0x80031c58.
 void LOAD_StringToUpper(char *path)
 {
@@ -339,7 +349,9 @@ void LOAD_DramFileCallback(struct LoadQueueSlot *lqs)
 		{
 			struct DramPointerMap *dpm = (struct DramPointerMap *)&realFileBuf[ptrMapOffset];
 
+			LOADPROF_BEGIN(tMap);
 			LOAD_RunPtrMap(realFileBuf, (int *)DRAM_GETOFFSETS(dpm), dpm->numBytes >> 2);
+			LOADPROF_END(tMap, "ptrmap", lqs->subfileIndex);
 
 #if defined(CTR_NATIVE)
 			if ((lqs->flags & LT_MEMPACK) != 0)
@@ -366,7 +378,9 @@ void LOAD_DramFileCallback(struct LoadQueueSlot *lqs)
 	if ((callback != NULL) && (((u32)(uintptr_t)callback & 0xff000000) == 0x80000000))
 #endif
 	{
+		LOADPROF_BEGIN(tCb);
 		callback(lqs);
+		LOADPROF_END(tCb, "dramcb", lqs->subfileIndex);
 	}
 
 	sdata->queueReady = 1;
@@ -633,7 +647,9 @@ void *LOAD_ReadFile_ex(struct BigHeader *bigfile, u32 loadType, int subfileIndex
 			CdReadCallback(NULL);
 		}
 
+		LOADPROF_BEGIN(tRead);
 		uVar5 &= CdRead(sectorCount, ptrDst, CdlModeSpeed);
+		LOADPROF_END(tRead, "cdread", subfileIndex);
 
 		if (callback == NULL)
 		{

@@ -1759,6 +1759,11 @@ unsigned long long N3DS_StereoLastRightEyeTicks(void)
 /* The policy lives in n3ds_framepace.c (host-tested); the console bits here. */
 static int s_paceOldClass = -1; /* lazily: APT_CheckNew3DS and the simulation */
 
+unsigned int N3DS_SysMs(void)
+{
+	return (unsigned int)((svcGetSystemTick() * 1000ull) / SYSCLOCK_ARM11);
+}
+
 int N3DS_FramePaceOldClass(void)
 {
 	if (s_paceOldClass < 0)

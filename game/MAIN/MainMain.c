@@ -17,6 +17,10 @@
 #if defined(CTR_NATIVE)
 #include <platform/native_audio.h>
 #include <platform/native_log.h>
+#ifdef __3DS__
+unsigned int N3DS_SysMs(void);
+void N3DS_DebugLog(const char *msg);
+#endif
 // platform/native_options.c -- repoints unused LNG slots for the native
 // options menu once the language table exists (local-extern idiom).
 extern void NativeOptions_InstallStrings(void);
@@ -106,7 +110,21 @@ u32 main(void)
 		}
 #endif
 
+#ifdef __3DS__
+		unsigned int queueT0 = N3DS_SysMs();
+#endif
 		LOAD_NextQueuedFile();
+#ifdef __3DS__
+		{
+			unsigned int queueMs = N3DS_SysMs() - queueT0;
+			if (queueMs >= 250)
+			{
+				char line[64];
+				snprintf(line, sizeof(line), "[LOADPROF] queue stage=%d ms=%u", (int)sdata->Loading.stage, queueMs);
+				N3DS_DebugLog(line);
+			}
+		}
+#endif
 		// NOTE(aalhendi): ASM-verified NTSC-U 926 0x8003c5d0-0x8003c5dc for per-frame XA pause handling.
 		CDSYS_XAPauseAtEnd();
 
@@ -300,7 +318,21 @@ u32 main(void)
 				// if something is being loaded
 				else
 				{
+#ifdef __3DS__
+					unsigned int loadT0 = N3DS_SysMs();
+#endif
 					sdata->Loading.stage = LOAD_TenStages(gGT, iVar8, sdata->ptrBigfile1);
+#ifdef __3DS__
+					{
+						unsigned int loadMs = N3DS_SysMs() - loadT0;
+						if (loadMs >= 250)
+						{
+							char line[64];
+							snprintf(line, sizeof(line), "[LOADPROF] stage=%d ms=%u", iVar8, loadMs);
+							N3DS_DebugLog(line);
+						}
+					}
+#endif
 
 					// If just finished loading stage 9
 					if (sdata->Loading.stage == LOAD_FINISHED)
