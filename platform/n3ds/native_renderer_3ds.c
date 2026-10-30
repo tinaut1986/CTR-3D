@@ -3462,6 +3462,7 @@ internal N3DS_Vertex *N3DS_BtmHudAppend(int group, int blendMode, int doubling, 
 #define N3DS_BTMH_G_RANK 1
 #define N3DS_BTMH_G_WUMPA 4
 #define N3DS_BTMH_G_LIST 7 /* the ranked-driver list */
+#define N3DS_BTMH_RANK_MIN_H 24
 #define N3DS_BTMH_CORNER_W 100
 
 internal void N3DS_BtmHudLayout(int dspW, int dspH, float rect[PKTDEPTH_UI_HUD_GROUPS][4], int present[PKTDEPTH_UI_HUD_GROUPS])
@@ -3476,14 +3477,14 @@ internal void N3DS_BtmHudLayout(int dspW, int dspH, float rect[PKTDEPTH_UI_HUD_G
 	int cnt[4] = {0, 0, 0, 0};
 	float f = 1.5f;
 	float maxW = 1.0f;
-	int rankBesideList;
+	int rankUnderList;
 	int g;
 	int c;
 
 	for (g = 1; g < (int)PKTDEPTH_UI_HUD_GROUPS; g++)
 	{
-		/* Some pieces read better smaller than the common scale (the big rank number, the fruit). */
-		const float m = ((g == N3DS_BTMH_G_RANK) || (g == N3DS_BTMH_G_WUMPA)) ? 0.7f : 1.0f;
+		/* Some pieces read better off the common scale (the fruit smaller, the rank when it has no list). */
+		const float m = (g == N3DS_BTMH_G_RANK) ? 0.7f : (g == N3DS_BTMH_G_WUMPA) ? 0.9f : 1.0f;
 
 		present[g] = s_btmhHasBox[g];
 		if (!present[g])
@@ -3495,7 +3496,7 @@ internal void N3DS_BtmHudLayout(int dspW, int dspH, float rect[PKTDEPTH_UI_HUD_G
 		if (ph[g] < 1.0f) { ph[g] = 1.0f; }
 		if (g == N3DS_BTMH_G_LIST)
 		{
-			corner[g] = 2; /* the driver list is the bottom-left piece */
+			corner[g] = 2; /* the driver list is a bottom-left piece */
 		}
 		else
 		{
@@ -3506,9 +3507,10 @@ internal void N3DS_BtmHudLayout(int dspW, int dspH, float rect[PKTDEPTH_UI_HUD_G
 		}
 	}
 
-	/* The big rank number sits just right of the driver list, bottom aligned, not stacked with it. */
-	rankBesideList = present[N3DS_BTMH_G_LIST] && present[N3DS_BTMH_G_RANK];
-	if (rankBesideList)
+	/* With the driver list up, the player's own rank number goes UNDER it, as big as the room left
+	 * in the left column allows (below). Without a list it is an ordinary corner piece. */
+	rankUnderList = present[N3DS_BTMH_G_LIST] && present[N3DS_BTMH_G_RANK];
+	if (rankUnderList)
 	{
 		corner[N3DS_BTMH_G_RANK] = -1;
 	}
@@ -3525,10 +3527,6 @@ internal void N3DS_BtmHudLayout(int dspW, int dspH, float rect[PKTDEPTH_UI_HUD_G
 
 	/* One scale for everything: the widest piece fits its column, and every stack fits its height. */
 	f = fminf(f, (float)N3DS_BTMH_CORNER_W / maxW);
-	if (rankBesideList)
-	{
-		f = fminf(f, ((float)N3DS_BTMH_CORNER_W - (float)N3DS_BTMH_GAP) / (pw[N3DS_BTMH_G_LIST] + pw[N3DS_BTMH_G_RANK]));
-	}
 	for (c = 0; c < 4; c++)
 	{
 		if (cnt[c] > 0)
@@ -3538,6 +3536,14 @@ internal void N3DS_BtmHudLayout(int dspW, int dspH, float rect[PKTDEPTH_UI_HUD_G
 			f = fminf(f, avail / sumH[c]);
 		}
 	}
+	if (rankUnderList)
+	{
+		/* The left column (top-left stack, then the list) must leave the rank number at least RMIN px. */
+		const int nL = cnt[0] + cnt[2];
+		const float availL = H - 8.0f - (float)(nL * N3DS_BTMH_GAP) - (float)N3DS_BTMH_RANK_MIN_H;
+
+		f = fminf(f, availL / (sumH[0] + sumH[2]));
+	}
 
 	for (c = 0; c < 4; c++)
 	{
@@ -3546,6 +3552,11 @@ internal void N3DS_BtmHudLayout(int dspW, int dspH, float rect[PKTDEPTH_UI_HUD_G
 		float stack = sumH[c] * f + (float)((cnt[c] > 0 ? cnt[c] - 1 : 0) * N3DS_BTMH_GAP);
 		float y = bottom ? (H - 4.0f - stack) : (float)N3DS_BTMH_FPS_H;
 
+		if (rankUnderList && (c == 2))
+		{
+			/* Left column: straight on below the top-left stack, not anchored to the bottom. */
+			y = (float)N3DS_BTMH_FPS_H + (sumH[0] * f) + (float)((cnt[0] > 0 ? cnt[0] - 1 : 0) * N3DS_BTMH_GAP) + (cnt[0] > 0 ? (float)N3DS_BTMH_GAP : 0.0f);
+		}
 		for (g = 1; g < (int)PKTDEPTH_UI_HUD_GROUPS; g++)
 		{
 			if (!present[g] || (corner[g] != c))
@@ -3558,13 +3569,21 @@ internal void N3DS_BtmHudLayout(int dspW, int dspH, float rect[PKTDEPTH_UI_HUD_G
 			rect[g][1] = y;
 			y += rect[g][3] + (float)N3DS_BTMH_GAP;
 		}
-	}
-	if (rankBesideList)
-	{
-		rect[N3DS_BTMH_G_RANK][2] = pw[N3DS_BTMH_G_RANK] * f;
-		rect[N3DS_BTMH_G_RANK][3] = ph[N3DS_BTMH_G_RANK] * f;
-		rect[N3DS_BTMH_G_RANK][0] = rect[N3DS_BTMH_G_LIST][0] + rect[N3DS_BTMH_G_LIST][2] + (float)N3DS_BTMH_GAP;
-		rect[N3DS_BTMH_G_RANK][1] = (rect[N3DS_BTMH_G_LIST][1] + rect[N3DS_BTMH_G_LIST][3]) - rect[N3DS_BTMH_G_RANK][3];
+		if (rankUnderList && (c == 2))
+		{
+			/* The rank number: all the room below the list, at its own natural proportions. */
+			const float rw = (float)(s_btmhBox[N3DS_BTMH_G_RANK][2] - s_btmhBox[N3DS_BTMH_G_RANK][0]) * bx;
+			const float rh = (float)(s_btmhBox[N3DS_BTMH_G_RANK][3] - s_btmhBox[N3DS_BTMH_G_RANK][1]) * by;
+			const float free = (H - 4.0f) - y;
+			float sr = free / ((rh < 1.0f) ? 1.0f : rh);
+
+			sr = fminf(sr, (float)N3DS_BTMH_CORNER_W / ((rw < 1.0f) ? 1.0f : rw));
+			sr = fminf(sr, 2.0f);
+			rect[N3DS_BTMH_G_RANK][2] = rw * sr;
+			rect[N3DS_BTMH_G_RANK][3] = rh * sr;
+			rect[N3DS_BTMH_G_RANK][0] = 3.0f;
+			rect[N3DS_BTMH_G_RANK][1] = y;
+		}
 	}
 }
 
