@@ -1482,6 +1482,8 @@ global_variable int s_uipicNodeActive;
  * quads, which retail links into the player's OT. Read by the resolver and by
  * the direct-emit fast path's UI stand-aside, beside the suppress latch. */
 global_variable int s_hudshineNodeActive;
+/* 1P race HUD group of the node being walked (0 = none); see NativeGpu_MarkUiHudRange. */
+global_variable int s_uihudNodeGroup;
 /* Menu-backdrop span (character-select diorama strips). Read by
  * PacketDepth_ResolveXY, which sees screen coordinates, not packet addresses. */
 global_variable int s_menubdNodeActive;
@@ -1912,6 +1914,11 @@ global_variable uintptr_t s_uipicRangeEnd[2];
 global_variable uintptr_t s_hudshineRangeStart[2][HUDSHINE_SPANS_MAX];
 global_variable uintptr_t s_hudshineRangeEnd[2][HUDSHINE_SPANS_MAX];
 global_variable int s_hudshineRangeCount[2];
+#define UIHUD_SPANS_MAX 24
+global_variable uintptr_t s_uihudRangeStart[2][UIHUD_SPANS_MAX];
+global_variable uintptr_t s_uihudRangeEnd[2][UIHUD_SPANS_MAX];
+global_variable u8 s_uihudRangeGroup[2][UIHUD_SPANS_MAX];
+global_variable int s_uihudRangeCount[2];
 
 void NativeGpu_MarkSkyRange(uintptr_t start, uintptr_t end)
 {
@@ -2057,6 +2064,20 @@ void NativeGpu_MarkHudShineRange(uintptr_t start, uintptr_t end)
 	s_hudshineRangeCount[s_skyRangeWriteIdx] = n + 1;
 }
 
+void NativeGpu_MarkUiHudRange(uintptr_t start, uintptr_t end, int group)
+{
+	int n = s_uihudRangeCount[s_skyRangeWriteIdx];
+
+	if ((end <= start) || (n >= UIHUD_SPANS_MAX) || (group <= 0) || (group >= (int)PKTDEPTH_UI_HUD_GROUPS))
+	{
+		return;
+	}
+	s_uihudRangeStart[s_skyRangeWriteIdx][n] = start;
+	s_uihudRangeEnd[s_skyRangeWriteIdx][n] = end;
+	s_uihudRangeGroup[s_skyRangeWriteIdx][n] = (u8)group;
+	s_uihudRangeCount[s_skyRangeWriteIdx] = n + 1;
+}
+
 void NativeGpu_PublishSkyRange(void)
 {
 	s_skyRangeReadIdx = s_skyRangeWriteIdx;
@@ -2081,6 +2102,7 @@ void NativeGpu_ClearSkyRange(void)
 	s_uipicRangeStart[s_skyRangeWriteIdx] = 0;
 	s_uipicRangeEnd[s_skyRangeWriteIdx] = 0;
 	s_hudshineRangeCount[s_skyRangeWriteIdx] = 0;
+	s_uihudRangeCount[s_skyRangeWriteIdx] = 0;
 }
 
 internal int NativeGpu_IsSkyPacket(uintptr_t addr)
@@ -2116,6 +2138,20 @@ internal int NativeGpu_IsUiFpsPacket(uintptr_t addr)
 internal int NativeGpu_IsUiPicPacket(uintptr_t addr)
 {
 	return (addr >= s_uipicRangeStart[s_skyRangeReadIdx]) && (addr < s_uipicRangeEnd[s_skyRangeReadIdx]);
+}
+
+internal int NativeGpu_UiHudGroupOf(uintptr_t addr)
+{
+	int i;
+
+	for (i = 0; i < s_uihudRangeCount[s_skyRangeReadIdx]; i++)
+	{
+		if ((addr >= s_uihudRangeStart[s_skyRangeReadIdx][i]) && (addr < s_uihudRangeEnd[s_skyRangeReadIdx][i]))
+		{
+			return (int)s_uihudRangeGroup[s_skyRangeReadIdx][i];
+		}
+	}
+	return 0;
 }
 
 internal int NativeGpu_IsHudShinePacket(uintptr_t addr)
@@ -2178,6 +2214,10 @@ internal void NativeGpu_RebuildTagEnvelope(void)
 	{
 		NativeGpu_TagEnvelopeAdd(s_hudshineRangeStart[idx][i], s_hudshineRangeEnd[idx][i]);
 	}
+	for (i = 0; i < s_uihudRangeCount[idx]; i++)
+	{
+		NativeGpu_TagEnvelopeAdd(s_uihudRangeStart[idx][i], s_uihudRangeEnd[idx][i]);
+	}
 	s_tagEnvelopeIdx = idx;
 }
 
@@ -2203,7 +2243,7 @@ internal int NativeGpu_InAnyTagRange(uintptr_t addr)
 {
 	return NativeGpu_InTagEnvelope(addr) &&
 	       (NativeGpu_IsSkyPacket(addr) || NativeGpu_IsStarPacket(addr) || NativeGpu_IsMenuBackdropPacket(addr) || NativeGpu_IsGlowPacket(addr) ||
-	        NativeGpu_IsUiMapPacket(addr) || NativeGpu_IsUiFpsPacket(addr) || NativeGpu_IsUiPicPacket(addr) || NativeGpu_IsHudShinePacket(addr));
+	        NativeGpu_IsUiMapPacket(addr) || NativeGpu_IsUiFpsPacket(addr) || NativeGpu_IsUiPicPacket(addr) || NativeGpu_IsHudShinePacket(addr) || (NativeGpu_UiHudGroupOf(addr) != 0));
 }
 
 /* The walk's per-node tag flags (s_skyNodeActive and its siblings) for the
@@ -2219,6 +2259,7 @@ force_inline void NativeGpu_TagWalkNode(uintptr_t addr)
 		s_uifpsNodeActive = NativeGpu_IsUiFpsPacket(addr);
 		s_uipicNodeActive = NativeGpu_IsUiPicPacket(addr);
 		s_hudshineNodeActive = NativeGpu_IsHudShinePacket(addr);
+		s_uihudNodeGroup = NativeGpu_UiHudGroupOf(addr);
 	}
 	else
 	{
@@ -2230,6 +2271,7 @@ force_inline void NativeGpu_TagWalkNode(uintptr_t addr)
 		s_uifpsNodeActive = 0;
 		s_uipicNodeActive = 0;
 		s_hudshineNodeActive = 0;
+		s_uihudNodeGroup = 0;
 	}
 }
 
@@ -2437,6 +2479,8 @@ internal void PacketDepth_FillParallaxFromCapture(const s16 *xs, const s16 *ys, 
  * Returns 1 and writes *out whenever the feature is on (covered, miss and 2D
  * all produce a stamp); returns 0 only when the feature is off, which is the
  * caller's signal to keep its existing ordinal. */
+int NativeUiMap_RouteActive(void);
+
 internal int PacketDepth_ResolveXY(const s16 *xs, const s16 *ys, int n, u16 *out, u16 *perVert, u16 *perVertPar)
 {
 	u16 sz3s[4];
@@ -2564,7 +2608,9 @@ internal int PacketDepth_ResolveXY(const s16 *xs, const s16 *ys, int n, u16 *out
 	 * correct occlusion, but outside the band, so no widescreen X ramp and no
 	 * stereo flatten -- the burst stays at retail X while the fruit moves with
 	 * the wide window. */
-	if (GTECapture_LookupSuppressed() || (g_dbg_hudShine && s_hudshineNodeActive))
+	/* The race HUD's 3D instances (the big rank number, the fruit icon) are marked as HUD groups
+	 * too (RenderBucket_Execute): they take this 2D UI leg, so they get a group stamp like the 2D pieces. */
+	if (GTECapture_LookupSuppressed() || (g_dbg_hudShine && s_hudshineNodeActive) || ((s_uihudNodeGroup != 0) && NativeUiMap_RouteActive()))
 	{
 		/* 2D in the UI band: no depth exists, and it must stay on top of every
 		 * world stamp. Ordinal ordering is preserved WITHIN the band so UI
@@ -2619,12 +2665,12 @@ internal int PacketDepth_ResolveXY(const s16 *xs, const s16 *ys, int n, u16 *out
 
 				if (*out == 0xFFFFu)
 				{
-					/* FPS glyphs route only, so they keep the bottom-screen
-					 * gate: unrouted they stay ordinary pinned UI. */
-					if (g_dbg_btmMap && s_uifpsNodeActive)
+					/* Race HUD groups: one stamp per group, routed below beside the map. */
+					if (g_dbg_btmMap && (s_uihudNodeGroup != 0))
 					{
-						*out = PKTDEPTH_UI_STAMP_BTMFPS;
+						*out = (u16)(PKTDEPTH_UI_STAMP_BTMHUD_BASE + (u32)s_uihudNodeGroup);
 					}
+					/* (The FPS text is no longer routed: with SHOW FPS on it draws on the top screen.) */
 					/* The map stamp is NOT gated on the bottom-screen toggle:
 					 * besides routing the peel (which carries its own gate), it
 					 * keys the far-edge UV inset in N3DS_ConvertTriangleVerts,
@@ -6602,20 +6648,12 @@ int NativeUiMap_FpsOverlayText(char *buf, int bufSize)
 {
 #if defined(__3DS__)
 	extern unsigned long g_n3dsFpsX10;
-	extern int g_dbg_tireVtxLog;
-	extern unsigned long g_tirelogFrameNow;
+	extern int g_dbg_showFps;
 
-	if (!NativeUiMap_RouteActive() || (g_n3dsFpsX10 == 0))
+	/* OPTIONS: SHOW FPS. Drawn on the top screen, top centre, until the first measurement lands. */
+	if (!g_dbg_showFps || (g_n3dsFpsX10 == 0))
 	{
 		return 0;
-	}
-	/* Invisible-tire hunt (remove with the hunt): while the tirelog trace is
-	 * armed, show the renderer frame counter instead of FPS so a screen
-	 * capture can be matched to the [TV]/[TIREUP] log lines exactly. */
-	if (g_dbg_tireVtxLog)
-	{
-		snprintf(buf, (size_t)bufSize, "F %lu", g_tirelogFrameNow);
-		return 1;
 	}
 	snprintf(buf, (size_t)bufSize, "FPS %lu.%lu", g_n3dsFpsX10 / 10UL, g_n3dsFpsX10 % 10UL);
 	return 1;

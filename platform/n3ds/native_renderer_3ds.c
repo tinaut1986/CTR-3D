@@ -42,6 +42,7 @@
 
 #include "n3ds_backend.h"
 #include "n3ds_bottomui.h"
+#include <math.h>
 
 /*
  * PSX VRAM mirror: 1024x512 16-bit. native_renderer.c owns this on the host and
@@ -507,6 +508,29 @@ global_variable int s_btmfSegsPeak = 0;
 /* Last FPS-overlay window actually used (PSX units), for the activation log --
  * the clipped-F hunt needs the window the GPU really got, not the theory. */
 global_variable short s_btmfWinDbg[4];
+
+/*
+ * RACE HUD CLASS (PKTDEPTH_UI_STAMP_BTMHUD_BASE + group): the 1P HUD pieces the game marks per
+ * group (UI_RenderFrame.c). One list for all groups -- each segment remembers its group -- and
+ * one latched, grow-only source box per group, so a group that changes width (the clock's digits)
+ * does not rescale. The bottom pass fits each group's box into its own slot beside the map
+ * (N3DS_BtmHudSlot) through its own window, exactly like the FPS overlay does for itself.
+ */
+#define N3DS_BTMH_RUN_CAP 384
+#define N3DS_BTMH_MAX_SEGS 48
+global_variable N3DS_Vertex s_btmhRunVerts[N3DS_BTMH_RUN_CAP];
+global_variable int s_btmhRunUsed = 0;
+global_variable int s_btmhRunBlend = -1;
+global_variable int s_btmhRunDoubling = -1;
+global_variable int s_btmhRunAtlas = -1;
+global_variable int s_btmhRunGroup = -1;
+global_variable N3DS_MergeSegment s_btmhSegs[N3DS_BTMH_MAX_SEGS];
+global_variable u8 s_btmhSegGroup[N3DS_BTMH_MAX_SEGS];
+global_variable int s_btmhSegCount = 0;
+global_variable short s_btmhBox[PKTDEPTH_UI_HUD_GROUPS][4];
+global_variable int s_btmhHasBox[PKTDEPTH_UI_HUD_GROUPS];
+global_variable int s_btmhIdle[PKTDEPTH_UI_HUD_GROUPS];
+global_variable u32 s_btmhDropped = 0;
 
 /* Diagnostics for the stats block: draws emitted by the merge path split
  * by class, plus the events that cost extra draws or a mid-frame barrier. */
@@ -3341,6 +3365,255 @@ internal N3DS_Vertex *N3DS_BtmFpsAppend(int blendMode, int doubling, int atlas)
 	return dst;
 }
 
+/* Race-HUD twin of the pairs above (see the s_btmh* block). */
+internal void N3DS_BtmHudCloseRun(void)
+{
+	int baseVertex;
+
+	if (s_btmhRunUsed <= 0)
+	{
+		s_btmhRunAtlas = -1;
+		return;
+	}
+	if (s_btmhSegCount >= N3DS_BTMH_MAX_SEGS)
+	{
+		s_btmhDropped += (u32)(s_btmhRunUsed / 3);
+		s_btmhRunUsed = 0;
+		s_btmhRunAtlas = -1;
+		return;
+	}
+	baseVertex = N3DS_TvboCheckedAppend(s_btmhRunVerts, s_btmhRunUsed);
+	if (baseVertex < 0)
+	{
+		s_btmhDropped += (u32)(s_btmhRunUsed / 3);
+	}
+	else
+	{
+		N3DS_MergeSegment *seg = &s_btmhSegs[s_btmhSegCount];
+		const int g = s_btmhRunGroup;
+		int k;
+
+		seg->blendMode = (u8)s_btmhRunBlend;
+		seg->doubling = (u8)s_btmhRunDoubling;
+		seg->atlas = (u8)s_btmhRunAtlas;
+		seg->baseVertex = baseVertex;
+		seg->vertCount = s_btmhRunUsed;
+		s_btmhSegGroup[s_btmhSegCount] = (u8)g;
+		s_btmhSegCount++;
+
+		for (k = 0; k < s_btmhRunUsed; k++)
+		{
+			const short vx = (short)s_btmhRunVerts[k].x;
+			const short vy = (short)s_btmhRunVerts[k].y;
+
+			if (!s_btmhHasBox[g])
+			{
+				s_btmhBox[g][0] = vx;
+				s_btmhBox[g][1] = vy;
+				s_btmhBox[g][2] = vx;
+				s_btmhBox[g][3] = vy;
+				s_btmhHasBox[g] = 1;
+			}
+			else
+			{
+				if (vx < s_btmhBox[g][0]) { s_btmhBox[g][0] = vx; }
+				if (vy < s_btmhBox[g][1]) { s_btmhBox[g][1] = vy; }
+				if (vx > s_btmhBox[g][2]) { s_btmhBox[g][2] = vx; }
+				if (vy > s_btmhBox[g][3]) { s_btmhBox[g][3] = vy; }
+			}
+		}
+	}
+	s_btmhRunUsed = 0;
+	s_btmhRunAtlas = -1;
+}
+
+internal N3DS_Vertex *N3DS_BtmHudAppend(int group, int blendMode, int doubling, int atlas)
+{
+	N3DS_Vertex *dst;
+
+	if ((group != s_btmhRunGroup) || (atlas != s_btmhRunAtlas) || (blendMode != s_btmhRunBlend) || (doubling != s_btmhRunDoubling) ||
+	    ((s_btmhRunUsed + 3) > N3DS_BTMH_RUN_CAP))
+	{
+		N3DS_BtmHudCloseRun();
+		s_btmhRunGroup = group;
+		s_btmhRunBlend = blendMode;
+		s_btmhRunDoubling = doubling;
+		s_btmhRunAtlas = atlas;
+	}
+	if ((s_btmhRunUsed + 3) > N3DS_BTMH_RUN_CAP)
+	{
+		s_btmhDropped++;
+		return NULL;
+	}
+	dst = &s_btmhRunVerts[s_btmhRunUsed];
+	s_btmhRunUsed += 3;
+	return dst;
+}
+
+/*
+ * Where the HUD groups sit in the bottom panel's content area (320 x 212 px), at ONE common scale.
+ * Each group goes to the corner its own on-screen position is nearest to -- the display's centre
+ * decides left/right and top/bottom -- the way retail lays the HUD out on the top screen; the map
+ * takes the middle. Groups sharing a corner stack.
+ * rect[g] = x, y, w, h in panel px; present[g] says whether the group exists this frame.
+ */
+#define N3DS_BTMH_GAP 6
+#define N3DS_BTMH_FPS_H 4
+#define N3DS_BTMH_G_RANK 1
+#define N3DS_BTMH_G_WUMPA 4
+#define N3DS_BTMH_G_LIST 7 /* the ranked-driver list */
+#define N3DS_BTMH_RANK_MIN_H 24
+#define N3DS_BTMH_CORNER_W 100
+
+internal void N3DS_BtmHudLayout(int dspW, int dspH, float rect[PKTDEPTH_UI_HUD_GROUPS][4], int present[PKTDEPTH_UI_HUD_GROUPS])
+{
+	const float bx = 320.0f / (float)dspW;
+	const float by = 240.0f / (float)dspH;
+	const float H = (float)N3DS_BOTTOM_CONTENT_H;
+	float pw[PKTDEPTH_UI_HUD_GROUPS];
+	float ph[PKTDEPTH_UI_HUD_GROUPS];
+	int corner[PKTDEPTH_UI_HUD_GROUPS];
+	float sumH[4] = {0.0f, 0.0f, 0.0f, 0.0f};
+	int cnt[4] = {0, 0, 0, 0};
+	float f = 1.5f;
+	float maxW = 1.0f;
+	int rankUnderList;
+	int g;
+	int c;
+
+	for (g = 1; g < (int)PKTDEPTH_UI_HUD_GROUPS; g++)
+	{
+		/* Some pieces read better off the common scale (the fruit smaller, the rank when it has no list). */
+		const float m = (g == N3DS_BTMH_G_RANK) ? 0.7f : (g == N3DS_BTMH_G_WUMPA) ? 0.9f : 1.0f;
+
+		present[g] = s_btmhHasBox[g];
+		if (!present[g])
+		{
+			continue;
+		}
+		pw[g] = (float)(s_btmhBox[g][2] - s_btmhBox[g][0]) * bx * m;
+		ph[g] = (float)(s_btmhBox[g][3] - s_btmhBox[g][1]) * by * m;
+		if (ph[g] < 1.0f) { ph[g] = 1.0f; }
+		if (g == N3DS_BTMH_G_LIST)
+		{
+			corner[g] = 2; /* the driver list is a bottom-left piece */
+		}
+		else
+		{
+			const int right = ((s_btmhBox[g][0] + s_btmhBox[g][2]) * 0.5f) > ((float)dspW * 0.5f);
+			const int bottom = ((s_btmhBox[g][1] + s_btmhBox[g][3]) * 0.5f) > ((float)dspH * 0.5f);
+
+			corner[g] = (bottom ? 2 : 0) + (right ? 1 : 0);
+		}
+	}
+
+	/* With the driver list up, the player's own rank number goes UNDER it, as big as the room left
+	 * in the left column allows (below). Without a list it is an ordinary corner piece. */
+	rankUnderList = present[N3DS_BTMH_G_LIST] && present[N3DS_BTMH_G_RANK];
+	if (rankUnderList)
+	{
+		corner[N3DS_BTMH_G_RANK] = -1;
+	}
+	for (g = 1; g < (int)PKTDEPTH_UI_HUD_GROUPS; g++)
+	{
+		if (!present[g] || (corner[g] < 0))
+		{
+			continue;
+		}
+		sumH[corner[g]] += ph[g];
+		cnt[corner[g]]++;
+		if (pw[g] > maxW) { maxW = pw[g]; }
+	}
+
+	/* One scale for everything: the widest piece fits its column, and every stack fits its height. */
+	f = fminf(f, (float)N3DS_BTMH_CORNER_W / maxW);
+	for (c = 0; c < 4; c++)
+	{
+		if (cnt[c] > 0)
+		{
+			const float avail = ((H - (float)N3DS_BTMH_FPS_H) * 0.5f) - (float)((cnt[c] - 1) * N3DS_BTMH_GAP);
+
+			f = fminf(f, avail / sumH[c]);
+		}
+	}
+	if (rankUnderList)
+	{
+		/* The left column (top-left stack, then the list) must leave the rank number at least RMIN px. */
+		const int nL = cnt[0] + cnt[2];
+		const float availL = H - 8.0f - (float)(nL * N3DS_BTMH_GAP) - (float)N3DS_BTMH_RANK_MIN_H;
+
+		f = fminf(f, availL / (sumH[0] + sumH[2]));
+	}
+
+	for (c = 0; c < 4; c++)
+	{
+		const int right = c & 1;
+		const int bottom = c >> 1;
+		float stack = sumH[c] * f + (float)((cnt[c] > 0 ? cnt[c] - 1 : 0) * N3DS_BTMH_GAP);
+		float y = bottom ? (H - 4.0f - stack) : (float)N3DS_BTMH_FPS_H;
+
+		if (rankUnderList && (c == 2))
+		{
+			/* Left column: straight on below the top-left stack, not anchored to the bottom. */
+			y = (float)N3DS_BTMH_FPS_H + (sumH[0] * f) + (float)((cnt[0] > 0 ? cnt[0] - 1 : 0) * N3DS_BTMH_GAP) + (cnt[0] > 0 ? (float)N3DS_BTMH_GAP : 0.0f);
+		}
+		for (g = 1; g < (int)PKTDEPTH_UI_HUD_GROUPS; g++)
+		{
+			if (!present[g] || (corner[g] != c))
+			{
+				continue;
+			}
+			rect[g][2] = pw[g] * f;
+			rect[g][3] = ph[g] * f;
+			rect[g][0] = right ? (317.0f - rect[g][2]) : 3.0f;
+			rect[g][1] = y;
+			y += rect[g][3] + (float)N3DS_BTMH_GAP;
+		}
+		if (rankUnderList && (c == 2))
+		{
+			/* The rank number: all the room below the list, at its own natural proportions. */
+			const float rw = (float)(s_btmhBox[N3DS_BTMH_G_RANK][2] - s_btmhBox[N3DS_BTMH_G_RANK][0]) * bx;
+			const float rh = (float)(s_btmhBox[N3DS_BTMH_G_RANK][3] - s_btmhBox[N3DS_BTMH_G_RANK][1]) * by;
+			const float free = (H - 4.0f) - y;
+			float sr = free / ((rh < 1.0f) ? 1.0f : rh);
+
+			sr = fminf(sr, (float)N3DS_BTMH_CORNER_W / ((rw < 1.0f) ? 1.0f : rw));
+			sr = fminf(sr, 2.0f);
+			rect[N3DS_BTMH_G_RANK][2] = rw * sr;
+			rect[N3DS_BTMH_G_RANK][3] = rh * sr;
+			rect[N3DS_BTMH_G_RANK][0] = 3.0f;
+			rect[N3DS_BTMH_G_RANK][1] = y;
+		}
+	}
+}
+
+/* The window (PSX units) that lands box at the largest uniform scale (up to maxScale times the
+ * panel's base scale) that fits the panel rect dx,dy,dw,dh, centred in it. The PSX units are
+ * anamorphic (see the map's window comment), so the two axes use the display's own ratio. */
+internal void N3DS_BtmFitWindow(const short *box, int dx, int dy, int dw, int dh, float maxScale, int dspW, int dspH, float *l, float *r, float *t,
+                                float *b)
+{
+	const float bx = 320.0f / (float)dspW;
+	const float by = 240.0f / (float)dspH;
+	float bw = (float)(box[2] - box[0]);
+	float bh = (float)(box[3] - box[1]);
+	float f;
+	float fy;
+	const float cx = (float)(box[0] + box[2]) * 0.5f;
+	const float cy = (float)(box[1] + box[3]) * 0.5f;
+
+	if (bw < 1.0f) { bw = 1.0f; }
+	if (bh < 1.0f) { bh = 1.0f; }
+	f = (float)dw / (bw * bx);
+	fy = (float)dh / (bh * by);
+	if (fy < f) { f = fy; }
+	if (f > maxScale) { f = maxScale; }
+	*l = cx - ((float)dx + (float)dw * 0.5f) / (f * bx);
+	*r = *l + 320.0f / (f * bx);
+	*t = cy - ((float)dy + (float)dh * 0.5f) / (f * by);
+	*b = *t + (float)N3DS_BOTTOM_CONTENT_H / (f * by);
+}
+
 /*
  * Draw the frame's UI, in submission order, LAST -- after the merge barrier, the
  * model pass and the deferred smoke, so nothing can paint over it. Every prim
@@ -3431,10 +3704,12 @@ internal void N3DS_DrawBottomMapPass(void)
 {
 	int mapActive;
 	int fpsActive;
+	int hudActive;
 	int active;
 
 	N3DS_BtmMapCloseRun();
 	N3DS_BtmFpsCloseRun();
+	N3DS_BtmHudCloseRun();
 
 	if (s_btmmSegCount > s_btmmSegsPeak)
 	{
@@ -3453,13 +3728,14 @@ internal void N3DS_DrawBottomMapPass(void)
 	 * surface, and with this pass owning the panel every frame it effectively
 	 * never paints again. */
 	fpsActive = (s_btmfSegCount > 0) && s_btmfFrameHasBox && g_dbg_btmMap;
+	hudActive = (s_btmhSegCount > 0) && g_dbg_btmMap;
 	/* The bottom screen belongs to the UI (n3ds_bottomui.c); the minimap and the
 	 * FPS overlay are the MAPA tab's content. A race map existing is reported
 	 * to the UI (it brings MAPA up once per race); they are DRAWN only while
 	 * that tab is the selected one -- their segments were already peeled off the
 	 * top screen at record time, so on another tab they are simply not shown. */
 	N3DS_BottomUi_MapLive(mapActive);
-	active = (mapActive || fpsActive) && N3DS_BottomUi_MapTabActive();
+	active = (mapActive || fpsActive || hudActive) && N3DS_BottomUi_MapTabActive();
 	if (N3DS_BottomPass_Wanted(active) && N3DS_BottomPass_Begin())
 	{
 		const int dspW = (s_projectionDispW > 0) ? s_projectionDispW : 512;
@@ -3550,6 +3826,18 @@ internal void N3DS_DrawBottomMapPass(void)
 				wl -= grow / 2;
 				wr += grow - (grow / 2);
 			}
+
+			if (hudActive)
+			{
+				/* The race HUD takes the panel's corners: the map's box lands in the middle, at the same aspect. */
+				float fl, fr, ft, fb;
+
+				N3DS_BtmFitWindow(s_btmmWin, N3DS_BTMH_CORNER_W + 4, 0, 320 - (2 * (N3DS_BTMH_CORNER_W + 4)), N3DS_BOTTOM_CONTENT_H, 1.6f, dspW, dspH, &fl, &fr, &ft, &fb);
+				wl = (int)fl;
+				wr = (int)fr;
+				wt = (int)ft;
+				wb = (int)fb;
+			}
 		}
 
 		if (active)
@@ -3621,6 +3909,51 @@ internal void N3DS_DrawBottomMapPass(void)
 					N3DS_C3DDrawTriangles(seg->baseVertex, seg->vertCount / 3);
 				}
 			}
+			if (hudActive)
+			{
+				float rect[PKTDEPTH_UI_HUD_GROUPS][4];
+				int present[PKTDEPTH_UI_HUD_GROUPS] = {0};
+				int g;
+
+				N3DS_BtmHudLayout(dspW, dspH, rect, present);
+				for (g = 1; g < (int)PKTDEPTH_UI_HUD_GROUPS; g++)
+				{
+					float fl, fr, ft, fb;
+					int i;
+
+					if (!present[g])
+					{
+						continue;
+					}
+					/* The rect is exactly the group's box at the common scale, so the fit lands it there. */
+					N3DS_BtmFitWindow(s_btmhBox[g], (int)(rect[g][0] + 0.5f), (int)(rect[g][1] + 0.5f), (int)(rect[g][2] + 0.5f), (int)(rect[g][3] + 0.5f),
+					                  3.0f, dspW, dspH, &fl, &fr, &ft, &fb);
+					N3DS_BottomMapDraw_SetWindow(fl, fr, ft, fb);
+					for (i = 0; i < s_btmhSegCount; i++)
+					{
+						const N3DS_MergeSegment *seg = &s_btmhSegs[i];
+						const int wantWrite = ((seg->blendMode != 0) && g_dbg_fxNoDepthWrite) ? 0 : 1;
+
+						if ((int)s_btmhSegGroup[i] != g)
+						{
+							continue;
+						}
+						if ((int)seg->doubling != lastDoubling)
+						{
+							N3DS_C3DSetColorDoubling((int)seg->doubling);
+							lastDoubling = (int)seg->doubling;
+						}
+						if (wantWrite != lastDepthWrite)
+						{
+							N3DS_C3DSetDepthWrite(wantWrite);
+							lastDepthWrite = wantWrite;
+						}
+						N3DS_C3DSetBlendMode((int)seg->blendMode);
+						N3DS_C3DBindAtlas((int)seg->atlas);
+						N3DS_C3DDrawTriangles(seg->baseVertex, seg->vertCount / 3);
+					}
+				}
+			}
 			/* This pass touched doubling/depth-write/blend behind the
 			 * frame memos; force the next frame's first consumer to
 			 * reassert, same rule as the UI pass above. */
@@ -3687,6 +4020,26 @@ internal void N3DS_DrawBottomMapPass(void)
 	s_btmmFrameHasBox = 0;
 	s_btmfSegCount = 0;
 	s_btmfFrameHasBox = 0;
+	{
+		int seen[PKTDEPTH_UI_HUD_GROUPS] = {0};
+		int g;
+
+		for (g = 0; g < s_btmhSegCount; g++)
+		{
+			seen[s_btmhSegGroup[g]] = 1;
+		}
+		/* A group's latched box outlives its frames, but not the race: 90 frames without the
+		 * group (a finished race, a menu, a pause) and it starts over. */
+		for (g = 1; g < (int)PKTDEPTH_UI_HUD_GROUPS; g++)
+		{
+			s_btmhIdle[g] = seen[g] ? 0 : (s_btmhIdle[g] + 1);
+			if (s_btmhIdle[g] > 90)
+			{
+				s_btmhHasBox[g] = 0;
+			}
+		}
+	}
+	s_btmhSegCount = 0;
 }
 
 /* A bin hit capacity mid-frame: spill it as one opaque segment (order-free,
@@ -6680,6 +7033,10 @@ void NativeRenderer_DrawTriangles(int startVertex, int triangles)
 				{
 					uiDst = N3DS_BtmFpsAppend(s_currentBlendMode, untextured ? 0 : 1, atlasIdx);
 				}
+				else if (g_dbg_btmMap && PKTDEPTH_UI_STAMP_IS_BTMHUD(triVerts[0].emitOrdinal))
+				{
+					uiDst = N3DS_BtmHudAppend((int)(triVerts[0].emitOrdinal - PKTDEPTH_UI_STAMP_BTMHUD_BASE), s_currentBlendMode, untextured ? 0 : 1, atlasIdx);
+				}
 				else
 				{
 					uiDst = N3DS_UiOrderAppend(s_currentBlendMode, untextured ? 0 : 1, atlasIdx);
@@ -6729,6 +7086,25 @@ void NativeRenderer_DrawTriangles(int startVertex, int triangles)
 				 * (RouteActive's legality rests on routed prims staying off
 				 * the top screen there). Independent of the bottom append's
 				 * success: a full bottom list must not hole the top map. */
+				/* Race HUD: the routed copy above feeds the bottom panel; unless AUTO-HIDE is on with
+				 * the MAPA tab up (N3DS_BottomUi_HudBelow), the top screen keeps its own HUD too. */
+				if (g_dbg_btmMap && PKTDEPTH_UI_STAMP_IS_BTMHUD(triVerts[0].emitOrdinal) && !N3DS_BottomUi_HudBelow())
+				{
+					N3DS_Vertex *topDst = N3DS_UiOrderAppend(s_currentBlendMode, untextured ? 0 : 1, atlasIdx);
+
+					if (topDst != NULL)
+					{
+						const s16 pinned = (s16)(0xFFFFu - 32768);
+
+						N3DS_ConvertTriangleVerts(topDst, triVerts, untextured, cellX, cellY, pixelBaseU, pixelBaseV, originU, originV);
+						topDst[0].z = pinned;
+						topDst[1].z = pinned;
+						topDst[2].z = pinned;
+						topDst[0].w = pinned;
+						topDst[1].w = pinned;
+						topDst[2].w = pinned;
+					}
+				}
 				if (g_dbg_btmMap && g_dbg_mapBoth && (triVerts[0].emitOrdinal == PKTDEPTH_UI_STAMP_BTMMAP) &&
 				    ((g_dbg_mapBoth >= 2) || NativeGpu_UiMapRetailTop()))
 				{

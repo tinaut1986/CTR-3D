@@ -99,6 +99,9 @@ void NativeGpu_MarkUiPicRange(uintptr_t start, uintptr_t end);
  * union. Same lifecycle as the sky pair; inert on PC. Runtime A/B: dumpreq
  * 'hudshine' (default ON). */
 void NativeGpu_MarkHudShineRange(uintptr_t start, uintptr_t end);
+/* One piece of the 1P race HUD, group 1..7 (PKTDEPTH_UI_STAMP_BTMHUD_BASE + group). Several
+ * spans per frame, one per draw call; same lifecycle as the sky pair. Inert on PC. */
+void NativeGpu_MarkUiHudRange(uintptr_t start, uintptr_t end, int group);
 /* The character-select diorama backdrop (MM_Characters' RwdBlueRect strips):
  * screen-space quads with no captured depth, which the resolver would
  * otherwise leave on the raw emit ordinal where the menu flag buries them.

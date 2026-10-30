@@ -53,6 +53,12 @@
 extern int g_dbg_sdLog;
 extern int g_dbg_stereo;
 extern int g_dbg_btmMap;
+
+/* HUD AUTO-HIDE (OPTIONS): while the MAPA tab is up, the race HUD is drawn below beside the
+ * map and left off the top screen. Saved as "hudhide" in ctr3d.cfg. */
+int g_dbg_hudAutoHide = 0;
+/* SHOW FPS (OPTIONS): the fps readout on the top screen. Saved as "showfps". */
+int g_dbg_showFps = 0;
 #ifdef CTR_INTERNAL
 extern int g_dbg_drawMerge;
 extern int g_dbg_renderThread;
@@ -322,16 +328,15 @@ static const char *ui_tab_name(int id)
 
 enum
 {
-	OPT_BTMMAP = 0,
+	OPT_HUDHIDE = 0,
 	OPT_STEREO,
 	OPT_FPSCAP,
+	OPT_SHOWFPS,
 	OPT_CPU804,
-	OPT_SDLOG,
 	OPT_COUNT
 };
 
-/* Five rows of 34 px at a 37 px pitch: the last ends at 216, clear of the
- * message line at UI_H - 12. */
+/* Rows of 34 px at a 37 px pitch, clear of the message line at UI_H - 12. */
 static void ui_opt_rect(int i, int *x, int *y, int *w, int *h)
 {
 	*x = 6;
@@ -635,7 +640,7 @@ static void ui_draw_map(void)
 	if (!g_dbg_btmMap)
 	{
 		ui_text_c(UI_W / 2, 100, 1, COL_WARN, TR("MINIMAP ON THE TOP SCREEN", "MAPA EN LA PANTALLA SUPERIOR"));
-		ui_text_c(UI_W / 2, 114, 1, COL_LABEL, TR("TURN IT ON IN OPTIONS", "ACTIVALO EN OPCIONES"));
+		ui_text_c(UI_W / 2, 114, 1, COL_LABEL, TR("SWITCHED OFF IN DEBUG", "DESACTIVADO EN DEBUG"));
 	}
 	else if (!s_mapLive)
 	{
@@ -690,9 +695,10 @@ static const char *ui_fpscap_text(void)
 
 static void ui_draw_options(void)
 {
-	ui_draw_option(OPT_BTMMAP, TR("MINIMAP BELOW", "MAPA ABAJO"), g_dbg_btmMap, ui_onoff(g_dbg_btmMap));
+	ui_draw_option(OPT_HUDHIDE, TR("AUTO-HIDE HUD", "HUD AUTOOCULTO"), g_dbg_hudAutoHide, ui_onoff(g_dbg_hudAutoHide));
 	ui_draw_option(OPT_STEREO, TR("3D EFFECT", "EFECTO 3D"), g_dbg_stereo, ui_stereo_text());
 	ui_draw_option(OPT_FPSCAP, TR("FRAME SKIP", "SALTO FRAMES"), 1, ui_fpscap_text());
+	ui_draw_option(OPT_SHOWFPS, TR("SHOW FPS", "VER FPS"), g_dbg_showFps, ui_onoff(g_dbg_showFps));
 	if (s_isNew3DS < 0)
 	{
 		bool n = false;
@@ -700,20 +706,12 @@ static void ui_draw_options(void)
 		APT_CheckNew3DS(&n);
 		s_isNew3DS = n ? 1 : 0;
 	}
+	/* CPU 804 MHZ is a New 3DS switch; an Old 3DS has no clock-up, so it has no row
+	 * (STATUS says which console and clock this is). */
 	if (s_isNew3DS)
 	{
 		ui_draw_option(OPT_CPU804, "CPU 804MHZ", N3DS_SpeedupEnabled(), ui_onoff(N3DS_SpeedupEnabled()));
 	}
-	else
-	{
-		/* Old 3DS: there is no clock-up to switch; say so instead of a dead button. */
-		int x, y, w, h;
-
-		ui_opt_rect(OPT_CPU804, &x, &y, &w, &h);
-		ui_rect(x, y, w, h, COL_PANEL);
-		ui_text(x + 10, y + 10, 2, COL_LABEL, "OLD 3DS: 268MHZ");
-	}
-	ui_draw_option(OPT_SDLOG, TR("SD LOG", "LOG EN SD"), g_dbg_sdLog, ui_onoff(g_dbg_sdLog));
 	if (s_msg[0] != '\0')
 	{
 		ui_text(6, UI_H - 12, 1, COL_GOOD, s_msg);
@@ -1195,9 +1193,9 @@ static void ui_press_option(int i)
 {
 	switch (i)
 	{
-	case OPT_BTMMAP:
-		g_dbg_btmMap ^= 1;
-		N3DS_ConfigSet("btmmap", g_dbg_btmMap);
+	case OPT_HUDHIDE:
+		g_dbg_hudAutoHide ^= 1;
+		N3DS_ConfigSet("hudhide", g_dbg_hudAutoHide);
 		break;
 	case OPT_STEREO:
 		/* Old 3DS / 2DS (and the simulation): AUTO -> ON -> OFF -> AUTO. A New
@@ -1217,6 +1215,10 @@ static void ui_press_option(int i)
 		g_dbg_frameCap = (g_dbg_frameCap + 1) % 3;
 		N3DS_ConfigSet("fpsmode", g_dbg_frameCap);
 		break;
+	case OPT_SHOWFPS:
+		g_dbg_showFps ^= 1;
+		N3DS_ConfigSet("showfps", g_dbg_showFps);
+		break;
 	case OPT_CPU804:
 		if (s_isNew3DS > 0)
 		{
@@ -1226,7 +1228,6 @@ static void ui_press_option(int i)
 		}
 		break;
 	default:
-		N3DS_SetSdLogEnabled(!g_dbg_sdLog);
 		break;
 	}
 	s_pressBtn = i;
@@ -1631,9 +1632,19 @@ void N3DS_BottomUi_NoteGpuOwned(void)
 	s_gpuOwned = 1;
 }
 
+int N3DS_BottomUi_GpuOwned(void)
+{
+	return s_gpuOwned;
+}
+
 int N3DS_BottomUi_MapTabActive(void)
 {
 	return s_tab == TAB_MAP;
+}
+
+int N3DS_BottomUi_HudBelow(void)
+{
+	return g_dbg_hudAutoHide && s_mapLive && (s_tab == TAB_MAP);
 }
 
 void N3DS_BottomUi_MapLive(int live)

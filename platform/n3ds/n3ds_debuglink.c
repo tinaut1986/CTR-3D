@@ -418,6 +418,22 @@ static void BottomRow(int y, unsigned char *dst, void *ctx)
 	memcpy(dst, (const unsigned char *)ctx + ((size_t)y * 320u * 3u), 320u * 3u);
 }
 
+static void BottomFbRow(int y, unsigned char *dst, void *ctx)
+{
+	const unsigned char *fb = (const unsigned char *)ctx;
+	int x;
+
+	/* Same layout as the top: BGR8, column-major, 240 rows running up; 320 columns. */
+	for (x = 0; x < 320; x++)
+	{
+		const unsigned char *p = fb + (((x * 240) + (239 - y)) * 3);
+
+		dst[(x * 3) + 0] = p[0];
+		dst[(x * 3) + 1] = p[1];
+		dst[(x * 3) + 2] = p[2];
+	}
+}
+
 static void DoShot(void)
 {
 	u16 fw = 0, fh = 0;
@@ -434,7 +450,20 @@ static void DoShot(void)
 		GSPGPU_InvalidateDataCache(fb, 400u * 240u * 3u);
 		topOk = WriteBmp(LINK_DIR "/top.bmp", 400, 240, TopRow, fb);
 	}
-	bottom = (unsigned char *)malloc(320u * 240u * 3u);
+	if (N3DS_BottomUi_GpuOwned())
+	{
+		/* The GPU draws this screen (tabs, map and HUD included): the CPU snapshot below only
+		 * knows the CPU-drawn layer, so read the real framebuffer instead. */
+		u16 bw = 0, bh = 0;
+		u8 *bfb = gfxGetFramebuffer(GFX_BOTTOM, GFX_LEFT, &bw, &bh);
+
+		if (bfb != NULL)
+		{
+			GSPGPU_InvalidateDataCache(bfb, 320u * 240u * 3u);
+			botOk = WriteBmp(LINK_DIR "/bottom.bmp", 320, 240, BottomFbRow, bfb);
+		}
+	}
+	bottom = botOk ? NULL : (unsigned char *)malloc(320u * 240u * 3u);
 	if (bottom != NULL)
 	{
 		if (N3DS_BottomUi_Snapshot(bottom))

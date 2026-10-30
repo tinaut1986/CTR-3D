@@ -5929,6 +5929,37 @@ void RenderBucket_Execute(void *param_1, struct PrimMem *param_2)
 			continue;
 		}
 
+#if defined(CTR_NATIVE) && CTR_NATIVE_GTE_CAPTURE
+		{
+			/* The 3D pieces of the 1P race HUD (the big rank number, the fruit icon): mark the
+			 * packets this instance writes as a HUD group, so the bottom-screen HUD can take them
+			 * like the 2D pieces (UI_RenderFrame.c). They are born with Birth2D onto the UI
+			 * pushbuffer and drawn through the retail packet path (g_dbg_hudModelsAsUi). */
+			extern void NativeGpu_MarkUiHudRange(uintptr_t start, uintptr_t end, int group);
+			const struct GameTracker *gGT = sdata->gGT;
+			int hudGroup = 0;
+
+			if ((gGT != NULL) && (gGT->numPlyrCurrGame == 1) && (gGT->drivers[0] != NULL))
+			{
+				if (entry->inst == gGT->drivers[0]->instBigNum)
+				{
+					hudGroup = 1; /* position */
+				}
+				else if (entry->inst == gGT->drivers[0]->instFruitDisp)
+				{
+					hudGroup = 4; /* wumpa */
+				}
+			}
+			if (hudGroup != 0)
+			{
+				const uintptr_t hudStart = (uintptr_t)param_2->cursor;
+
+				RenderBucket_DispatchDrawFunc(&ctx);
+				NativeGpu_MarkUiHudRange(hudStart, (uintptr_t)param_2->cursor, hudGroup);
+				continue;
+			}
+		}
+#endif
 		RenderBucket_DispatchDrawFunc(&ctx);
 	}
 }

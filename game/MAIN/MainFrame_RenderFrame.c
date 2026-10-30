@@ -335,26 +335,15 @@ void MainFrame_RenderFrame(struct GameTracker *gGT, struct GamepadSystem *gGamep
 	}
 
 #ifdef CTR_NATIVE
-	// 3DS bottom-screen FPS overlay, emitted EVERY frame -- menus, loads,
-	// pauses, races -- so the readout never blinks out with the minimap
-	// (owner call). The hook returns 0 on PC and whenever routing is off, so
-	// nothing ever draws here on the top screen or on PC. The x/y feed only
-	// the text's own bbox; the bottom pass re-anchors it top-right.
+	// 3DS FPS readout (OPTIONS: SHOW FPS), emitted every frame -- menus, loads, pauses, races -- on
+	// the top screen, top centre. The hook returns 0 on PC and whenever the option is off.
 	{
 		extern int NativeUiMap_FpsOverlayText(char *buf, int bufSize);
 		char fpsStr[16];
 
 		if (NativeUiMap_FpsOverlayText(&fpsStr[0], (int)sizeof(fpsStr)))
 		{
-#if defined(CTR_NATIVE) && CTR_NATIVE_GTE_CAPTURE
-			extern void NativeGpu_MarkUiFpsRange(uintptr_t start, uintptr_t end);
-
-			uintptr_t fpsPrimStart = (uintptr_t)gGT->backBuffer->primMem.cursor;
-#endif
-			DecalFont_DrawLine(&fpsStr[0], 438, 197, FONT_SMALL, WHITE);
-#if defined(CTR_NATIVE) && CTR_NATIVE_GTE_CAPTURE
-			NativeGpu_MarkUiFpsRange(fpsPrimStart, (uintptr_t)gGT->backBuffer->primMem.cursor);
-#endif
+			DecalFont_DrawLine(&fpsStr[0], 226, 4, FONT_SMALL, WHITE);
 		}
 	}
 #endif
