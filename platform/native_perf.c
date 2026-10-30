@@ -186,6 +186,11 @@ global_variable const struct NativePerfBucketInfo s_bucketInfo[NATIVE_PERF_BUCKE
     {"vbl_callback_ms", 0},
     {"vbl_howl_ms", 0},
     {"vbl_pollinput_ms", 0},
+    {"poll_apt_ms", 0},
+    {"poll_hid_ms", 0},
+    {"poll_touch_ms", 0},
+    {"poll_beat_ms", 0},
+    {"poll_inputupd_ms", 0},
 };
 
 global_variable FILE *s_csvFile;
@@ -274,6 +279,11 @@ struct NativePerfSpike
 	f32 vblCallbackMs;
 	f32 vblHowlMs;
 	f32 vblPollMs;
+	f32 pollAptMs;
+	f32 pollHidMs;
+	f32 pollTouchMs;
+	f32 pollBeatMs;
+	f32 pollInputUpdMs;
 	s32 levelID;
 	u32 gameMode1;
 	enum NativePerfBucket dominantBucket;
@@ -1271,10 +1281,10 @@ internal void NativePerf_SpikeFlush(void)
 		{
 			const struct NativePerfSpike *s = &s_spikeRing[i];
 
-			fprintf(f, "[SPIKE] f=%lu total=%.1f work=%.1f dom=%s domMs=%.1f raw1=%s/%.1f raw2=%s/%.1f walk(p/pa/sp)=%.1f/%.1f/%.1f vsyncWait=%.1f drawSync=%.1f voiceFill=%.1f audioVbl=%.1f emit=%.1f rcnt=%.1f cb=%.1f howl=%.1f poll=%.1f lvl=%ld mode=%08lx\n",
+			fprintf(f, "[SPIKE] f=%lu total=%.1f work=%.1f dom=%s domMs=%.1f raw1=%s/%.1f raw2=%s/%.1f walk(p/pa/sp)=%.1f/%.1f/%.1f vsyncWait=%.1f drawSync=%.1f voiceFill=%.1f audioVbl=%.1f emit=%.1f rcnt=%.1f cb=%.1f howl=%.1f poll=%.1f apt=%.1f hid=%.1f touch=%.1f beat=%.1f inupd=%.1f lvl=%ld mode=%08lx\n",
 			        (unsigned long)s->frameCounter, (double)s->totalMs, (double)s->workMs, NativePerf_BucketName(s->dominantBucket), (double)s->dominantMs,
 			        NativePerf_BucketName(s->rawTop1), (double)s->rawTop1Ms, NativePerf_BucketName(s->rawTop2), (double)s->rawTop2Ms, (double)s->walkPatchMs,
-			        (double)s->walkParseMs, (double)s->walkSplitsMs, (double)s->vsyncWaitMs, (double)s->drawSyncMs, (double)s->voiceFillMs, (double)s->audioVblankMs, (double)s->vblEmitMs, (double)s->vblRcntMs, (double)s->vblCallbackMs, (double)s->vblHowlMs, (double)s->vblPollMs, (long)s->levelID, (unsigned long)s->gameMode1);
+			        (double)s->walkParseMs, (double)s->walkSplitsMs, (double)s->vsyncWaitMs, (double)s->drawSyncMs, (double)s->voiceFillMs, (double)s->audioVblankMs, (double)s->vblEmitMs, (double)s->vblRcntMs, (double)s->vblCallbackMs, (double)s->vblHowlMs, (double)s->vblPollMs, (double)s->pollAptMs, (double)s->pollHidMs, (double)s->pollTouchMs, (double)s->pollBeatMs, (double)s->pollInputUpdMs, (long)s->levelID, (unsigned long)s->gameMode1);
 		}
 		fclose(f);
 	}
@@ -1381,6 +1391,11 @@ internal void NativePerf_SpikeRecord(f64 totalMs, f64 workMs, enum NativePerfBuc
 	s->vblCallbackMs = (f32)s_frameBucketMs[NATIVE_PERF_BUCKET_VBL_CALLBACK];
 	s->vblHowlMs = (f32)s_frameBucketMs[NATIVE_PERF_BUCKET_VBL_HOWL];
 	s->vblPollMs = (f32)s_frameBucketMs[NATIVE_PERF_BUCKET_VBL_POLLINPUT];
+	s->pollAptMs = (f32)s_frameBucketMs[NATIVE_PERF_BUCKET_POLL_APT];
+	s->pollHidMs = (f32)s_frameBucketMs[NATIVE_PERF_BUCKET_POLL_HID];
+	s->pollTouchMs = (f32)s_frameBucketMs[NATIVE_PERF_BUCKET_POLL_TOUCH];
+	s->pollBeatMs = (f32)s_frameBucketMs[NATIVE_PERF_BUCKET_POLL_BEAT];
+	s->pollInputUpdMs = (f32)s_frameBucketMs[NATIVE_PERF_BUCKET_POLL_INPUTUPD];
 	s_spikeSeenTotal++;
 }
 #endif
@@ -1603,6 +1618,22 @@ void NativePerf_BeginScope(enum NativePerfBucket bucket)
 	if (s_scopeDepth[bucket]++ == 0)
 	{
 		s_scopeStartCounter[bucket] = SDL_GetPerformanceCounter();
+	}
+}
+
+/* Plain-int entry for TUs built with -fshort-enums (n3ds_backend.c): adds `us`
+ * to a bucket of the frame in progress. Buckets are the NATIVE_PERF_BUCKET_*
+ * values; only the three POLL_* ones are used this way. */
+void NativePerf_AddPollUs(int which, unsigned us)
+{
+	const enum NativePerfBucket b = (which == 0)   ? NATIVE_PERF_BUCKET_POLL_APT
+	                                : (which == 1) ? NATIVE_PERF_BUCKET_POLL_HID
+	                                : (which == 2) ? NATIVE_PERF_BUCKET_POLL_TOUCH
+	                                               : NATIVE_PERF_BUCKET_POLL_BEAT;
+
+	if (s_enabled && s_frameOpen)
+	{
+		s_frameBucketMs[b] += (f64)us / 1000.0;
 	}
 }
 
