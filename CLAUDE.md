@@ -10,8 +10,9 @@ updater code are copied from `../zelda-tmc-3ds`. When in doubt, do what it does.
 
 ## Current state
 
-Latest handoff: `docs/handoff-2026-10-29.md` (branches, what is verified on
-hardware, last measurements, pending list). Read it before starting work.
+Latest handoff: `docs/handoff-2026-10-30.md` (branches, what is verified on
+hardware, how to test, pending list). Read it before starting work; the older
+`docs/handoff-2026-10-29.md` still lists what is verified on the New 3DS.
 
 ## Language
 

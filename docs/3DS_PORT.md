@@ -152,7 +152,10 @@ Rules the hardware enforces and emulators do not:
   it in the content area under the tab bar. Before the first GPU frame the same
   picture is blitted on the CPU. It repaints only on change; idle it costs nothing.
   Log text goes to the DEBUG > LOG view, the SD log and the 3dslink stream.
-  Settings (ftp, btmmap, stereo, fpsmode, cpu804) persist in `ctr3d.cfg` in the app dir.
+  Settings (ftp, stereo, fpsmode, cpu804, hudhide, showfps) persist in `ctr3d.cfg` in the app dir.
+  OPTIONS holds AUTO-HIDE HUD, 3D EFFECT, FRAME SKIP, SHOW FPS and (New 3DS only) CPU 804MHZ; the
+  SD log switch is in DEBUG > ACTIONS. The map and the race HUD are always on this screen ("Race HUD
+  on the bottom screen"); `btmmap` survives only as a dumpreq word and is no longer saved.
 - App data lives in `sdmc:/3ds/ctr_native/` (assets/, memcards/, update/,
   ctr3d.cfg, enable-log.txt, dev-ftp.txt) for a .3dsx and an installed CIA alike.
 - FTP (`n3ds_ftp.c`, port 5000, one lowest-priority thread on core 3, else 2;
@@ -173,6 +176,20 @@ Rules the hardware enforces and emulators do not:
   thread (lines go to a 64 KiB RAM buffer; dumpreq `logasync` toggles the old
   flush on the logging thread): on an Old 3DS the 2 s fflush+fsync was a
   100-285 ms frame.
+- Load diagnosis: `[LOADPROF]` lines (debug builds) log any load step that holds the game thread for
+  250 ms or more: `stage=` (one `LOAD_TenStages` call), `queue stage=` / `file type= idx= size=` (one
+  queued file, `LOAD_NextQueuedFile`), `cdread idx=` (the read) and `ptrmap idx=` / `dramcb idx=` (the
+  pointer patch and the file's callback). A load shows no animation while one of these runs, because
+  the game draws one frame per call.
+- `Platform_Log` does not reach `ctr3ds.log` on the 3DS; use `N3DS_DebugLog` (or `Platform_LogInstrument`)
+  for anything meant to be read from the SD log.
+- `SITE SHOT` writes `debug/top.bmp` and `debug/bottom.bmp`; the bottom one is the real framebuffer
+  when the GPU draws that screen (the CPU snapshot only knows the UI layer, not the map or HUD). The
+  command answers 451 while the screen is slow, but the files still appear a few seconds later.
+- Every FTP request (state, shot, log read) stalls the Old-3DS game thread for 1-2 s: do not poll the
+  console while measuring a load or a race. `SITE INSTALL` restarts the game, so it ends whatever the
+  player was doing; the restart is driven by the main loop, so a game stuck in a load restarts only
+  when it gets out of it (closing from HOME and reopening starts the installed build at once).
 - Frame-rate claims count only from a wall clock on hardware: the `[PERF]`
   windows in the SD log, or the on-screen readout.
 
@@ -360,6 +377,51 @@ Measuring (CTR_INTERNAL, SD log, every 64 frames after `[GPUTIME]`):
   per walk; only those in the leaves the walk draws (dumpreq `trkanimvis`).
 - Bottom UI: the STATUS / DEBUG live repaint ticks every 1 s on the Old-3DS class
   (250 ms on a New 3DS).
+
+### Level loads (Old 3DS)
+
+A race load took ~27 s and the demo scene ~40 s with a frozen screen. `[LOADPROF]` showed it was not the
+disc (`cdread` ~80 ms) but `LOAD_RunPtrMap`: in `CTR_INTERNAL` builds each patched pointer called
+`NativeCheckpoint_RegisterPointerSlot`, which scanned its whole list (up to 65536) for duplicates. It now only
+appends; the list is sorted and deduplicated when a checkpoint is saved, and once when it fills. Loads dropped
+to 0.3-0.5 s a file (the level 40 s -> 0.5 s). Production builds never had the cost. The
+`N3DS_BeatMainTick` memory sample (`linearSpaceFree()` stalled 0.1-1.2 s every 512 calls) is gone for the same
+reason; the water marks are sampled when a level begins.
+
+What is left is the frame count: the game still draws one frame per `LOAD_TenStages` call, so the loading flag
+pauses briefly around the longest calls and the boot stage 0 (~8.9 s) shows nothing. An experiment that
+presents a flag-only frame from inside the long steps (`perf/loading-frame-pump`) crashed the first time (a
+full `MainFrame_RenderFrame` re-entered menu input); the reduced version was not verified. Risk: it draws while
+a file is half read.
+
+## Race HUD on the bottom screen
+
+In a 1P race the HUD is drawn on the bottom screen around the map, and the top screen drops it when
+OPTIONS > AUTO-HIDE HUD is on and the MAPA tab is up (otherwise the top keeps its own copy).
+
+- Marking: `UI_RenderFrame.c` wraps each HUD draw call in `HUD_GROUP(group, call)`, which records the
+  `primMem` span it wrote (`NativeGpu_MarkUiHudRange`, up to 24 spans a frame, 7 groups: lap, clock,
+  wumpa count, speedometer/slide/jump meters, held item, ranked-driver list, rank suffix). The two 3D
+  pieces (the big rank number `instBigNum`, the fruit `instFruitDisp`) are `Birth2D` instances on the UI
+  pushbuffer drawn through the retail packet path (`g_dbg_hudModelsAsUi`), so `RenderBucket_Execute`
+  marks the packets each writes. 1 player only: other counts are not marked.
+- Stamps: the resolver (`PacketDepth_ResolveXY`) takes marked nodes down the 2D UI leg and stamps them
+  `PKTDEPTH_UI_STAMP_BTMHUD_BASE + group` (0xFFF1..0xFFF7) while the ordered-UI pin owns the band.
+- Renderer (`native_renderer_3ds.c`): `N3DS_BtmHudAppend` peels them into one list, each segment tagged with
+  its group, plus a latched grow-only source box per group (reset after 90 frames without the group).
+  `N3DS_DrawBottomMapPass` draws each group through its own ortho window (`N3DS_BtmFitWindow`) into the rect
+  `N3DS_BtmHudLayout` gives it; unless AUTO-HIDE is on with the MAPA tab up, a pinned copy goes to the
+  ordinary ordered-UI list for the top screen.
+- Layout (`N3DS_BtmHudLayout`, panel content area 320 x 212 px): every group at one common scale, each in
+  the corner nearest to its retail position (display centre decides left/right and top/bottom): clock top
+  left, lap and fruit top right, speedometer bottom right, map in the middle. The driver list goes bottom
+  left, directly below the top-left stack, and the player's rank number below it, filling the room left
+  (at least 24 px). Fruit 0.9 of the common scale; the rank number 0.7 when there is no list. PSX units are
+  anamorphic, so the two axes use the display's own ratio (same as the map).
+- The FPS text is no longer part of this: OPTIONS > SHOW FPS draws it on the top screen, top centre.
+- Not done: the held item is marked (group 6) but was never seen working (no test race picked up a box);
+  battle, relic race and time-trial specifics; 2-4 players; the adventure hub's own HUD
+  (`UI_RenderFrame.c` second function).
 
 ## Build options
 
