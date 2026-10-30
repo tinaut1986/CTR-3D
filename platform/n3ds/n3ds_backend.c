@@ -4999,7 +4999,12 @@ void N3DS_QueueDumpReq(const char *word)
 }
 #endif
 
+#ifdef CTR_INTERNAL
 void NativePerf_AddPollUs(int which, unsigned us);
+#else
+/* The perf counters only exist in debug builds. */
+#define NativePerf_AddPollUs(which, us) ((void)(which), (void)(us))
+#endif
 
 unsigned int N3DS_ReadButtons(void)
 {
