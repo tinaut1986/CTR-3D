@@ -923,7 +923,9 @@ void Platform_PollHostEvents(void)
 int Platform_PollInput(void)
 {
 	Platform_PollHostEvents();
+	NativePerf_BeginScope(NATIVE_PERF_BUCKET_POLL_INPUTUPD);
 	Platform_InputUpdate();
+	NativePerf_EndScope(NATIVE_PERF_BUCKET_POLL_INPUTUPD);
 	return 1;
 }
 

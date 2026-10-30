@@ -4999,19 +4999,28 @@ void N3DS_QueueDumpReq(const char *word)
 }
 #endif
 
+void NativePerf_AddPollUs(int which, unsigned us);
+
 unsigned int N3DS_ReadButtons(void)
 {
 	unsigned int out = 0;
 	u32 held;
 
+	const u64 hidT0 = svcGetSystemTick();
 	hidScanInput();
 	held = hidKeysHeld();
+	NativePerf_AddPollUs(1, (unsigned)(((svcGetSystemTick() - hidT0) * 1000000ull) / SYSCLOCK_ARM11));
 #ifdef CTR_INTERNAL
 	held |= N3DS_DebugLinkKeys();
 #endif
 
 	/* Bottom-screen UI touch poll (tabs, options, updater, debug). */
-	N3DS_BottomUi_Touch();
+	{
+		const u64 touchT0 = svcGetSystemTick();
+
+		N3DS_BottomUi_Touch();
+		NativePerf_AddPollUs(2, (unsigned)(((svcGetSystemTick() - touchT0) * 1000000ull) / SYSCLOCK_ARM11));
+	}
 
 #ifdef CTR_INTERNAL
 	/* SELECT+R freed (the VRAM/debug capture set). Still reachable as dumpreq `capture`. */
@@ -7061,7 +7070,9 @@ static void N3DS_BeatMainTick(void)
 	static unsigned int s_memSampleDiv;
 	const u64 now = svcGetSystemTick();
 
-	if ((++s_memSampleDiv & 7u) == 0)
+	/* Every 512th call, not 8th: the sample (sbrk + linearSpaceFree) was seen
+	 * costing 15-140 ms on an Old 3DS (the [SPIKE] beat= field), every ~12 frames. */
+	if ((++s_memSampleDiv & 511u) == 0)
 	{
 		N3DS_MemSample(); /* heap extent / linear free water marks, see N3DS_MemLog */
 	}
@@ -7263,7 +7274,12 @@ static void N3DS_ShowFatalMemScreen(void)
 
 int N3DS_MainLoopActive(void)
 {
-	N3DS_BeatMainTick();
+	{
+		const u64 beatT0 = svcGetSystemTick();
+
+		N3DS_BeatMainTick();
+		NativePerf_AddPollUs(3, (unsigned)(((svcGetSystemTick() - beatT0) * 1000000ull) / SYSCLOCK_ARM11));
+	}
 	if (s_fatalMemPending == 2)
 	{
 		s_fatalMemPending = 3; /* shown once */
@@ -7280,7 +7296,10 @@ int N3DS_MainLoopActive(void)
 	{
 		return 0;
 	}
-	if (!aptMainLoop())
+	const u64 aptT0 = svcGetSystemTick();
+	const int aptAlive = aptMainLoop();
+	NativePerf_AddPollUs(0, (unsigned)(((svcGetSystemTick() - aptT0) * 1000000ull) / SYSCLOCK_ARM11));
+	if (!aptAlive)
 	{
 		/* The system is closing the app (HOME -> Close, power): the GPU is no
 		 * longer ours. Not one more frame may wait for it (see s_gpuGone). */
