@@ -8,12 +8,19 @@
 #include <psx/gtereg.h>
 #include <psx/libgte.h>
 #include "platform/native_gte_capture.h"
+#if defined(CTR_INTERNAL) && defined(__3DS__)
+#include "platform/native_perf.h" /* [GTEPROF] op counters */
+#endif
 
 #ifndef CTR_NATIVE_GTE_CAPTURE
 #define CTR_NATIVE_GTE_CAPTURE 0
 #endif
 
 GTERegisters gteRegs;
+
+/* force_inline is a plain hint in CTR_NATIVE builds; the op helpers below
+ * must fold into each constant-op copy, so this file forces it. */
+#define GTE_INLINE static inline __attribute__((always_inline))
 
 #define GTE_SF(op)    ((op >> 19) & 1)
 #define GTE_MX(op)    ((op >> 17) & 3)
@@ -40,32 +47,35 @@ GTERegisters gteRegs;
 #define CV2(n)        (n < 3 ? gteRegs.CP2C.p[(n << 3) + 6].sd : 0)
 #define CV3(n)        (n < 3 ? gteRegs.CP2C.p[(n << 3) + 7].sd : 0)
 
-global_variable int m_sf;
-global_variable s64 m_mac0;
-global_variable s64 m_mac3;
+/*
+ * Speed notes (Old 3DS: 268 MHz ARM11, no L2). Every op of the software GTE
+ * used to go through GTE_operator's switch and read the op's shift flag back
+ * from a global between helpers the compiler could not inline; the hot ops
+ * are issued with constant op words (the gte_* macros), so doCOP2 now sends
+ * those to one straight-line copy each (GTE_Op*, below), where sf and lm are
+ * constants and the helpers inline. The arithmetic -- every expression, every
+ * FLAG bit, the PsyCross quirks included -- is the original's, unchanged:
+ * the only edits are sf passed as an argument instead of the m_sf global, the
+ * MAC0/MAC3 intermediates kept in locals instead of m_mac0/m_mac3 (both were
+ * only ever read inside the op that wrote them), and the count of leading
+ * zeros done with CLZ. GTECapture_NoteMatrix runs once per projecting op
+ * instead of once per vertex: the matrix cannot change between the vertices
+ * of one RTPT, so the second and third calls always returned early.
+ */
 
 u32 gte_leadingzerocount(u32 lzcs)
 {
 	u32 lzcr = ((s32)lzcs < 0) ? ~lzcs : lzcs;
-	local_persist const char debruijn32[32] = {0, 31, 9, 30, 3, 8,  13, 29, 2,  5,  7,  21, 12, 24, 28, 19,
-	                                           1, 10, 4, 14, 6, 22, 25, 20, 11, 15, 23, 26, 16, 27, 17, 18};
 
 	if (!lzcr)
 	{
 		return 32;
 	}
 
-	lzcr |= lzcr >> 1;
-	lzcr |= lzcr >> 2;
-	lzcr |= lzcr >> 4;
-	lzcr |= lzcr >> 8;
-	lzcr |= lzcr >> 16;
-	lzcr++;
-
-	return debruijn32[lzcr * 0x076be629 >> 27];
+	return (u32)__builtin_clz(lzcr);
 }
 
-int LIM(int value, int max, int min, unsigned int flag)
+GTE_INLINE int GTE_Lim(int value, int max, int min, unsigned int flag)
 {
 	if (value > max)
 	{
@@ -81,7 +91,13 @@ int LIM(int value, int max, int min, unsigned int flag)
 	return value;
 }
 
-internal inline s64 gte_shift(s64 a, int sf)
+/* Out-of-line twin for MFC2's IRGB read (native_inline_c.c, gtereg.h). */
+int LIM(int value, int max, int min, unsigned int flag)
+{
+	return GTE_Lim(value, max, min, flag);
+}
+
+GTE_INLINE s64 gte_shift(s64 a, int sf)
 {
 	if (sf > 0)
 	{
@@ -95,7 +111,7 @@ internal inline s64 gte_shift(s64 a, int sf)
 	return a;
 }
 
-internal int BOUNDS(/*int44*/ s64 value, int max_flag, int min_flag)
+GTE_INLINE int BOUNDS(/*int44*/ s64 value, int max_flag, int min_flag, int sf)
 {
 	if (value /*.positive_overflow()*/ > (s64)0x7ffffffffff)
 	{
@@ -107,10 +123,10 @@ internal int BOUNDS(/*int44*/ s64 value, int max_flag, int min_flag)
 		C2_FLAG |= min_flag;
 	}
 
-	return (int)(gte_shift(value /*.value()*/, m_sf));
+	return (int)(gte_shift(value /*.value()*/, sf));
 }
 
-internal u32 gte_divide(u16 numerator, u16 denominator)
+GTE_INLINE u32 gte_divide(u16 numerator, u16 denominator)
 {
 	if (numerator < (denominator * 2))
 	{
@@ -127,7 +143,8 @@ internal u32 gte_divide(u16 numerator, u16 denominator)
 		    0x15, 0x14, 0x14, 0x13, 0x12, 0x12, 0x11, 0x11, 0x10, 0x0f, 0x0f, 0x0e, 0x0e, 0x0d, 0x0d, 0x0c, 0x0c, 0x0b, 0x0a, 0x0a, 0x09, 0x09, 0x08, 0x08,
 		    0x07, 0x07, 0x06, 0x06, 0x05, 0x05, 0x04, 0x04, 0x03, 0x03, 0x02, 0x02, 0x01, 0x01, 0x00, 0x00, 0x00};
 
-		int shift = gte_leadingzerocount(denominator) - 16;
+		/* denominator > numerator / 2 >= 0 here, so CLZ is defined. */
+		int shift = __builtin_clz((u32)denominator) - 16;
 
 		int r1 = (denominator << shift) & 0x7fff;
 		int r2 = table[((r1 + 0x40) >> 7)] + 0x101;
@@ -142,33 +159,32 @@ internal u32 gte_divide(u16 numerator, u16 denominator)
 
 /* Setting bits 12 & 19-22 in FLAG does not set bit 31 */
 
-internal int A1(/*int44*/ s64 a)
+GTE_INLINE int A1(/*int44*/ s64 a, int sf)
 {
-	return BOUNDS(a, (1 << 31) | (1 << 30), (1 << 31) | (1 << 27));
+	return BOUNDS(a, (1 << 31) | (1 << 30), (1 << 31) | (1 << 27), sf);
 }
-internal int A2(/*int44*/ s64 a)
+GTE_INLINE int A2(/*int44*/ s64 a, int sf)
 {
-	return BOUNDS(a, (1 << 31) | (1 << 29), (1 << 31) | (1 << 26));
+	return BOUNDS(a, (1 << 31) | (1 << 29), (1 << 31) | (1 << 26), sf);
 }
-internal int A3(/*int44*/ s64 a)
+GTE_INLINE int A3(/*int44*/ s64 a, int sf)
 {
-	m_mac3 = a;
-	return BOUNDS(a, (1 << 31) | (1 << 28), (1 << 31) | (1 << 25));
+	return BOUNDS(a, (1 << 31) | (1 << 28), (1 << 31) | (1 << 25), sf);
 }
-internal int Lm_B1(int a, int lm)
+GTE_INLINE int Lm_B1(int a, int lm)
 {
-	return LIM(a, 0x7fff, -0x8000 * !lm, (1 << 31) | (1 << 24));
+	return GTE_Lim(a, 0x7fff, -0x8000 * !lm, (1 << 31) | (1 << 24));
 }
-internal int Lm_B2(int a, int lm)
+GTE_INLINE int Lm_B2(int a, int lm)
 {
-	return LIM(a, 0x7fff, -0x8000 * !lm, (1 << 31) | (1 << 23));
+	return GTE_Lim(a, 0x7fff, -0x8000 * !lm, (1 << 31) | (1 << 23));
 }
-internal int Lm_B3(int a, int lm)
+GTE_INLINE int Lm_B3(int a, int lm)
 {
-	return LIM(a, 0x7fff, -0x8000 * !lm, (1 << 22));
+	return GTE_Lim(a, 0x7fff, -0x8000 * !lm, (1 << 22));
 }
 
-internal int Lm_B3_sf(s64 value, int sf, int lm)
+GTE_INLINE int Lm_B3_sf(s64 value, int sf, int lm)
 {
 	int value_sf = (int)(gte_shift(value, sf));
 	int value_12 = (int)(gte_shift(value, 1));
@@ -196,24 +212,24 @@ internal int Lm_B3_sf(s64 value, int sf, int lm)
 	return value_sf;
 }
 
-internal int Lm_C1(int a)
+GTE_INLINE int Lm_C1(int a)
 {
-	return LIM(a, 0x00ff, 0x0000, (1 << 21));
+	return GTE_Lim(a, 0x00ff, 0x0000, (1 << 21));
 }
-internal int Lm_C2(int a)
+GTE_INLINE int Lm_C2(int a)
 {
-	return LIM(a, 0x00ff, 0x0000, (1 << 20));
+	return GTE_Lim(a, 0x00ff, 0x0000, (1 << 20));
 }
-internal int Lm_C3(int a)
+GTE_INLINE int Lm_C3(int a)
 {
-	return LIM(a, 0x00ff, 0x0000, (1 << 19));
+	return GTE_Lim(a, 0x00ff, 0x0000, (1 << 19));
 }
-internal int Lm_D(s64 a, int sf)
+GTE_INLINE int Lm_D(s64 a, int sf)
 {
-	return LIM((int)(gte_shift(a, sf)), 0xffff, 0x0000, (1 << 31) | (1 << 18));
+	return GTE_Lim((int)(gte_shift(a, sf)), 0xffff, 0x0000, (1 << 31) | (1 << 18));
 }
 
-internal u32 Lm_E(u32 result)
+GTE_INLINE u32 Lm_E(u32 result)
 {
 	if (result == 0xffffffff)
 	{
@@ -229,10 +245,8 @@ internal u32 Lm_E(u32 result)
 	return result;
 }
 
-internal s64 F(s64 a)
+GTE_INLINE s64 F(s64 a)
 {
-	m_mac0 = a;
-
 	if (a > 0x7fffffffLL)
 	{
 		C2_FLAG |= (1 << 31) | (1 << 16);
@@ -246,7 +260,7 @@ internal s64 F(s64 a)
 	return a;
 }
 
-internal int Lm_G1(s64 a)
+GTE_INLINE int Lm_G1(s64 a)
 {
 	if (a > 0x3ff)
 	{
@@ -262,7 +276,7 @@ internal int Lm_G1(s64 a)
 	return (int)(a);
 }
 
-internal int Lm_G2(s64 a)
+GTE_INLINE int Lm_G2(s64 a)
 {
 	if (a > 0x3ff)
 	{
@@ -279,7 +293,7 @@ internal int Lm_G2(s64 a)
 	return (int)(a);
 }
 
-internal int Lm_H(s64 value, int sf)
+GTE_INLINE int Lm_H(s64 value, int sf)
 {
 	s64 value_sf = gte_shift(value, sf);
 	int value_12 = (int)(gte_shift(value, 1));
@@ -304,44 +318,36 @@ internal int Lm_H(s64 value, int sf)
 	return value_12;
 }
 
-internal int GTE_RotTransPers(int idx, int lm)
+/*
+ * One vertex of RTPS / RTPT. The op has already run the capture's matrix
+ * probe (GTE_NoteMatrixForOp).
+ */
+GTE_INLINE int GTE_RotTransPers(int idx, int lm, int sf)
 {
 	int h_over_sz3;
+	s64 mac3;
 #if defined(CTR_NATIVE) && CTR_NATIVE_GTE_CAPTURE
 	s64 sxFull, syFull;
-
-	// Matrix-class probe: R11..R33 + TRX/Y/Z are CP2C words 0..7, contiguous
-	// (gtereg.h). One memcmp per projected vertex tags this frame's Stores
-	// with which matrix state produced them. g_dbg_gteCapture gates this and
-	// the Store below for the cost A/B; the test itself is paid on every side
-	// of that A/B, so a measured delta is the capture work alone. State 2
-	// keeps Store but drops this memcmp: NoteMatrix serves only the
-	// matrix-class probe, while the depth model needs sz3, not mtxId.
-	if (g_dbg_gteCapture == 1)
-	{
-		GTECapture_NoteMatrix(&gteRegs.CP2C.p[0]);
-	}
 #endif
 
-	C2_MAC1 = A1(/*int44*/ (s64)((s64)C2_TRX << 12) + (C2_R11 * VX(idx)) + (C2_R12 * VY(idx)) + (C2_R13 * VZ(idx)));
-	C2_MAC2 = A2(/*int44*/ (s64)((s64)C2_TRY << 12) + (C2_R21 * VX(idx)) + (C2_R22 * VY(idx)) + (C2_R23 * VZ(idx)));
-	C2_MAC3 = A3(/*int44*/ (s64)((s64)C2_TRZ << 12) + (C2_R31 * VX(idx)) + (C2_R32 * VY(idx)) + (C2_R33 * VZ(idx)));
+	C2_MAC1 = A1(/*int44*/ (s64)((s64)C2_TRX << 12) + (C2_R11 * VX(idx)) + (C2_R12 * VY(idx)) + (C2_R13 * VZ(idx)), sf);
+	C2_MAC2 = A2(/*int44*/ (s64)((s64)C2_TRY << 12) + (C2_R21 * VX(idx)) + (C2_R22 * VY(idx)) + (C2_R23 * VZ(idx)), sf);
+	mac3 = /*int44*/ (s64)((s64)C2_TRZ << 12) + (C2_R31 * VX(idx)) + (C2_R32 * VY(idx)) + (C2_R33 * VZ(idx));
+	C2_MAC3 = A3(mac3, sf);
 	C2_IR1 = Lm_B1(C2_MAC1, lm);
 	C2_IR2 = Lm_B2(C2_MAC2, lm);
-	C2_IR3 = Lm_B3_sf(m_mac3, m_sf, lm);
+	C2_IR3 = Lm_B3_sf(mac3, sf, lm);
 	C2_SZ0 = C2_SZ1;
 	C2_SZ1 = C2_SZ2;
 	C2_SZ2 = C2_SZ3;
-	C2_SZ3 = Lm_D(m_mac3, 1);
+	C2_SZ3 = Lm_D(mac3, 1);
 	h_over_sz3 = Lm_E(gte_divide(C2_H, C2_SZ3));
 	C2_SXY0 = C2_SXY1;
 	C2_SXY1 = C2_SXY2;
 
 #if defined(CTR_NATIVE) && CTR_NATIVE_GTE_CAPTURE
 	// Same expressions as the retail path below, just named so the
-	// pre-truncation fraction survives past the >>16. F() must still be
-	// called X-then-Y, exactly once each, since it also writes m_mac0 as a
-	// side effect -- do not collapse this into one shared local.
+	// pre-truncation fraction survives past the >>16.
 	sxFull = F((s64)C2_OFX + ((s64)C2_IR1 * h_over_sz3));
 	syFull = F((s64)C2_OFY + ((s64)C2_IR2 * h_over_sz3));
 	C2_SX2 = Lm_G1(sxFull >> 16);
@@ -362,27 +368,76 @@ internal int GTE_RotTransPers(int idx, int lm)
 	return h_over_sz3;
 }
 
-int GTE_operator(int op)
+/*
+ * The projection every gte_rtps / gte_rtpt issues (sf=1, lm=0) as one shared
+ * out-of-line copy: RTPT calls it three times rather than carrying three
+ * unrolled vertices (~2 KiB each) through a 16 KiB I-cache.
+ */
+__attribute__((noinline)) static int GTE_RotTransPersSf1Lm0(int idx)
+{
+	return GTE_RotTransPers(idx, 0, 1);
+}
+
+GTE_INLINE int GTE_RotTransPersOp(int idx, int lm, int sf)
+{
+	if ((sf == 1) && (lm == 0))
+	{
+		return GTE_RotTransPersSf1Lm0(idx);
+	}
+	return GTE_RotTransPers(idx, lm, sf);
+}
+
+GTE_INLINE void GTE_NoteMatrixForOp(void)
+{
+#if defined(CTR_NATIVE) && CTR_NATIVE_GTE_CAPTURE
+	// Matrix-class probe: R11..R33 + TRX/Y/Z are CP2C words 0..7, contiguous
+	// (gtereg.h). One compare per projecting op tags this frame's Stores
+	// with which matrix state produced them. g_dbg_gteCapture gates this and
+	// the Store for the cost A/B; the test itself is paid on every side of
+	// that A/B, so a measured delta is the capture work alone. State 2
+	// keeps Store but drops this probe: NoteMatrix serves only the
+	// matrix-class probe, while the depth model needs sz3, not mtxId.
+	if (g_dbg_gteCapture == 1)
+	{
+		GTECapture_NoteMatrix(&gteRegs.CP2C.p[0]);
+	}
+#endif
+}
+
+/*
+ * The whole op set. GTE_INLINE so that each GTE_Op* entry below, which
+ * passes a constant op word, compiles to that one case with sf and lm folded;
+ * GTE_operator is the same body for op words only known at run time.
+ */
+GTE_INLINE int GTE_Execute(int op)
 {
 	int v;
 	int lm;
+	int sf;
 	int cv;
 	int mx;
 	int h_over_sz3 = 0;
+	s64 mac0;
 
 	lm = GTE_LM(gteop(op));
-	m_sf = GTE_SF(gteop(op));
+	sf = GTE_SF(gteop(op));
 
 	C2_FLAG = 0;
+
+#if defined(CTR_INTERNAL) && defined(__3DS__)
+	g_gteProfOps[g_gteProfPhase][GTE_FUNCT(gteop(op))]++;
+#endif
 
 	switch (GTE_FUNCT(gteop(op)))
 	{
 	case 0x00:
 	case 0x01:
-		h_over_sz3 = GTE_RotTransPers(0, lm);
+		GTE_NoteMatrixForOp();
+		h_over_sz3 = GTE_RotTransPersOp(0, lm, sf);
 
-		C2_MAC0 = (int)(F((s64)C2_DQB + ((s64)C2_DQA * h_over_sz3)));
-		C2_IR0 = Lm_H(m_mac0, 1);
+		mac0 = (s64)C2_DQB + ((s64)C2_DQA * h_over_sz3);
+		C2_MAC0 = (int)(F(mac0));
+		C2_IR0 = Lm_H(mac0, 1);
 
 		return 1;
 
@@ -393,9 +448,9 @@ int GTE_operator(int op)
 
 	case 0x0c:
 
-		C2_MAC1 = A1((s64)(C2_R22 * C2_IR3) - (C2_R33 * C2_IR2));
-		C2_MAC2 = A2((s64)(C2_R33 * C2_IR1) - (C2_R11 * C2_IR3));
-		C2_MAC3 = A3((s64)(C2_R11 * C2_IR2) - (C2_R22 * C2_IR1));
+		C2_MAC1 = A1((s64)(C2_R22 * C2_IR3) - (C2_R33 * C2_IR2), sf);
+		C2_MAC2 = A2((s64)(C2_R33 * C2_IR1) - (C2_R11 * C2_IR3), sf);
+		C2_MAC3 = A3((s64)(C2_R11 * C2_IR2) - (C2_R22 * C2_IR1), sf);
 		C2_IR1 = Lm_B1(C2_MAC1, lm);
 		C2_IR2 = Lm_B2(C2_MAC2, lm);
 		C2_IR3 = Lm_B3(C2_MAC3, lm);
@@ -403,9 +458,9 @@ int GTE_operator(int op)
 
 	case 0x10:
 
-		C2_MAC1 = A1((C2_R << 16) + (C2_IR0 * Lm_B1(A1(((s64)C2_RFC << 12) - (C2_R << 16)), 0)));
-		C2_MAC2 = A2((C2_G << 16) + (C2_IR0 * Lm_B2(A2(((s64)C2_GFC << 12) - (C2_G << 16)), 0)));
-		C2_MAC3 = A3((C2_B << 16) + (C2_IR0 * Lm_B3(A3(((s64)C2_BFC << 12) - (C2_B << 16)), 0)));
+		C2_MAC1 = A1((C2_R << 16) + (C2_IR0 * Lm_B1(A1(((s64)C2_RFC << 12) - (C2_R << 16), sf), 0)), sf);
+		C2_MAC2 = A2((C2_G << 16) + (C2_IR0 * Lm_B2(A2(((s64)C2_GFC << 12) - (C2_G << 16), sf), 0)), sf);
+		C2_MAC3 = A3((C2_B << 16) + (C2_IR0 * Lm_B3(A3(((s64)C2_BFC << 12) - (C2_B << 16), sf), 0)), sf);
 		C2_IR1 = Lm_B1(C2_MAC1, lm);
 		C2_IR2 = Lm_B2(C2_MAC2, lm);
 		C2_IR3 = Lm_B3(C2_MAC3, lm);
@@ -419,9 +474,9 @@ int GTE_operator(int op)
 
 	case 0x11:
 
-		C2_MAC1 = A1((C2_IR1 << 12) + (C2_IR0 * Lm_B1(A1(((s64)C2_RFC << 12) - (C2_IR1 << 12)), 0)));
-		C2_MAC2 = A2((C2_IR2 << 12) + (C2_IR0 * Lm_B2(A2(((s64)C2_GFC << 12) - (C2_IR2 << 12)), 0)));
-		C2_MAC3 = A3((C2_IR3 << 12) + (C2_IR0 * Lm_B3(A3(((s64)C2_BFC << 12) - (C2_IR3 << 12)), 0)));
+		C2_MAC1 = A1((C2_IR1 << 12) + (C2_IR0 * Lm_B1(A1(((s64)C2_RFC << 12) - (C2_IR1 << 12), sf), 0)), sf);
+		C2_MAC2 = A2((C2_IR2 << 12) + (C2_IR0 * Lm_B2(A2(((s64)C2_GFC << 12) - (C2_IR2 << 12), sf), 0)), sf);
+		C2_MAC3 = A3((C2_IR3 << 12) + (C2_IR0 * Lm_B3(A3(((s64)C2_BFC << 12) - (C2_IR3 << 12), sf), 0)), sf);
 		C2_IR1 = Lm_B1(C2_MAC1, lm);
 		C2_IR2 = Lm_B2(C2_MAC2, lm);
 		C2_IR3 = Lm_B3(C2_MAC3, lm);
@@ -442,18 +497,18 @@ int GTE_operator(int op)
 		switch (cv)
 		{
 		case 2:
-			C2_MAC1 = A1((s64)(MX12(mx) * VY(v)) + (MX13(mx) * VZ(v)));
-			C2_MAC2 = A2((s64)(MX22(mx) * VY(v)) + (MX23(mx) * VZ(v)));
-			C2_MAC3 = A3((s64)(MX32(mx) * VY(v)) + (MX33(mx) * VZ(v)));
-			Lm_B1(A1(((s64)CV1(cv) << 12) + (MX11(mx) * VX(v))), 0);
-			Lm_B2(A2(((s64)CV2(cv) << 12) + (MX21(mx) * VX(v))), 0);
-			Lm_B3(A3(((s64)CV3(cv) << 12) + (MX31(mx) * VX(v))), 0);
+			C2_MAC1 = A1((s64)(MX12(mx) * VY(v)) + (MX13(mx) * VZ(v)), sf);
+			C2_MAC2 = A2((s64)(MX22(mx) * VY(v)) + (MX23(mx) * VZ(v)), sf);
+			C2_MAC3 = A3((s64)(MX32(mx) * VY(v)) + (MX33(mx) * VZ(v)), sf);
+			Lm_B1(A1(((s64)CV1(cv) << 12) + (MX11(mx) * VX(v)), sf), 0);
+			Lm_B2(A2(((s64)CV2(cv) << 12) + (MX21(mx) * VX(v)), sf), 0);
+			Lm_B3(A3(((s64)CV3(cv) << 12) + (MX31(mx) * VX(v)), sf), 0);
 			break;
 
 		default:
-			C2_MAC1 = A1(/*int44*/ (s64)((s64)CV1(cv) << 12) + (MX11(mx) * VX(v)) + (MX12(mx) * VY(v)) + (MX13(mx) * VZ(v)));
-			C2_MAC2 = A2(/*int44*/ (s64)((s64)CV2(cv) << 12) + (MX21(mx) * VX(v)) + (MX22(mx) * VY(v)) + (MX23(mx) * VZ(v)));
-			C2_MAC3 = A3(/*int44*/ (s64)((s64)CV3(cv) << 12) + (MX31(mx) * VX(v)) + (MX32(mx) * VY(v)) + (MX33(mx) * VZ(v)));
+			C2_MAC1 = A1(/*int44*/ (s64)((s64)CV1(cv) << 12) + (MX11(mx) * VX(v)) + (MX12(mx) * VY(v)) + (MX13(mx) * VZ(v)), sf);
+			C2_MAC2 = A2(/*int44*/ (s64)((s64)CV2(cv) << 12) + (MX21(mx) * VX(v)) + (MX22(mx) * VY(v)) + (MX23(mx) * VZ(v)), sf);
+			C2_MAC3 = A3(/*int44*/ (s64)((s64)CV3(cv) << 12) + (MX31(mx) * VX(v)) + (MX32(mx) * VY(v)) + (MX33(mx) * VZ(v)), sf);
 			break;
 		}
 
@@ -464,21 +519,21 @@ int GTE_operator(int op)
 
 	case 0x13:
 
-		C2_MAC1 = A1((s64)(C2_L11 * C2_VX0) + (C2_L12 * C2_VY0) + (C2_L13 * C2_VZ0));
-		C2_MAC2 = A2((s64)(C2_L21 * C2_VX0) + (C2_L22 * C2_VY0) + (C2_L23 * C2_VZ0));
-		C2_MAC3 = A3((s64)(C2_L31 * C2_VX0) + (C2_L32 * C2_VY0) + (C2_L33 * C2_VZ0));
+		C2_MAC1 = A1((s64)(C2_L11 * C2_VX0) + (C2_L12 * C2_VY0) + (C2_L13 * C2_VZ0), sf);
+		C2_MAC2 = A2((s64)(C2_L21 * C2_VX0) + (C2_L22 * C2_VY0) + (C2_L23 * C2_VZ0), sf);
+		C2_MAC3 = A3((s64)(C2_L31 * C2_VX0) + (C2_L32 * C2_VY0) + (C2_L33 * C2_VZ0), sf);
 		C2_IR1 = Lm_B1(C2_MAC1, lm);
 		C2_IR2 = Lm_B2(C2_MAC2, lm);
 		C2_IR3 = Lm_B3(C2_MAC3, lm);
-		C2_MAC1 = A1(/*int44*/ (s64)((s64)C2_RBK << 12) + (C2_LR1 * C2_IR1) + (C2_LR2 * C2_IR2) + (C2_LR3 * C2_IR3));
-		C2_MAC2 = A2(/*int44*/ (s64)((s64)C2_GBK << 12) + (C2_LG1 * C2_IR1) + (C2_LG2 * C2_IR2) + (C2_LG3 * C2_IR3));
-		C2_MAC3 = A3(/*int44*/ (s64)((s64)C2_BBK << 12) + (C2_LB1 * C2_IR1) + (C2_LB2 * C2_IR2) + (C2_LB3 * C2_IR3));
+		C2_MAC1 = A1(/*int44*/ (s64)((s64)C2_RBK << 12) + (C2_LR1 * C2_IR1) + (C2_LR2 * C2_IR2) + (C2_LR3 * C2_IR3), sf);
+		C2_MAC2 = A2(/*int44*/ (s64)((s64)C2_GBK << 12) + (C2_LG1 * C2_IR1) + (C2_LG2 * C2_IR2) + (C2_LG3 * C2_IR3), sf);
+		C2_MAC3 = A3(/*int44*/ (s64)((s64)C2_BBK << 12) + (C2_LB1 * C2_IR1) + (C2_LB2 * C2_IR2) + (C2_LB3 * C2_IR3), sf);
 		C2_IR1 = Lm_B1(C2_MAC1, lm);
 		C2_IR2 = Lm_B2(C2_MAC2, lm);
 		C2_IR3 = Lm_B3(C2_MAC3, lm);
-		C2_MAC1 = A1(((C2_R << 4) * C2_IR1) + (C2_IR0 * Lm_B1(A1(((s64)C2_RFC << 12) - ((C2_R << 4) * C2_IR1)), 0)));
-		C2_MAC2 = A2(((C2_G << 4) * C2_IR2) + (C2_IR0 * Lm_B2(A2(((s64)C2_GFC << 12) - ((C2_G << 4) * C2_IR2)), 0)));
-		C2_MAC3 = A3(((C2_B << 4) * C2_IR3) + (C2_IR0 * Lm_B3(A3(((s64)C2_BFC << 12) - ((C2_B << 4) * C2_IR3)), 0)));
+		C2_MAC1 = A1(((C2_R << 4) * C2_IR1) + (C2_IR0 * Lm_B1(A1(((s64)C2_RFC << 12) - ((C2_R << 4) * C2_IR1), sf), 0)), sf);
+		C2_MAC2 = A2(((C2_G << 4) * C2_IR2) + (C2_IR0 * Lm_B2(A2(((s64)C2_GFC << 12) - ((C2_G << 4) * C2_IR2), sf), 0)), sf);
+		C2_MAC3 = A3(((C2_B << 4) * C2_IR3) + (C2_IR0 * Lm_B3(A3(((s64)C2_BFC << 12) - ((C2_B << 4) * C2_IR3), sf), 0)), sf);
 		C2_IR1 = Lm_B1(C2_MAC1, lm);
 		C2_IR2 = Lm_B2(C2_MAC2, lm);
 		C2_IR3 = Lm_B3(C2_MAC3, lm);
@@ -492,15 +547,15 @@ int GTE_operator(int op)
 
 	case 0x14:
 
-		C2_MAC1 = A1(/*int44*/ (s64)((s64)C2_RBK << 12) + (C2_LR1 * C2_IR1) + (C2_LR2 * C2_IR2) + (C2_LR3 * C2_IR3));
-		C2_MAC2 = A2(/*int44*/ (s64)((s64)C2_GBK << 12) + (C2_LG1 * C2_IR1) + (C2_LG2 * C2_IR2) + (C2_LG3 * C2_IR3));
-		C2_MAC3 = A3(/*int44*/ (s64)((s64)C2_BBK << 12) + (C2_LB1 * C2_IR1) + (C2_LB2 * C2_IR2) + (C2_LB3 * C2_IR3));
+		C2_MAC1 = A1(/*int44*/ (s64)((s64)C2_RBK << 12) + (C2_LR1 * C2_IR1) + (C2_LR2 * C2_IR2) + (C2_LR3 * C2_IR3), sf);
+		C2_MAC2 = A2(/*int44*/ (s64)((s64)C2_GBK << 12) + (C2_LG1 * C2_IR1) + (C2_LG2 * C2_IR2) + (C2_LG3 * C2_IR3), sf);
+		C2_MAC3 = A3(/*int44*/ (s64)((s64)C2_BBK << 12) + (C2_LB1 * C2_IR1) + (C2_LB2 * C2_IR2) + (C2_LB3 * C2_IR3), sf);
 		C2_IR1 = Lm_B1(C2_MAC1, lm);
 		C2_IR2 = Lm_B2(C2_MAC2, lm);
 		C2_IR3 = Lm_B3(C2_MAC3, lm);
-		C2_MAC1 = A1(((C2_R << 4) * C2_IR1) + (C2_IR0 * Lm_B1(A1(((s64)C2_RFC << 12) - ((C2_R << 4) * C2_IR1)), 0)));
-		C2_MAC2 = A2(((C2_G << 4) * C2_IR2) + (C2_IR0 * Lm_B2(A2(((s64)C2_GFC << 12) - ((C2_G << 4) * C2_IR2)), 0)));
-		C2_MAC3 = A3(((C2_B << 4) * C2_IR3) + (C2_IR0 * Lm_B3(A3(((s64)C2_BFC << 12) - ((C2_B << 4) * C2_IR3)), 0)));
+		C2_MAC1 = A1(((C2_R << 4) * C2_IR1) + (C2_IR0 * Lm_B1(A1(((s64)C2_RFC << 12) - ((C2_R << 4) * C2_IR1), sf), 0)), sf);
+		C2_MAC2 = A2(((C2_G << 4) * C2_IR2) + (C2_IR0 * Lm_B2(A2(((s64)C2_GFC << 12) - ((C2_G << 4) * C2_IR2), sf), 0)), sf);
+		C2_MAC3 = A3(((C2_B << 4) * C2_IR3) + (C2_IR0 * Lm_B3(A3(((s64)C2_BFC << 12) - ((C2_B << 4) * C2_IR3), sf), 0)), sf);
 		C2_IR1 = Lm_B1(C2_MAC1, lm);
 		C2_IR2 = Lm_B2(C2_MAC2, lm);
 		C2_IR3 = Lm_B3(C2_MAC3, lm);
@@ -516,21 +571,21 @@ int GTE_operator(int op)
 
 		for (v = 0; v < 3; v++)
 		{
-			C2_MAC1 = A1((s64)(C2_L11 * VX(v)) + (C2_L12 * VY(v)) + (C2_L13 * VZ(v)));
-			C2_MAC2 = A2((s64)(C2_L21 * VX(v)) + (C2_L22 * VY(v)) + (C2_L23 * VZ(v)));
-			C2_MAC3 = A3((s64)(C2_L31 * VX(v)) + (C2_L32 * VY(v)) + (C2_L33 * VZ(v)));
+			C2_MAC1 = A1((s64)(C2_L11 * VX(v)) + (C2_L12 * VY(v)) + (C2_L13 * VZ(v)), sf);
+			C2_MAC2 = A2((s64)(C2_L21 * VX(v)) + (C2_L22 * VY(v)) + (C2_L23 * VZ(v)), sf);
+			C2_MAC3 = A3((s64)(C2_L31 * VX(v)) + (C2_L32 * VY(v)) + (C2_L33 * VZ(v)), sf);
 			C2_IR1 = Lm_B1(C2_MAC1, lm);
 			C2_IR2 = Lm_B2(C2_MAC2, lm);
 			C2_IR3 = Lm_B3(C2_MAC3, lm);
-			C2_MAC1 = A1(/*int44*/ (s64)((s64)C2_RBK << 12) + (C2_LR1 * C2_IR1) + (C2_LR2 * C2_IR2) + (C2_LR3 * C2_IR3));
-			C2_MAC2 = A2(/*int44*/ (s64)((s64)C2_GBK << 12) + (C2_LG1 * C2_IR1) + (C2_LG2 * C2_IR2) + (C2_LG3 * C2_IR3));
-			C2_MAC3 = A3(/*int44*/ (s64)((s64)C2_BBK << 12) + (C2_LB1 * C2_IR1) + (C2_LB2 * C2_IR2) + (C2_LB3 * C2_IR3));
+			C2_MAC1 = A1(/*int44*/ (s64)((s64)C2_RBK << 12) + (C2_LR1 * C2_IR1) + (C2_LR2 * C2_IR2) + (C2_LR3 * C2_IR3), sf);
+			C2_MAC2 = A2(/*int44*/ (s64)((s64)C2_GBK << 12) + (C2_LG1 * C2_IR1) + (C2_LG2 * C2_IR2) + (C2_LG3 * C2_IR3), sf);
+			C2_MAC3 = A3(/*int44*/ (s64)((s64)C2_BBK << 12) + (C2_LB1 * C2_IR1) + (C2_LB2 * C2_IR2) + (C2_LB3 * C2_IR3), sf);
 			C2_IR1 = Lm_B1(C2_MAC1, lm);
 			C2_IR2 = Lm_B2(C2_MAC2, lm);
 			C2_IR3 = Lm_B3(C2_MAC3, lm);
-			C2_MAC1 = A1(((C2_R << 4) * C2_IR1) + (C2_IR0 * Lm_B1(A1(((s64)C2_RFC << 12) - ((C2_R << 4) * C2_IR1)), 0)));
-			C2_MAC2 = A2(((C2_G << 4) * C2_IR2) + (C2_IR0 * Lm_B2(A2(((s64)C2_GFC << 12) - ((C2_G << 4) * C2_IR2)), 0)));
-			C2_MAC3 = A3(((C2_B << 4) * C2_IR3) + (C2_IR0 * Lm_B3(A3(((s64)C2_BFC << 12) - ((C2_B << 4) * C2_IR3)), 0)));
+			C2_MAC1 = A1(((C2_R << 4) * C2_IR1) + (C2_IR0 * Lm_B1(A1(((s64)C2_RFC << 12) - ((C2_R << 4) * C2_IR1), sf), 0)), sf);
+			C2_MAC2 = A2(((C2_G << 4) * C2_IR2) + (C2_IR0 * Lm_B2(A2(((s64)C2_GFC << 12) - ((C2_G << 4) * C2_IR2), sf), 0)), sf);
+			C2_MAC3 = A3(((C2_B << 4) * C2_IR3) + (C2_IR0 * Lm_B3(A3(((s64)C2_BFC << 12) - ((C2_B << 4) * C2_IR3), sf), 0)), sf);
 			C2_IR1 = Lm_B1(C2_MAC1, lm);
 			C2_IR2 = Lm_B2(C2_MAC2, lm);
 			C2_IR3 = Lm_B3(C2_MAC3, lm);
@@ -545,21 +600,21 @@ int GTE_operator(int op)
 
 	case 0x1b:
 
-		C2_MAC1 = A1((s64)(C2_L11 * C2_VX0) + (C2_L12 * C2_VY0) + (C2_L13 * C2_VZ0));
-		C2_MAC2 = A2((s64)(C2_L21 * C2_VX0) + (C2_L22 * C2_VY0) + (C2_L23 * C2_VZ0));
-		C2_MAC3 = A3((s64)(C2_L31 * C2_VX0) + (C2_L32 * C2_VY0) + (C2_L33 * C2_VZ0));
+		C2_MAC1 = A1((s64)(C2_L11 * C2_VX0) + (C2_L12 * C2_VY0) + (C2_L13 * C2_VZ0), sf);
+		C2_MAC2 = A2((s64)(C2_L21 * C2_VX0) + (C2_L22 * C2_VY0) + (C2_L23 * C2_VZ0), sf);
+		C2_MAC3 = A3((s64)(C2_L31 * C2_VX0) + (C2_L32 * C2_VY0) + (C2_L33 * C2_VZ0), sf);
 		C2_IR1 = Lm_B1(C2_MAC1, lm);
 		C2_IR2 = Lm_B2(C2_MAC2, lm);
 		C2_IR3 = Lm_B3(C2_MAC3, lm);
-		C2_MAC1 = A1(/*int44*/ (s64)((s64)C2_RBK << 12) + (C2_LR1 * C2_IR1) + (C2_LR2 * C2_IR2) + (C2_LR3 * C2_IR3));
-		C2_MAC2 = A2(/*int44*/ (s64)((s64)C2_GBK << 12) + (C2_LG1 * C2_IR1) + (C2_LG2 * C2_IR2) + (C2_LG3 * C2_IR3));
-		C2_MAC3 = A3(/*int44*/ (s64)((s64)C2_BBK << 12) + (C2_LB1 * C2_IR1) + (C2_LB2 * C2_IR2) + (C2_LB3 * C2_IR3));
+		C2_MAC1 = A1(/*int44*/ (s64)((s64)C2_RBK << 12) + (C2_LR1 * C2_IR1) + (C2_LR2 * C2_IR2) + (C2_LR3 * C2_IR3), sf);
+		C2_MAC2 = A2(/*int44*/ (s64)((s64)C2_GBK << 12) + (C2_LG1 * C2_IR1) + (C2_LG2 * C2_IR2) + (C2_LG3 * C2_IR3), sf);
+		C2_MAC3 = A3(/*int44*/ (s64)((s64)C2_BBK << 12) + (C2_LB1 * C2_IR1) + (C2_LB2 * C2_IR2) + (C2_LB3 * C2_IR3), sf);
 		C2_IR1 = Lm_B1(C2_MAC1, lm);
 		C2_IR2 = Lm_B2(C2_MAC2, lm);
 		C2_IR3 = Lm_B3(C2_MAC3, lm);
-		C2_MAC1 = A1((C2_R << 4) * C2_IR1);
-		C2_MAC2 = A2((C2_G << 4) * C2_IR2);
-		C2_MAC3 = A3((C2_B << 4) * C2_IR3);
+		C2_MAC1 = A1((C2_R << 4) * C2_IR1, sf);
+		C2_MAC2 = A2((C2_G << 4) * C2_IR2, sf);
+		C2_MAC3 = A3((C2_B << 4) * C2_IR3, sf);
 		C2_IR1 = Lm_B1(C2_MAC1, lm);
 		C2_IR2 = Lm_B2(C2_MAC2, lm);
 		C2_IR3 = Lm_B3(C2_MAC3, lm);
@@ -573,15 +628,15 @@ int GTE_operator(int op)
 
 	case 0x1c:
 
-		C2_MAC1 = A1(/*int44*/ (s64)(((s64)C2_RBK) << 12) + (C2_LR1 * C2_IR1) + (C2_LR2 * C2_IR2) + (C2_LR3 * C2_IR3));
-		C2_MAC2 = A2(/*int44*/ (s64)(((s64)C2_GBK) << 12) + (C2_LG1 * C2_IR1) + (C2_LG2 * C2_IR2) + (C2_LG3 * C2_IR3));
-		C2_MAC3 = A3(/*int44*/ (s64)(((s64)C2_BBK) << 12) + (C2_LB1 * C2_IR1) + (C2_LB2 * C2_IR2) + (C2_LB3 * C2_IR3));
+		C2_MAC1 = A1(/*int44*/ (s64)(((s64)C2_RBK) << 12) + (C2_LR1 * C2_IR1) + (C2_LR2 * C2_IR2) + (C2_LR3 * C2_IR3), sf);
+		C2_MAC2 = A2(/*int44*/ (s64)(((s64)C2_GBK) << 12) + (C2_LG1 * C2_IR1) + (C2_LG2 * C2_IR2) + (C2_LG3 * C2_IR3), sf);
+		C2_MAC3 = A3(/*int44*/ (s64)(((s64)C2_BBK) << 12) + (C2_LB1 * C2_IR1) + (C2_LB2 * C2_IR2) + (C2_LB3 * C2_IR3), sf);
 		C2_IR1 = Lm_B1(C2_MAC1, lm);
 		C2_IR2 = Lm_B2(C2_MAC2, lm);
 		C2_IR3 = Lm_B3(C2_MAC3, lm);
-		C2_MAC1 = A1((C2_R << 4) * C2_IR1);
-		C2_MAC2 = A2((C2_G << 4) * C2_IR2);
-		C2_MAC3 = A3((C2_B << 4) * C2_IR3);
+		C2_MAC1 = A1((C2_R << 4) * C2_IR1, sf);
+		C2_MAC2 = A2((C2_G << 4) * C2_IR2, sf);
+		C2_MAC3 = A3((C2_B << 4) * C2_IR3, sf);
 		C2_IR1 = Lm_B1(C2_MAC1, lm);
 		C2_IR2 = Lm_B2(C2_MAC2, lm);
 		C2_IR3 = Lm_B3(C2_MAC3, lm);
@@ -595,15 +650,15 @@ int GTE_operator(int op)
 
 	case 0x1e:
 
-		C2_MAC1 = A1((s64)(C2_L11 * C2_VX0) + (C2_L12 * C2_VY0) + (C2_L13 * C2_VZ0));
-		C2_MAC2 = A2((s64)(C2_L21 * C2_VX0) + (C2_L22 * C2_VY0) + (C2_L23 * C2_VZ0));
-		C2_MAC3 = A3((s64)(C2_L31 * C2_VX0) + (C2_L32 * C2_VY0) + (C2_L33 * C2_VZ0));
+		C2_MAC1 = A1((s64)(C2_L11 * C2_VX0) + (C2_L12 * C2_VY0) + (C2_L13 * C2_VZ0), sf);
+		C2_MAC2 = A2((s64)(C2_L21 * C2_VX0) + (C2_L22 * C2_VY0) + (C2_L23 * C2_VZ0), sf);
+		C2_MAC3 = A3((s64)(C2_L31 * C2_VX0) + (C2_L32 * C2_VY0) + (C2_L33 * C2_VZ0), sf);
 		C2_IR1 = Lm_B1(C2_MAC1, lm);
 		C2_IR2 = Lm_B2(C2_MAC2, lm);
 		C2_IR3 = Lm_B3(C2_MAC3, lm);
-		C2_MAC1 = A1(/*int44*/ (s64)((s64)C2_RBK << 12) + (C2_LR1 * C2_IR1) + (C2_LR2 * C2_IR2) + (C2_LR3 * C2_IR3));
-		C2_MAC2 = A2(/*int44*/ (s64)((s64)C2_GBK << 12) + (C2_LG1 * C2_IR1) + (C2_LG2 * C2_IR2) + (C2_LG3 * C2_IR3));
-		C2_MAC3 = A3(/*int44*/ (s64)((s64)C2_BBK << 12) + (C2_LB1 * C2_IR1) + (C2_LB2 * C2_IR2) + (C2_LB3 * C2_IR3));
+		C2_MAC1 = A1(/*int44*/ (s64)((s64)C2_RBK << 12) + (C2_LR1 * C2_IR1) + (C2_LR2 * C2_IR2) + (C2_LR3 * C2_IR3), sf);
+		C2_MAC2 = A2(/*int44*/ (s64)((s64)C2_GBK << 12) + (C2_LG1 * C2_IR1) + (C2_LG2 * C2_IR2) + (C2_LG3 * C2_IR3), sf);
+		C2_MAC3 = A3(/*int44*/ (s64)((s64)C2_BBK << 12) + (C2_LB1 * C2_IR1) + (C2_LB2 * C2_IR2) + (C2_LB3 * C2_IR3), sf);
 		C2_IR1 = Lm_B1(C2_MAC1, lm);
 		C2_IR2 = Lm_B2(C2_MAC2, lm);
 		C2_IR3 = Lm_B3(C2_MAC3, lm);
@@ -619,15 +674,15 @@ int GTE_operator(int op)
 
 		for (v = 0; v < 3; v++)
 		{
-			C2_MAC1 = A1((s64)(C2_L11 * VX(v)) + (C2_L12 * VY(v)) + (C2_L13 * VZ(v)));
-			C2_MAC2 = A2((s64)(C2_L21 * VX(v)) + (C2_L22 * VY(v)) + (C2_L23 * VZ(v)));
-			C2_MAC3 = A3((s64)(C2_L31 * VX(v)) + (C2_L32 * VY(v)) + (C2_L33 * VZ(v)));
+			C2_MAC1 = A1((s64)(C2_L11 * VX(v)) + (C2_L12 * VY(v)) + (C2_L13 * VZ(v)), sf);
+			C2_MAC2 = A2((s64)(C2_L21 * VX(v)) + (C2_L22 * VY(v)) + (C2_L23 * VZ(v)), sf);
+			C2_MAC3 = A3((s64)(C2_L31 * VX(v)) + (C2_L32 * VY(v)) + (C2_L33 * VZ(v)), sf);
 			C2_IR1 = Lm_B1(C2_MAC1, lm);
 			C2_IR2 = Lm_B2(C2_MAC2, lm);
 			C2_IR3 = Lm_B3(C2_MAC3, lm);
-			C2_MAC1 = A1(/*int44*/ (s64)((s64)C2_RBK << 12) + (C2_LR1 * C2_IR1) + (C2_LR2 * C2_IR2) + (C2_LR3 * C2_IR3));
-			C2_MAC2 = A2(/*int44*/ (s64)((s64)C2_GBK << 12) + (C2_LG1 * C2_IR1) + (C2_LG2 * C2_IR2) + (C2_LG3 * C2_IR3));
-			C2_MAC3 = A3(/*int44*/ (s64)((s64)C2_BBK << 12) + (C2_LB1 * C2_IR1) + (C2_LB2 * C2_IR2) + (C2_LB3 * C2_IR3));
+			C2_MAC1 = A1(/*int44*/ (s64)((s64)C2_RBK << 12) + (C2_LR1 * C2_IR1) + (C2_LR2 * C2_IR2) + (C2_LR3 * C2_IR3), sf);
+			C2_MAC2 = A2(/*int44*/ (s64)((s64)C2_GBK << 12) + (C2_LG1 * C2_IR1) + (C2_LG2 * C2_IR2) + (C2_LG3 * C2_IR3), sf);
+			C2_MAC3 = A3(/*int44*/ (s64)((s64)C2_BBK << 12) + (C2_LB1 * C2_IR1) + (C2_LB2 * C2_IR2) + (C2_LB3 * C2_IR3), sf);
 			C2_IR1 = Lm_B1(C2_MAC1, lm);
 			C2_IR2 = Lm_B2(C2_MAC2, lm);
 			C2_IR3 = Lm_B3(C2_MAC3, lm);
@@ -642,9 +697,9 @@ int GTE_operator(int op)
 
 	case 0x28:
 
-		C2_MAC1 = A1(C2_IR1 * C2_IR1);
-		C2_MAC2 = A2(C2_IR2 * C2_IR2);
-		C2_MAC3 = A3(C2_IR3 * C2_IR3);
+		C2_MAC1 = A1(C2_IR1 * C2_IR1, sf);
+		C2_MAC2 = A2(C2_IR2 * C2_IR2, sf);
+		C2_MAC3 = A3(C2_IR3 * C2_IR3, sf);
 		C2_IR1 = Lm_B1(C2_MAC1, lm);
 		C2_IR2 = Lm_B2(C2_MAC2, lm);
 		C2_IR3 = Lm_B3(C2_MAC3, lm);
@@ -652,9 +707,9 @@ int GTE_operator(int op)
 
 	case 0x29:
 
-		C2_MAC1 = A1(((C2_R << 4) * C2_IR1) + (C2_IR0 * Lm_B1(A1(((s64)C2_RFC << 12) - ((C2_R << 4) * C2_IR1)), 0)));
-		C2_MAC2 = A2(((C2_G << 4) * C2_IR2) + (C2_IR0 * Lm_B2(A2(((s64)C2_GFC << 12) - ((C2_G << 4) * C2_IR2)), 0)));
-		C2_MAC3 = A3(((C2_B << 4) * C2_IR3) + (C2_IR0 * Lm_B3(A3(((s64)C2_BFC << 12) - ((C2_B << 4) * C2_IR3)), 0)));
+		C2_MAC1 = A1(((C2_R << 4) * C2_IR1) + (C2_IR0 * Lm_B1(A1(((s64)C2_RFC << 12) - ((C2_R << 4) * C2_IR1), sf), 0)), sf);
+		C2_MAC2 = A2(((C2_G << 4) * C2_IR2) + (C2_IR0 * Lm_B2(A2(((s64)C2_GFC << 12) - ((C2_G << 4) * C2_IR2), sf), 0)), sf);
+		C2_MAC3 = A3(((C2_B << 4) * C2_IR3) + (C2_IR0 * Lm_B3(A3(((s64)C2_BFC << 12) - ((C2_B << 4) * C2_IR3), sf), 0)), sf);
 		C2_IR1 = Lm_B1(C2_MAC1, lm);
 		C2_IR2 = Lm_B2(C2_MAC2, lm);
 		C2_IR3 = Lm_B3(C2_MAC3, lm);
@@ -670,9 +725,9 @@ int GTE_operator(int op)
 
 		for (v = 0; v < 3; v++)
 		{
-			C2_MAC1 = A1((C2_R0 << 16) + (C2_IR0 * Lm_B1(A1(((s64)C2_RFC << 12) - (C2_R0 << 16)), 0)));
-			C2_MAC2 = A2((C2_G0 << 16) + (C2_IR0 * Lm_B2(A2(((s64)C2_GFC << 12) - (C2_G0 << 16)), 0)));
-			C2_MAC3 = A3((C2_B0 << 16) + (C2_IR0 * Lm_B3(A3(((s64)C2_BFC << 12) - (C2_B0 << 16)), 0)));
+			C2_MAC1 = A1((C2_R0 << 16) + (C2_IR0 * Lm_B1(A1(((s64)C2_RFC << 12) - (C2_R0 << 16), sf), 0)), sf);
+			C2_MAC2 = A2((C2_G0 << 16) + (C2_IR0 * Lm_B2(A2(((s64)C2_GFC << 12) - (C2_G0 << 16), sf), 0)), sf);
+			C2_MAC3 = A3((C2_B0 << 16) + (C2_IR0 * Lm_B3(A3(((s64)C2_BFC << 12) - (C2_B0 << 16), sf), 0)), sf);
 			C2_IR1 = Lm_B1(C2_MAC1, lm);
 			C2_IR2 = Lm_B2(C2_MAC2, lm);
 			C2_IR3 = Lm_B3(C2_MAC3, lm);
@@ -687,32 +742,36 @@ int GTE_operator(int op)
 
 	case 0x2d:
 
-		C2_MAC0 = (int)(F((s64)(C2_ZSF3 * C2_SZ1) + (C2_ZSF3 * C2_SZ2) + (C2_ZSF3 * C2_SZ3)));
-		C2_OTZ = Lm_D(m_mac0, 1);
+		mac0 = (s64)(C2_ZSF3 * C2_SZ1) + (C2_ZSF3 * C2_SZ2) + (C2_ZSF3 * C2_SZ3);
+		C2_MAC0 = (int)(F(mac0));
+		C2_OTZ = Lm_D(mac0, 1);
 		return 1;
 
 	case 0x2e:
 
-		C2_MAC0 = (int)(F((s64)(C2_ZSF4 * C2_SZ0) + (C2_ZSF4 * C2_SZ1) + (C2_ZSF4 * C2_SZ2) + (C2_ZSF4 * C2_SZ3)));
-		C2_OTZ = Lm_D(m_mac0, 1);
+		mac0 = (s64)(C2_ZSF4 * C2_SZ0) + (C2_ZSF4 * C2_SZ1) + (C2_ZSF4 * C2_SZ2) + (C2_ZSF4 * C2_SZ3);
+		C2_MAC0 = (int)(F(mac0));
+		C2_OTZ = Lm_D(mac0, 1);
 		return 1;
 
 	case 0x30:
 
+		GTE_NoteMatrixForOp();
 		for (v = 0; v < 3; v++)
 		{
-			h_over_sz3 = GTE_RotTransPers(v, lm);
+			h_over_sz3 = GTE_RotTransPersOp(v, lm, sf);
 		}
 
-		C2_MAC0 = (int)(F((s64)C2_DQB + ((s64)C2_DQA * h_over_sz3)));
-		C2_IR0 = Lm_H(m_mac0, 1);
+		mac0 = (s64)C2_DQB + ((s64)C2_DQA * h_over_sz3);
+		C2_MAC0 = (int)(F(mac0));
+		C2_IR0 = Lm_H(mac0, 1);
 		return 1;
 
 	case 0x3d:
 
-		C2_MAC1 = A1(C2_IR0 * C2_IR1);
-		C2_MAC2 = A2(C2_IR0 * C2_IR2);
-		C2_MAC3 = A3(C2_IR0 * C2_IR3);
+		C2_MAC1 = A1(C2_IR0 * C2_IR1, sf);
+		C2_MAC2 = A2(C2_IR0 * C2_IR2, sf);
+		C2_MAC3 = A3(C2_IR0 * C2_IR3, sf);
 		C2_IR1 = Lm_B1(C2_MAC1, lm);
 		C2_IR2 = Lm_B2(C2_MAC2, lm);
 		C2_IR3 = Lm_B3(C2_MAC3, lm);
@@ -726,9 +785,9 @@ int GTE_operator(int op)
 
 	case 0x3e:
 
-		C2_MAC1 = A1(gte_shift(C2_MAC1, -m_sf) + (C2_IR0 * C2_IR1));
-		C2_MAC2 = A2(gte_shift(C2_MAC2, -m_sf) + (C2_IR0 * C2_IR2));
-		C2_MAC3 = A3(gte_shift(C2_MAC3, -m_sf) + (C2_IR0 * C2_IR3));
+		C2_MAC1 = A1(gte_shift(C2_MAC1, -sf) + (C2_IR0 * C2_IR1), sf);
+		C2_MAC2 = A2(gte_shift(C2_MAC2, -sf) + (C2_IR0 * C2_IR2), sf);
+		C2_MAC3 = A3(gte_shift(C2_MAC3, -sf) + (C2_IR0 * C2_IR3), sf);
 		C2_IR1 = Lm_B1(C2_MAC1, lm);
 		C2_IR2 = Lm_B2(C2_MAC2, lm);
 		C2_IR3 = Lm_B3(C2_MAC3, lm);
@@ -744,21 +803,21 @@ int GTE_operator(int op)
 
 		for (v = 0; v < 3; v++)
 		{
-			C2_MAC1 = A1((s64)(C2_L11 * VX(v)) + (C2_L12 * VY(v)) + (C2_L13 * VZ(v)));
-			C2_MAC2 = A2((s64)(C2_L21 * VX(v)) + (C2_L22 * VY(v)) + (C2_L23 * VZ(v)));
-			C2_MAC3 = A3((s64)(C2_L31 * VX(v)) + (C2_L32 * VY(v)) + (C2_L33 * VZ(v)));
+			C2_MAC1 = A1((s64)(C2_L11 * VX(v)) + (C2_L12 * VY(v)) + (C2_L13 * VZ(v)), sf);
+			C2_MAC2 = A2((s64)(C2_L21 * VX(v)) + (C2_L22 * VY(v)) + (C2_L23 * VZ(v)), sf);
+			C2_MAC3 = A3((s64)(C2_L31 * VX(v)) + (C2_L32 * VY(v)) + (C2_L33 * VZ(v)), sf);
 			C2_IR1 = Lm_B1(C2_MAC1, lm);
 			C2_IR2 = Lm_B2(C2_MAC2, lm);
 			C2_IR3 = Lm_B3(C2_MAC3, lm);
-			C2_MAC1 = A1(/*int44*/ (s64)((s64)C2_RBK << 12) + (C2_LR1 * C2_IR1) + (C2_LR2 * C2_IR2) + (C2_LR3 * C2_IR3));
-			C2_MAC2 = A2(/*int44*/ (s64)((s64)C2_GBK << 12) + (C2_LG1 * C2_IR1) + (C2_LG2 * C2_IR2) + (C2_LG3 * C2_IR3));
-			C2_MAC3 = A3(/*int44*/ (s64)((s64)C2_BBK << 12) + (C2_LB1 * C2_IR1) + (C2_LB2 * C2_IR2) + (C2_LB3 * C2_IR3));
+			C2_MAC1 = A1(/*int44*/ (s64)((s64)C2_RBK << 12) + (C2_LR1 * C2_IR1) + (C2_LR2 * C2_IR2) + (C2_LR3 * C2_IR3), sf);
+			C2_MAC2 = A2(/*int44*/ (s64)((s64)C2_GBK << 12) + (C2_LG1 * C2_IR1) + (C2_LG2 * C2_IR2) + (C2_LG3 * C2_IR3), sf);
+			C2_MAC3 = A3(/*int44*/ (s64)((s64)C2_BBK << 12) + (C2_LB1 * C2_IR1) + (C2_LB2 * C2_IR2) + (C2_LB3 * C2_IR3), sf);
 			C2_IR1 = Lm_B1(C2_MAC1, lm);
 			C2_IR2 = Lm_B2(C2_MAC2, lm);
 			C2_IR3 = Lm_B3(C2_MAC3, lm);
-			C2_MAC1 = A1((C2_R << 4) * C2_IR1);
-			C2_MAC2 = A2((C2_G << 4) * C2_IR2);
-			C2_MAC3 = A3((C2_B << 4) * C2_IR3);
+			C2_MAC1 = A1((C2_R << 4) * C2_IR1, sf);
+			C2_MAC2 = A2((C2_G << 4) * C2_IR2, sf);
+			C2_MAC3 = A3((C2_B << 4) * C2_IR3, sf);
 			C2_IR1 = Lm_B1(C2_MAC1, lm);
 			C2_IR2 = Lm_B2(C2_MAC2, lm);
 			C2_IR3 = Lm_B3(C2_MAC3, lm);
@@ -774,3 +833,39 @@ int GTE_operator(int op)
 
 	return 0;
 }
+
+int GTE_operator(int op)
+{
+	return GTE_Execute(op);
+}
+
+/*
+ * Constant-op entries: the op words the game issues most (doCOP2 in
+ * native_inline_c.c calls these when the op word is a compile-time constant,
+ * GTE_operator otherwise). noinline: a projection is ~1 KiB of code and is
+ * issued from a hundred call sites; one shared copy per op keeps the I-cache
+ * footprint of a hot loop small.
+ */
+#define GTE_OP_ENTRY(name, opword)               \
+	__attribute__((noinline)) int name(void) \
+	{                                            \
+		return GTE_Execute(opword);              \
+	}
+
+GTE_OP_ENTRY(GTE_OpRTPS, 0x0180001)
+GTE_OP_ENTRY(GTE_OpRTPT, 0x0280030)
+GTE_OP_ENTRY(GTE_OpNCLIP, 0x1400006)
+GTE_OP_ENTRY(GTE_OpAVSZ3, 0x158002D)
+GTE_OP_ENTRY(GTE_OpAVSZ4, 0x168002E)
+GTE_OP_ENTRY(GTE_OpDPCT, 0x0F8002A)
+GTE_OP_ENTRY(GTE_OpDPCS, 0x0780010)
+GTE_OP_ENTRY(GTE_OpSQR0, 0x0A00428)
+GTE_OP_ENTRY(GTE_OpOP12, 0x178000C)
+GTE_OP_ENTRY(GTE_OpMVMVA_RT_V0_TR, 0x0480012)   /* gte_rt / gte_rtv0tr */
+GTE_OP_ENTRY(GTE_OpMVMVA_RT_V0, 0x0486012)      /* gte_rtv0, mvmva(1,0,0,3,0) */
+GTE_OP_ENTRY(GTE_OpMVMVA_RT_V0_SF0, 0x0406012)  /* mvmva(0,0,0,3,0) */
+GTE_OP_ENTRY(GTE_OpMVMVA_RT_IR, 0x049E012)      /* gte_rtir */
+GTE_OP_ENTRY(GTE_OpMVMVA_RT_IR_SF0, 0x041E012)  /* gte_rtir_sf0 */
+GTE_OP_ENTRY(GTE_OpMVMVA_LL_V0, 0x04A6012)      /* gte_llv0, mvmva(1,1,0,3,0) */
+GTE_OP_ENTRY(GTE_OpMVMVA_LC_V0, 0x04C6012)      /* mvmva(1,2,0,3,0) */
+GTE_OP_ENTRY(GTE_OpMVMVA_LC_IR, 0x04DE012)      /* gte_lcir */

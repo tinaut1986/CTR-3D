@@ -73,5 +73,7 @@ unsigned int N3DS_FtpAddress(void); /* IPv4, network byte order; 0 until listeni
 int N3DS_FtpPort(void);
 void N3DS_FtpSetEnabled(int on);
 void N3DS_FtpPoll(void);
+/* APT hook forwarder (sleep/wake/suspend/restore): marks the server for re-listen. Never blocks. */
+void N3DS_FtpAptEvent(int type);
 
 #endif

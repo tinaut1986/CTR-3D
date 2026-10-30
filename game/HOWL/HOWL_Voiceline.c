@@ -184,7 +184,9 @@ void Voiceline_RequestPlay(u32 voiceID, u32 characterID, u32 characterID2)
 
 	elapsedFrames = (u32)CTR_MipsSubLo(sdata->gGT->frameTimer_MainFrame_ResetDB, sdata->timeSet2[characterID]);
 	canImmediate = 0;
-	if (elapsedFrames >= 0x3d)
+	// 60fps: frameTimer_MainFrame_ResetDB counts displayed frames, double
+	// the 2-second windows at 60 (ModSDK missed it)
+	if (elapsedFrames >= (u32)FPS_DOUBLE(0x3d))
 	{
 		canImmediate = voiceType < 2;
 	}
@@ -198,7 +200,7 @@ void Voiceline_RequestPlay(u32 voiceID, u32 characterID, u32 characterID2)
 	{
 		canQueue = 0;
 	}
-	else if (elapsedFrames < 0x3c)
+	else if (elapsedFrames < (u32)FPS_DOUBLE(0x3c))
 	{
 		canQueue = 0;
 	}
@@ -344,7 +346,12 @@ void Voiceline_Update(void)
 
 	if (sdata->voicelineCooldown != 0)
 	{
-		sdata->voicelineCooldown = (s16)CTR_MipsSubLo((u16)sdata->voicelineCooldown, 1);
+		// 60fps: retail frames (0x1e + XA length / 5) counted from
+		// Audio_Update1, which runs every frame: count every other frame
+		if (FPS60_HALF_RATE(gGT->timer))
+		{
+			sdata->voicelineCooldown = (s16)CTR_MipsSubLo((u16)sdata->voicelineCooldown, 1);
+		}
 		if (sdata->voicelineCooldown != 0)
 		{
 			return;

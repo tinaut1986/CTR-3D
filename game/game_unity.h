@@ -119,6 +119,7 @@
 #include "MAIN/MainDB.c"
 #include "MAIN/MainDrawCb.c"
 
+#include "MAIN/MainFps60.c"
 #include "MAIN/MainFrame.c"
 #include "MAIN/MainFrame_RenderFrame.c"
 

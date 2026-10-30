@@ -872,6 +872,27 @@ global_variable u32 s_vramCellGen[N3DS_VRAM_CELL_ROWS * N3DS_VRAM_CELL_COLS];
  * impossible by construction, and any thrashing is purely a capacity problem.
  */
 global_variable u32 s_vramDirtyBumps = 0;
+/*
+ * Track-preview video rectangle (set by the STR player, 16bpp, fixed for the
+ * life of a preview) and the count of VRAM writes that were NOT that rectangle.
+ * A decode-cache entry records s_vramOtherBumps when it decodes; if it is stale
+ * and the counter has not moved, the only thing that changed in VRAM since is
+ * the video rectangle, so re-decoding just its tiles reproduces a full re-decode
+ * exactly (the video page was ~25 ms/frame, twice, on an Old 3DS).
+ */
+global_variable int s_vidHintValid = 0;
+global_variable int s_vidX = 0, s_vidY = 0, s_vidW = 0, s_vidH = 0;
+global_variable u32 s_vramOtherBumps = 0;
+global_variable u32 s_texdecFramePart = 0;
+
+void NativeRenderer3DS_SetVideoRect(int x, int y, int w, int h)
+{
+	s_vidX = x;
+	s_vidY = y;
+	s_vidW = w;
+	s_vidH = h;
+	s_vidHintValid = (w > 0) && (h > 0);
+}
 
 internal int N3DS_VRAMCellIndex(int x, int y)
 {
@@ -899,6 +920,11 @@ internal void N3DS_DirtyVRAMRect(int x, int y, int w, int h)
 	if ((w <= 0) || (h <= 0))
 	{
 		return;
+	}
+
+	if (!(s_vidHintValid && (x == s_vidX) && (y == s_vidY) && (w == s_vidW) && (h == s_vidH)))
+	{
+		s_vramOtherBumps++;
 	}
 
 	x1 = x + w - 1;
@@ -1043,6 +1069,7 @@ internal void N3DS_RefreshFramebufferMirrorSlot(N3DS_FBStoreSlot *slot)
 				{
 					s_vramCellGen[(cellRow * N3DS_VRAM_CELL_COLS) + cellCol]++;
 					s_vramDirtyBumps++;
+					s_vramOtherBumps++;
 				}
 			}
 		}
@@ -1121,6 +1148,7 @@ typedef struct
 	                    * CLUT-less formats) -- the variant-retarget key, see
 	                    * N3DS_HashClutContent */
 	u32 lastUsedFrame;
+	u32 otherBumps;    /* s_vramOtherBumps when this cell was decoded (partial re-decode guard) */
 } N3DS_DecodeCacheEntry;
 
 /*
@@ -1132,7 +1160,16 @@ typedef struct
  * never entered into the LRU cache; indices 1..N3DS_TOTAL_CELLS-1 are real,
  * split between two tiers as of the sub-page cache below.
  */
-#define N3DS_TOTAL_CELLS (N3DS_ATLAS_COUNT * N3DS_ATLAS_CELLS_PER_ATLAS)
+/*
+ * The atlas count is chosen at init from the linear heap (N3DS_C3DAtlasCount:
+ * N3DS_ATLAS_MIN_COUNT..N3DS_ATLAS_COUNT, all of them on a New 3DS, fewer on a
+ * legacy Old 3DS region), so the cell totals below are runtime values; the
+ * arrays are sized for the maximum. The full-page tier keeps its 96 cells at
+ * every count: a smaller cache only shrinks the sub-page tier (see below).
+ */
+#define N3DS_TOTAL_CELLS_MAX (N3DS_ATLAS_COUNT * N3DS_ATLAS_CELLS_PER_ATLAS)
+global_variable int s_totalCells = N3DS_ATLAS_MIN_COUNT * N3DS_ATLAS_CELLS_PER_ATLAS; /* set by InitialiseRender */
+#define N3DS_TOTAL_CELLS (s_totalCells)
 #define N3DS_WHITE_ATLAS  0
 #define N3DS_WHITE_CELL_X 0
 #define N3DS_WHITE_CELL_Y 0
@@ -1172,16 +1209,24 @@ typedef struct
  * bumps and the full-page decodes that evict the live working set.
  */
 #define N3DS_FBCAP_RESERVED_CELLS       2
-#define N3DS_SUBPAGE_PHYSICAL_CELLS     (N3DS_TOTAL_CELLS - 1 - N3DS_FULLPAGE_RESERVED_CELLS - N3DS_FBCAP_RESERVED_CELLS)
 #define N3DS_SUBPAGE_CELLS_PER_PHYSICAL 16
-#define N3DS_SUBPAGE_TOTAL_CELLS        (N3DS_SUBPAGE_PHYSICAL_CELLS * N3DS_SUBPAGE_CELLS_PER_PHYSICAL)
+/* Runtime (the atlas count): 77 physical cells / 1232 slots with 11 atlases,
+ * 13 / 208 with the minimum 7 -- the measured sub-page peak is ~86 slots. */
+#define N3DS_SUBPAGE_PHYSICAL_CELLS     (N3DS_TOTAL_CELLS - 1 - N3DS_FULLPAGE_RESERVED_CELLS - N3DS_FBCAP_RESERVED_CELLS)
+#define N3DS_SUBPAGE_TOTAL_CELLS_MAX    ((N3DS_TOTAL_CELLS_MAX - 1 - N3DS_FULLPAGE_RESERVED_CELLS - N3DS_FBCAP_RESERVED_CELLS) * N3DS_SUBPAGE_CELLS_PER_PHYSICAL)
+global_variable int s_subPageTotalCells = 0; /* set by InitialiseRender */
+#define N3DS_SUBPAGE_TOTAL_CELLS        (s_subPageTotalCells)
 #define N3DS_SUBPAGE_DIM                64
 #define N3DS_SUBPAGE_PHYSICAL_BASE      (1 + N3DS_FULLPAGE_RESERVED_CELLS)
+/* The minimum atlas count must still leave the sub-page tier some cells. */
+CTR_STATIC_ASSERT(((N3DS_ATLAS_MIN_COUNT * N3DS_ATLAS_CELLS_PER_ATLAS) - 1 - N3DS_FULLPAGE_RESERVED_CELLS - N3DS_FBCAP_RESERVED_CELLS) >= 8);
 
+/* The capture cells are the last two of the last atlas. The cell total is a
+ * whole number of atlases, so their position inside that atlas is fixed. */
 #define N3DS_FBCAP_CELL_FIRST (N3DS_TOTAL_CELLS - N3DS_FBCAP_RESERVED_CELLS)
 #define N3DS_FBCAP_ATLAS      (N3DS_FBCAP_CELL_FIRST / N3DS_ATLAS_CELLS_PER_ATLAS)
-#define N3DS_FBCAP_CELL_X     ((N3DS_FBCAP_CELL_FIRST % N3DS_ATLAS_CELLS_PER_ATLAS) % N3DS_ATLAS_CELLS_PER_ROW)
-#define N3DS_FBCAP_CELL_Y     ((N3DS_FBCAP_CELL_FIRST % N3DS_ATLAS_CELLS_PER_ATLAS) / N3DS_ATLAS_CELLS_PER_ROW)
+#define N3DS_FBCAP_CELL_X     ((N3DS_ATLAS_CELLS_PER_ATLAS - N3DS_FBCAP_RESERVED_CELLS) % N3DS_ATLAS_CELLS_PER_ROW)
+#define N3DS_FBCAP_CELL_Y     ((N3DS_ATLAS_CELLS_PER_ATLAS - N3DS_FBCAP_RESERVED_CELLS) / N3DS_ATLAS_CELLS_PER_ROW)
 /* Atlas-texel origin of the capture region; the reserved cells must be
  * horizontally adjacent in ONE atlas for the region to be contiguous. */
 #define N3DS_FBCAP_REGION_X   (N3DS_FBCAP_CELL_X * N3DS_DECODE_TEXTURE_DIM)
@@ -1193,7 +1238,7 @@ CTR_STATIC_ASSERT((N3DS_FBCAP_CELL_X + N3DS_FBCAP_RESERVED_CELLS) <= N3DS_ATLAS_
  * (N3DS_FullPageCellBound below), so the A/B isn't confounded by
  * eviction thrash -- 96 cells hold less than one busy scene's working set,
  * which is exactly what invalidated the first run of that experiment. */
-global_variable N3DS_DecodeCacheEntry s_decodeCache[N3DS_TOTAL_CELLS];
+global_variable N3DS_DecodeCacheEntry s_decodeCache[N3DS_TOTAL_CELLS_MAX];
 
 internal int N3DS_FullPageCellBound(void)
 {
@@ -1235,7 +1280,7 @@ typedef struct
 	u32 lastUsedFrame;
 } N3DS_SubPageCacheEntry;
 
-global_variable N3DS_SubPageCacheEntry s_subPageCache[N3DS_SUBPAGE_TOTAL_CELLS];
+global_variable N3DS_SubPageCacheEntry s_subPageCache[N3DS_SUBPAGE_TOTAL_CELLS_MAX];
 /* Mirrors s_lastCellHit. -1 = no memo yet -- unlike the full-page array, index
  * 0 is a real, valid sub-page slot here (no reserved white cell at 0), so 0
  * can't double as the "no memo" sentinel the way it implicitly does not for
@@ -2227,13 +2272,48 @@ decodeIntoSlot:
 		 * GL_REPEAT). destStrideTiles stays N3DS_DECODE_TEXTURE_DIM/8, the
 		 * destination scratch's own width in tiles.
 		 */
+		/* Partial re-decode of the track-preview video rectangle: only when this
+		 * slot already holds exactly this (page, clut, format, view) and no VRAM
+		 * write other than the video rectangle has happened since it was decoded
+		 * (see s_vramOtherBumps). 16bpp only: a texel is one VRAM word. */
+		int partTx0 = 0, partTy0 = 0, partTw = 0, partTh = 0;
+		int partial = 0;
+
+		if ((oldestSlot == staleMatchSlot) && s_vidHintValid && (format == TF_16_BIT) && s_decodeCache[oldestSlot].used &&
+		    (s_decodeCache[oldestSlot].otherBumps == s_vramOtherBumps))
+		{
+			const int pageOriginX = (texPage & 0xF) * 64;
+			const int pageOriginY = (texPage & 0x10) ? 256 : 0;
+			int pu = s_vidX - pageOriginX;
+			const int pv = s_vidY - pageOriginY;
+
+			if (pu < 0)
+			{
+				pu += VRAM_WIDTH;
+			}
+			if ((pu >= 0) && ((pu + s_vidW) <= N3DS_DECODE_TEXTURE_DIM) && (pv >= 0) && ((pv + s_vidH) <= N3DS_DECODE_TEXTURE_DIM))
+			{
+				partTx0 = pu >> 3;
+				partTy0 = pv >> 3;
+				partTw = ((pu + s_vidW + 7) >> 3) - partTx0;
+				partTh = ((pv + s_vidH + 7) >> 3) - partTy0;
+				partial = 1;
+			}
+		}
 		{
 			const int decodeWidth = N3DS_DECODE_TEXTURE_DIM;
 			const unsigned long long texdecT0 = N3DS_GetTickCount();
 
 			texdecEventT0 = texdecT0;
-			N3DS_DecodeAndTilePage(texPage, clut, format, view, 0, 0, decodeWidth, N3DS_DECODE_TEXTURE_DIM,
-			                        N3DS_DECODE_TEXTURE_DIM / 8, s_decodeScratch);
+			if (partial)
+			{
+				N3DS_DecodeAndTilePage(texPage, clut, format, view, partTx0 * 8, partTy0 * 8, partTw * 8, partTh * 8, partTw, s_decodeScratch);
+			}
+			else
+			{
+				N3DS_DecodeAndTilePage(texPage, clut, format, view, 0, 0, decodeWidth, N3DS_DECODE_TEXTURE_DIM,
+				                        N3DS_DECODE_TEXTURE_DIM / 8, s_decodeScratch);
+			}
 			s_texdecFrameDecTicks += N3DS_GetTickCount() - texdecT0;
 		}
 		{
@@ -2242,7 +2322,15 @@ decodeIntoSlot:
 			unsigned long long texdecT2;
 
 			N3DS_CellIndexToAtlasCoord(oldestSlot, &atlasIdx, &cellX, &cellY);
-			N3DS_C3DUploadDecodedCell(atlasIdx, cellX, cellY, s_decodeScratch);
+			if (partial)
+			{
+				N3DS_C3DUploadDecodedTiles(atlasIdx, cellX, cellY, partTx0, partTy0, partTw, partTh, s_decodeScratch);
+				s_texdecFramePart++;
+			}
+			else
+			{
+				N3DS_C3DUploadDecodedCell(atlasIdx, cellX, cellY, s_decodeScratch);
+			}
 			texdecT2 = N3DS_GetTickCount();
 			s_texdecFrameUpTicks += texdecT2 - texdecT1;
 			s_texdecFrameFull++;
@@ -2272,6 +2360,7 @@ decodeIntoSlot:
 	}
 	s_decodeCache[oldestSlot].clutHash = curClutHash;
 	s_decodeCache[oldestSlot].lastUsedFrame = s_frameCounter;
+	s_decodeCache[oldestSlot].otherBumps = s_vramOtherBumps;
 	s_fullPageHashIdx[hashBucket] = (s16)oldestSlot;
 
 	return oldestSlot;
@@ -4176,6 +4265,15 @@ int NativeRenderer_InitialiseRender(char *windowName, int width, int height, int
 		N3DS_ShowFatalGfxScreen("citro3d init failed (out of linear memory?)");
 		return 0;
 	}
+	s_totalCells = N3DS_C3DAtlasCount() * N3DS_ATLAS_CELLS_PER_ATLAS;
+	s_subPageTotalCells = N3DS_SUBPAGE_PHYSICAL_CELLS * N3DS_SUBPAGE_CELLS_PER_PHYSICAL;
+	{
+		char msg[128];
+
+		snprintf(msg, sizeof(msg), "[CTR-3DS] decode cache: %d atlases, %d full-page cells, %d sub-page slots", N3DS_C3DAtlasCount(),
+		         N3DS_FULLPAGE_RESERVED_CELLS, s_subPageTotalCells);
+		N3DS_DebugLog(msg);
+	}
 
 	/* All-bits-set = -1 in every bucket (see the hash-index comment). */
 	memset(s_fullPageHashIdx, 0xFF, sizeof(s_fullPageHashIdx));
@@ -4415,10 +4513,16 @@ void NativeRenderer_BeginScene(void)
 
 void NativeRenderer_EndScene(void)
 {
+	/* [ENDPROF] chain (n3ds_backend.h): each mark closes one phase and opens
+	 * the next, so the phases tile EndScene exactly. 0 and no-ops in a
+	 * production build. */
+	unsigned long long endProfT;
+
 	if (!s_rendererInitialised)
 	{
 		return;
 	}
+	endProfT = N3DS_EndProfNow();
 
 	/*
 	 * Draw the skybox FIRST -- before the resident track pass and before the
@@ -4437,6 +4541,7 @@ void NativeRenderer_EndScene(void)
 		N3DS_DrawBackdropPass();
 		N3DS_DrawSkyPass();
 	}
+	endProfT = N3DS_EndProfMark(N3DS_ENDPROF_SKY, endProfT);
 
 #if defined(CTR_NATIVE_TRACK_RENDERER) && CTR_NATIVE_TRACK_RENDERER
 	/*
@@ -4474,6 +4579,7 @@ void NativeRenderer_EndScene(void)
 		NativePerf_BeginScope(NATIVE_PERF_BUCKET_NATIVE_TRACK_DRAW);
 		NativeTrackDraw_IssueForWalk();
 		NativePerf_EndScope(NATIVE_PERF_BUCKET_NATIVE_TRACK_DRAW);
+		endProfT = N3DS_EndProfMark(N3DS_ENDPROF_TRACK, endProfT);
 
 		/* NativeTrackDraw_IssueForWalk's own N3DS_TrackDraw_End (called once
 		 * per leaf-draw bracket, even when zero leaves drew) already restored
@@ -4502,12 +4608,14 @@ void NativeRenderer_EndScene(void)
 	NativePerf_BeginScope(NATIVE_PERF_BUCKET_MERGE_FLUSH);
 	N3DS_MergeFlush();
 	NativePerf_EndScope(NATIVE_PERF_BUCKET_MERGE_FLUSH);
+	endProfT = N3DS_EndProfMark(N3DS_ENDPROF_MERGE, endProfT);
 
 	/* Bisect ('uilast' off): draw the UI pass HERE, in the slot UI occupied
 	 * when it still lived in the merge bins, instead of last. See g_dbg_uiLast. */
 	if (!g_dbg_uiLast)
 	{
 		N3DS_DrawUiPass();
+		endProfT = N3DS_EndProfMark(N3DS_ENDPROF_UI, endProfT);
 	}
 
 #if defined(CTR_NATIVE_MODEL_RENDERER) && CTR_NATIVE_MODEL_RENDERER
@@ -4537,6 +4645,7 @@ void NativeRenderer_EndScene(void)
 		NativePerf_EndScope(NATIVE_PERF_BUCKET_NATIVE_MODEL_DRAW);
 		s_texdecFrameMdlTicks += N3DS_GetTickCount() - texdecMdlT0;
 	}
+	endProfT = N3DS_EndProfMark(N3DS_ENDPROF_MODEL, endProfT);
 #endif
 
 #if defined(CTR_NATIVE_TRACK_RENDERER) && CTR_NATIVE_TRACK_RENDERER
@@ -4548,6 +4657,7 @@ void NativeRenderer_EndScene(void)
 		NativePerf_BeginScope(NATIVE_PERF_BUCKET_NATIVE_TRACK_DRAW);
 		NativeTrackDraw_IssueForWalk();
 		NativePerf_EndScope(NATIVE_PERF_BUCKET_NATIVE_TRACK_DRAW);
+		endProfT = N3DS_EndProfMark(N3DS_ENDPROF_TRACK, endProfT);
 	}
 #endif
 
@@ -4577,6 +4687,7 @@ void NativeRenderer_EndScene(void)
 		s_mergeDepthWriteState = -1;
 		N3DS_MergeFlush();
 	}
+	endProfT = N3DS_EndProfMark(N3DS_ENDPROF_SMOKE, endProfT);
 #endif
 
 	/*
@@ -4590,6 +4701,7 @@ void NativeRenderer_EndScene(void)
 	if (g_dbg_uiLast)
 	{
 		N3DS_DrawUiPass();
+		endProfT = N3DS_EndProfMark(N3DS_ENDPROF_UI, endProfT);
 	}
 
 #ifdef CTR_INTERNAL
@@ -4667,16 +4779,19 @@ void NativeRenderer_EndScene(void)
 	 * holding its last stereo frame while that diagnostic combo is active --
 	 * defined, visible-as-what-it-is, and gone the moment merge is back on.
 	 */
+	endProfT = N3DS_EndProfMark(N3DS_ENDPROF_OTHER, endProfT); /* the atlas inspector */
 	if (s_mergeActive)
 	{
 		N3DS_StereoRenderRightEye();
 	}
+	endProfT = N3DS_EndProfMark(N3DS_ENDPROF_RIGHT, endProfT);
 
 	/* Bottom-screen minimap, LAST of all: after the right-eye replay so its
 	 * target/state switches can never leak into the journaled eyes, before
 	 * FrameEnd so its draws join this frame's command list. Self-guarding --
 	 * drains its own state even when there is nothing to draw. */
 	N3DS_DrawBottomMapPass();
+	endProfT = N3DS_EndProfMark(N3DS_ENDPROF_BOTTOM, endProfT);
 
 	s_endSceneCount++;
 	// C3D_FrameEnd: the whole frame's queued GPU commands actually execute
@@ -4684,6 +4799,7 @@ void NativeRenderer_EndScene(void)
 	NativePerf_BeginScope(NATIVE_PERF_BUCKET_N3DS_FRAME_END);
 	N3DS_C3DEndFrame();
 	NativePerf_EndScope(NATIVE_PERF_BUCKET_N3DS_FRAME_END);
+	(void)N3DS_EndProfMark(N3DS_ENDPROF_FRAMEEND, endProfT);
 }
 
 void NativeRenderer_UpdateSwapIntervalState(int swapInterval)
@@ -4835,9 +4951,9 @@ void NativeRenderer_SwapWindow(void)
 			char texdecLine[224];
 			int len;
 
-			len = snprintf(texdecLine, sizeof(texdecLine), "[TEXDEC] frame=%lu sub=%lu full=%lu decUs=%lu upUs=%lu mdlUs=%lu",
+			len = snprintf(texdecLine, sizeof(texdecLine), "[TEXDEC] frame=%lu sub=%lu full=%lu part=%lu decUs=%lu upUs=%lu mdlUs=%lu",
 			               (unsigned long)s_frameCounter, (unsigned long)s_texdecFrameSub, (unsigned long)s_texdecFrameFull,
-			               decUs, upUs, mdlUs);
+			               (unsigned long)s_texdecFramePart, decUs, upUs, mdlUs);
 			if ((len > 0) && ((size_t)len < sizeof(texdecLine)) && (s_texdecFrameWorstTicks > 0))
 			{
 				const unsigned long worstUs = (unsigned long)((s_texdecFrameWorstTicks * 1000000ULL) / texdecFreq);
@@ -4857,6 +4973,7 @@ void NativeRenderer_SwapWindow(void)
 		}
 		s_texdecFrameSub = 0;
 		s_texdecFrameFull = 0;
+		s_texdecFramePart = 0;
 		s_texdecFrameDecTicks = 0;
 		s_texdecFrameUpTicks = 0;
 		s_texdecFrameMdlTicks = 0;
@@ -5026,6 +5143,7 @@ void NativeRenderer_SwapWindow(void)
 		         NativeAudio_XAStreamSectorsBuffered(), NATIVE_AUDIO_XA_RING_SECTORS, s_audio.xaStream.underrunEvents,
 		         s_audio.voicePcmArena.capacity / 1024, (int)sdata->mainGameState);
 		N3DS_DebugLog(line);
+		N3DS_MemLog("window");
 
 		/*
 		 * Texture decode cache diagnostics -- added to check whether the cache
@@ -6825,7 +6943,7 @@ void NativeRenderer3DS_DebugDumpCacheMeta(void)
 	N3DS_MetaWriteU32(f, (u32)N3DS_FULLPAGE_RESERVED_CELLS);
 	N3DS_MetaWriteU32(f, (u32)N3DS_SUBPAGE_TOTAL_CELLS);
 	N3DS_MetaWriteU32(f, (u32)N3DS_SUBPAGE_PHYSICAL_BASE);
-	N3DS_MetaWriteU32(f, (u32)N3DS_ATLAS_COUNT);
+	N3DS_MetaWriteU32(f, (u32)N3DS_C3DAtlasCount());
 	N3DS_MetaWriteU32(f, (u32)N3DS_ATLAS_DIM);
 	N3DS_MetaWriteU32(f, (u32)N3DS_DECODE_TEXTURE_DIM);
 	N3DS_MetaWriteU32(f, (u32)N3DS_SUBPAGE_DIM);

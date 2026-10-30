@@ -1370,10 +1370,25 @@ void NativeModelDraw_IssueForWalk(void)
 			for (t = 0; t < inst->triCount; t++)
 			{
 				const struct NativeModelEmitVert *src = &snap->verts[(inst->firstTri + t) * 3];
-				N3DS_Vertex out[3];
+				N3DS_Vertex *out;
 				int offset;
 				int v;
 
+				if (!instanceBound)
+				{
+					instanceBound = 1;
+					N3DS_ModelDraw_Instance(qx, qy, qw, h);
+					instDrawn++;
+				}
+
+				/* Written in place in the frame buffer (N3DS_C3DReserveVertices),
+				 * not built on the stack and copied: same bytes, same offset. */
+				out = N3DS_C3DReserveVertices(3, &offset);
+				if (out == NULL)
+				{
+					appendFailed++;
+					break;
+				}
 				for (v = 0; v < 3; v++)
 				{
 					out[v].x = src[v].x;
@@ -1386,20 +1401,6 @@ void NativeModelDraw_IssueForWalk(void)
 					out[v].g = inst->fadeG;
 					out[v].b = inst->fadeB;
 					out[v]._pad = 0;
-				}
-
-				if (!instanceBound)
-				{
-					instanceBound = 1;
-					N3DS_ModelDraw_Instance(qx, qy, qw, h);
-					instDrawn++;
-				}
-
-				offset = N3DS_C3DAppendVertices(out, 3);
-				if (offset < 0)
-				{
-					appendFailed++;
-					break;
 				}
 
 				if ((maskRun.triCount > 0) && (offset == (maskRun.startVertex + (maskRun.triCount * 3))))
@@ -1426,7 +1427,7 @@ void NativeModelDraw_IssueForWalk(void)
 			const struct NativeModelEmitVert *src = &snap->verts[triIndex * 3];
 			const int faceBlendMode = NativeModelDraw_FaceBlend(face, inst);
 			const int faceIsBlended = (faceBlendMode != 0);
-			N3DS_Vertex out[3];
+			N3DS_Vertex *out;
 			int atlasIdx = -1, pixelBaseU = 0, pixelBaseV = 0, originU = 0, originV = 0;
 			int textured = face->textured;
 			int offset;
@@ -1514,6 +1515,21 @@ void NativeModelDraw_IssueForWalk(void)
 				                            view, &atlasIdx, &pixelBaseU, &pixelBaseV, &originU, &originV);
 			}
 
+			/* Reserved AFTER the texture resolve, as the copy used to be, and
+			 * written in place (see the mask loop above). */
+			out = N3DS_C3DReserveVertices(3, &offset);
+
+			if (out == NULL)
+			{
+				/* Frame vertex budget exhausted. Counted and reported, never
+				 * silent -- a silent version of this is what once deleted
+				 * geometry with no log line at all (n3ds_backend.h's SIZING
+				 * comment). Stop this instance; later instances would fail the
+				 * same way. */
+				appendFailed++;
+				break;
+			}
+
 			for (v = 0; v < 3; v++)
 			{
 				out[v].x = src[v].x;
@@ -1546,19 +1562,6 @@ void NativeModelDraw_IssueForWalk(void)
 				out[v].g = src[v].g;
 				out[v].b = src[v].b;
 				out[v]._pad = 0;
-			}
-
-			offset = N3DS_C3DAppendVertices(out, 3);
-
-			if (offset < 0)
-			{
-				/* Frame vertex budget exhausted. Counted and reported, never
-				 * silent -- a silent version of this is what once deleted
-				 * geometry with no log line at all (n3ds_backend.h's SIZING
-				 * comment). Stop this instance; later instances would fail the
-				 * same way. */
-				appendFailed++;
-				break;
 			}
 
 			/* Extend the open run when this triangle is contiguous in the

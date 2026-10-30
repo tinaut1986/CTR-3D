@@ -3732,6 +3732,16 @@ internal int NativeAudio_XAStreamCountAudioSectors(struct NativeAudioXaSource *s
  * removes their repeat whole-file scans after the first open of each track.
  */
 #define NATIVE_AUDIO_XA_VOICE_CACHE_MAX_BYTES (32u * 1024u * 1024u)
+#if defined(__3DS__)
+/* n3ds_heap.c: heap bytes still available to malloc, and the memory log line. */
+extern unsigned long N3DS_HeapFreeBytes(void);
+extern void N3DS_MemLog(const char *tag);
+/* The cache never takes the heap below this much free (measured peak of the
+ * rest of the game outside the cache: ~16 MiB at boot, ~8 MiB in a race). */
+#define NATIVE_AUDIO_XA_VOICE_CACHE_HEAP_RESERVE (22u * 1024u * 1024u)
+#define NATIVE_AUDIO_XA_VOICE_CACHE_MIN_BYTES    (2u * 1024u * 1024u)
+#endif
+static u32 s_xaVoiceCacheBudget = NATIVE_AUDIO_XA_VOICE_CACHE_MAX_BYTES; /* sized to the heap on 3DS */
 #define NATIVE_AUDIO_XA_TRACK_INDEX_MAX       512
 #define NATIVE_AUDIO_XA_CATEGORY_MUSIC        0
 #define NATIVE_AUDIO_XA_CATEGORY_EXTRA        1
@@ -3810,7 +3820,12 @@ internal int NativeAudio_XAVoiceCacheOpen(struct NativeAudioXaSource *source, co
 {
 	const struct NativeAudioXaVoiceCacheTrack *track;
 
-	if (!s_xaVoiceCache.built || (s_xaVoiceCache.blob == NULL) || (info->entryIndex < 0) || (info->entryIndex >= NATIVE_AUDIO_XA_TRACK_INDEX_MAX))
+	/* No `built` test: the cache fills in the background after boot
+	 * (NativeAudio_VoiceCacheBackgroundStep), and a track is complete -- and
+	 * never touched again -- the moment its sectorCount is set, so it can be
+	 * served while later tracks are still loading. Until then the open takes
+	 * the SD path. */
+	if ((s_xaVoiceCache.blob == NULL) || (info->entryIndex < 0) || (info->entryIndex >= NATIVE_AUDIO_XA_TRACK_INDEX_MAX))
 	{
 		return 0;
 	}
@@ -3840,7 +3855,31 @@ internal struct
 	int sectors;
 	u32 readSectors;    /* disc/SD sectors this warm has actually read */
 	u32 plannedSectors; /* what it set out to read; 0 until the plan is known */
+	/* Voice-cache stages (1..3) run after boot, in idle frame time, instead
+	 * of in the SCEA hold: the hold then waits only for the MUSIC count memo
+	 * (stage 0, table-fed, normally zero reads). plannedSectors is the hold's
+	 * plan (stage 0 only); voicePlannedSectors is the background's. */
+	b32 background;
+	u32 voicePlannedSectors;
+	u32 backgroundSteps;
+	u64 backgroundStartTick;
+	/* A wanted track did not fit and what is left of the budget is below
+	 * NATIVE_AUDIO_XA_VOICE_CACHE_FULL_SLACK: nothing more will land, so the
+	 * fill stops after the file in hand (g_dbg_voiceFillStopFull). */
+	b32 cacheFull;
+	u32 budgetMisses; /* tracks that did not fit (logged once, then counted) */
+	u32 filesSkipped; /* wanted files never read because the cache was full */
 } s_vce;
+
+/* Once a track misses the budget with less than this left, the cache is full:
+ * a legacy region's ~5 MiB budget fills from the first ~third of GAME, and
+ * every later file was read in full (~11k sectors, the rest of the fill) only
+ * to log "budget full" for each of its tracks. Those tracks stay on the SD
+ * path either way, exactly as with no cache; the reads bought nothing but the
+ * count memo, which an SD-path open fills itself. Never reached on a New 3DS
+ * (32 MiB holds both categories). dumpreq `vcstop` A/Bs it (default on). */
+#define NATIVE_AUDIO_XA_VOICE_CACHE_FULL_SLACK (256u * 1024u)
+int g_dbg_voiceFillStopFull = 1;
 
 /* Resumable state for one category's build pass (GAME then EXTRA). A step
  * reads at most one bounded chunk of one file's span per call -- per-CALL SD
@@ -3859,6 +3898,7 @@ internal struct
 	u8 *fileBuf;
 	int span;
 	int pos;
+	int deinterleaveNext; /* next s_xaVoiceCacheScratch index to copy out of fileBuf */
 } s_xacb;
 
 /* Disc sectors one category's build pass sets out to read: each wanted file is
@@ -3952,6 +3992,13 @@ internal int NativeAudio_XAVoiceCacheBuildCategoryStep(int budgetSectors)
 			s_xacb.fileNumber++;
 			continue;
 		}
+		if (s_vce.cacheFull && g_dbg_voiceFillStopFull)
+		{
+			/* Full: skip the read of every remaining wanted file. */
+			s_vce.filesSkipped++;
+			s_xacb.fileNumber++;
+			continue;
+		}
 		if (!NativeAudio_BuildXAPath(path, sizeof(path), s_xacb.categoryID, s_xacb.fileNumber) || !NativeAudio_XASourceOpen(&s_xacb.src, path, 0))
 		{
 			NativeAudio_XAVoiceCacheLog("[XAPRELOAD] cannot open %s -- its tracks stay on the SD path", path);
@@ -4025,11 +4072,15 @@ internal int NativeAudio_XAVoiceCacheBuildCategoryStep(int budgetSectors)
 		}
 	}
 
-	/* Span fully read (or zero-length): de-interleave wanted tracks. */
+	/* Span fully read (or zero-length): de-interleave wanted tracks -- ONE per
+	 * call, resuming at deinterleaveNext. A file holds up to a few hundred
+	 * voice lines and each scans the whole span, which made a single call tens
+	 * of milliseconds of CPU: harmless behind a hold screen, a dropped frame in
+	 * the background. */
 	{
 		int i;
 
-		for (i = 0; i < s_xacb.numWanted; i++)
+		for (i = s_xacb.deinterleaveNext; i < s_xacb.numWanted; i++)
 		{
 			const struct NativeAudioXaTrackInfo *info = &s_xaVoiceCacheScratch[i].info;
 			struct NativeAudioXaVoiceCacheTrack *track;
@@ -4057,10 +4108,28 @@ internal int NativeAudio_XAVoiceCacheBuildCategoryStep(int budgetSectors)
 
 			s_xaAudioSectorCountMemo[info->entryIndex] = matched;
 
-			if (s_xaVoiceCache.blobUsed + (u32)matched * (u32)s_xacb.src.sectorSize > NATIVE_AUDIO_XA_VOICE_CACHE_MAX_BYTES)
+			if (s_xaVoiceCache.blobUsed + (u32)matched * (u32)s_xacb.src.sectorSize > s_xaVoiceCacheBudget)
 			{
-				NativeAudio_XAVoiceCacheLog("[XAPRELOAD] budget full at cat=%d xa=%d (%u KiB) -- track stays on the SD path", s_xacb.categoryID,
-				                            (int)s_xaVoiceCacheScratch[i].xaID, (unsigned)(s_xaVoiceCache.blobUsed >> 10));
+				/* One line for the first miss (the summary in "voice cache
+				 * built" counts the rest): a line per track was ~150 lines,
+				 * each a share of the next SD log flush. */
+				if (s_vce.budgetMisses == 0)
+				{
+					NativeAudio_XAVoiceCacheLog("[XAPRELOAD] budget full at cat=%d xa=%d (%u KiB) -- track stays on the SD path", s_xacb.categoryID,
+					                            (int)s_xaVoiceCacheScratch[i].xaID, (unsigned)(s_xaVoiceCache.blobUsed >> 10));
+				}
+				s_vce.budgetMisses++;
+				if (s_xaVoiceCacheBudget - s_xaVoiceCache.blobUsed < NATIVE_AUDIO_XA_VOICE_CACHE_FULL_SLACK)
+				{
+					s_vce.cacheFull = 1;
+				}
+				if (s_vce.background)
+				{
+					/* Same one-track-per-call bound as a track that lands:
+					 * each miss still scanned its whole span. */
+					s_xacb.deinterleaveNext = i + 1;
+					return 0;
+				}
 				continue;
 			}
 
@@ -4081,9 +4150,15 @@ internal int NativeAudio_XAVoiceCacheBuildCategoryStep(int budgetSectors)
 			track->sectorCount = matched;
 			s_vce.tracks += 1;
 			s_vce.sectors += matched;
+			if (s_vce.background)
+			{
+				s_xacb.deinterleaveNext = i + 1;
+				return 0;
+			}
 		}
 	}
 
+	s_xacb.deinterleaveNext = 0;
 	free(s_xacb.fileBuf);
 	s_xacb.fileBuf = NULL;
 	NativeAudio_XASourceClose(&s_xacb.src);
@@ -4381,11 +4456,35 @@ void NativeAudio_VoiceCacheEnsureBegin(void)
 	memset(&s_vce, 0, sizeof(s_vce));
 	s_vce.active = 1;
 
-	s_xaVoiceCache.blob = (u8 *)malloc(NATIVE_AUDIO_XA_VOICE_CACHE_MAX_BYTES);
-	if (s_xaVoiceCache.blob == NULL)
+	/* Budget = what the heap can spare while keeping the game's own reserve:
+	 * the full 32 MiB on a New 3DS (heap ~70 MiB), less or nothing on a legacy
+	 * Old 3DS region where the heap is lean. */
+	{
+		const unsigned long freeHeap = N3DS_HeapFreeBytes();
+		u32 budget = NATIVE_AUDIO_XA_VOICE_CACHE_MAX_BYTES;
+
+		if (freeHeap < (unsigned long)NATIVE_AUDIO_XA_VOICE_CACHE_HEAP_RESERVE + budget)
+		{
+			budget = (freeHeap > NATIVE_AUDIO_XA_VOICE_CACHE_HEAP_RESERVE) ? (u32)(freeHeap - NATIVE_AUDIO_XA_VOICE_CACHE_HEAP_RESERVE) : 0u;
+			budget &= ~((1u << 20) - 1u);
+		}
+		s_xaVoiceCacheBudget = budget;
+		N3DS_MemLog("voicecache-begin");
+		if (budget < NATIVE_AUDIO_XA_VOICE_CACHE_MIN_BYTES)
+		{
+			s_xaVoiceCacheBudget = 0;
+			NativeAudio_XAVoiceCacheLog("[XAPRELOAD] heap too small for a voice cache (%lu KiB free, reserve %u KiB) -- voice lines stay on the SD path",
+			                            freeHeap / 1024ul, (unsigned)(NATIVE_AUDIO_XA_VOICE_CACHE_HEAP_RESERVE >> 10));
+		}
+		else
+		{
+			s_xaVoiceCache.blob = (u8 *)malloc(budget);
+		}
+	}
+	if ((s_xaVoiceCache.blob == NULL) && (s_xaVoiceCacheBudget != 0))
 	{
 		NativeAudio_XAVoiceCacheLog("[XAPRELOAD] no %u KiB for the voice cache -- voice lines stay on the SD path",
-		                            (unsigned)(NATIVE_AUDIO_XA_VOICE_CACHE_MAX_BYTES >> 10));
+		                            (unsigned)(s_xaVoiceCacheBudget >> 10));
 	}
 
 	/* Independent of the RAM cache below (MUSIC is never cached): fills the
@@ -4395,10 +4494,15 @@ void NativeAudio_VoiceCacheEnsureBegin(void)
 	/* Read plan for the whole warm, so a caller holding the screen can show
 	 * honest progress. The memo half costs nothing while its table matches
 	 * the disc; only the fallback scan reads. */
+	s_vce.background = 1;
 	if (s_xaVoiceCache.blob != NULL)
 	{
-		s_vce.plannedSectors = NativeAudio_XAVoiceCachePlannedSectors(NATIVE_AUDIO_XA_CATEGORY_GAME) +
-		                       NativeAudio_XAVoiceCachePlannedSectors(NATIVE_AUDIO_XA_CATEGORY_EXTRA);
+		s_vce.voicePlannedSectors = NativeAudio_XAVoiceCachePlannedSectors(NATIVE_AUDIO_XA_CATEGORY_GAME) +
+		                            NativeAudio_XAVoiceCachePlannedSectors(NATIVE_AUDIO_XA_CATEGORY_EXTRA);
+		if (!s_vce.background)
+		{
+			s_vce.plannedSectors = s_vce.voicePlannedSectors;
+		}
 	}
 	if (s_mcw.active)
 	{
@@ -4477,6 +4581,15 @@ int NativeAudio_VoiceCacheEnsureStep(int budgetSectors)
 		if (s_vce.stage == 1)
 		{
 			NativeAudio_XAVoiceCacheBuildCategoryBegin(NATIVE_AUDIO_XA_CATEGORY_GAME);
+			if (s_vce.background)
+			{
+				/* The hold is over; the voice lines load in idle frame time
+				 * from here (NativeAudio_VoiceCacheBackgroundStep). */
+				s_vce.backgroundStartTick = N3DS_GetTickCount();
+				NativeAudio_XAVoiceCacheLog("[XAPRELOAD] voice cache: filling in the background (%u sectors planned, %u KiB budget)",
+				                            (unsigned)s_vce.voicePlannedSectors, (unsigned)(s_xaVoiceCacheBudget >> 10));
+				return 1;
+			}
 		}
 		return 0;
 	case 1:
@@ -4514,11 +4627,46 @@ int NativeAudio_VoiceCacheEnsureStep(int budgetSectors)
 	else
 	{
 		s_xaVoiceCache.built = 1;
-		NativeAudio_XAVoiceCacheLog("[XAPRELOAD] voice cache built: %d tracks, %d sectors, %u KiB of %u KiB budget", s_vce.tracks, s_vce.sectors,
-		                            (unsigned)(s_xaVoiceCache.blobUsed >> 10), (unsigned)(NATIVE_AUDIO_XA_VOICE_CACHE_MAX_BYTES >> 10));
+		NativeAudio_XAVoiceCacheLog("[XAPRELOAD] voice cache built: %d tracks, %d sectors, %u KiB of %u KiB budget (background: %lu steps, %lu ms)", s_vce.tracks,
+		                            s_vce.sectors, (unsigned)(s_xaVoiceCache.blobUsed >> 10), (unsigned)(s_xaVoiceCacheBudget >> 10),
+		                            (unsigned long)s_vce.backgroundSteps,
+		                            s_vce.backgroundStartTick ? (unsigned long)(((N3DS_GetTickCount() - s_vce.backgroundStartTick) * 1000ull) / N3DS_GetTickFrequency()) : 0ul);
+		NativeAudio_XAVoiceCacheLog("[XAPRELOAD] budget misses=%u full=%d filesSkipped=%u read=%u of %u planned sectors", (unsigned)s_vce.budgetMisses,
+		                            (int)s_vce.cacheFull, (unsigned)s_vce.filesSkipped, (unsigned)s_vce.readSectors, (unsigned)s_vce.voicePlannedSectors);
+		N3DS_MemLog("voicecache-built");
 	}
 	s_vce.active = 0;
 	return 1;
+#else
+	(void)budgetSectors;
+	return 1;
+#endif
+}
+
+/* Whether the background voice-cache fill still has work. Cheap: the idle
+ * hook polls it every wait. Always 0 off the 3DS. */
+int NativeAudio_VoiceCacheBackgroundPending(void)
+{
+#if defined(__3DS__)
+	return s_vce.active && s_vce.background && (s_vce.stage >= 1);
+#else
+	return 0;
+#endif
+}
+
+/* One bounded step of the background fill: at most budgetSectors of SD reads,
+ * or one track's de-interleave (CPU only), or a stage change. Main thread
+ * only -- it shares the main reader's fd and scratch and the disc path cache.
+ * Returns nonzero once the fill is complete (or there was none). */
+int NativeAudio_VoiceCacheBackgroundStep(int budgetSectors)
+{
+#if defined(__3DS__)
+	if (!NativeAudio_VoiceCacheBackgroundPending())
+	{
+		return 1;
+	}
+	s_vce.backgroundSteps++;
+	return NativeAudio_VoiceCacheEnsureStep(budgetSectors);
 #else
 	(void)budgetSectors;
 	return 1;
@@ -4756,6 +4904,8 @@ internal int NativeAudio_XAStreamAheadCountNoLock(const struct NativeAudioXaStre
 // decodes exactly one more sector. Only drives xaStream (the live one) --
 // xaPendingStream is only filled by the priming/seek bursts in the Open*
 // functions below.
+int N3DS_FramePaceOldClass(void);
+
 internal void NativeAudio_XAStreamPump(void)
 {
 	int active;
@@ -4785,6 +4935,21 @@ internal void NativeAudio_XAStreamPump(void)
 
 		if (!active)
 		{
+			s_refilling = 0;
+			return;
+		}
+		if (N3DS_FramePaceOldClass() && !N3DS_AudioThreadIsRunning())
+		{
+			/* Old 3DS: this runs on the game thread (no audio worker), where a
+			 * burst of 24 sectors was a 90-205 ms stall every ~2 s ([SPIKE]
+			 * audioVbl). XA is consumed at ~0.3 sector per vblank and one sector
+			 * decodes in ~6 ms, so topping up one sector per vblank keeps the
+			 * ring full without a burst. The burst exists to cut SD contention
+			 * with a worker thread; there is none here. */
+			if (ahead < NATIVE_AUDIO_XA_RING_AHEAD_TARGET)
+			{
+				NativeAudio_XAStreamDecodeNextSector(&s_audio.xaStream);
+			}
 			s_refilling = 0;
 			return;
 		}
@@ -6827,9 +6992,17 @@ int NativeAudio_LifecycleBench(const char *statePath)
 	 */
 	if (mismatches != 0)
 	{
-		static struct NativeAudioState snapshot;
+		/* Heap, not static: a 700 KiB function-static here sat in every build's
+		 * bss (the 3DS's too) for a host-only bench. */
+		struct NativeAudioState *snapshotMem = (struct NativeAudioState *)malloc(sizeof(struct NativeAudioState));
 		static struct NativeAudioVoice beforeVblank[NATIVE_AUDIO_SPU_VOICE_COUNT];
 		int reported = 0;
+
+		if (snapshotMem == NULL)
+		{
+			free(blob);
+			return 1;
+		}
 
 		/* blob is still the loaded snapshot here -- the outer free is below. */
 		NativeAudio_RestoreState(blob, stateSize);
@@ -6846,7 +7019,7 @@ int NativeAudio_LifecycleBench(const char *statePath)
 			NativeAudio_LifecycleVBlankNoLock(NATIVE_AUDIO_VBLANK_FRAMES, 1);
 			steppedIters = s_lifecycleDebugIters;
 			steppedFrames = s_lifecycleDebugFrames;
-			memcpy(&snapshot, &s_audio, sizeof(snapshot));
+			memcpy(snapshotMem, &s_audio, sizeof(*snapshotMem));
 			memcpy(stepped, s_audio.voices, sizeof(stepped));
 
 			memcpy(s_audio.voices, beforeVblank, sizeof(beforeVblank));
@@ -6886,8 +7059,9 @@ int NativeAudio_LifecycleBench(const char *statePath)
 
 			/* Continue from the stepped path's state so later vblanks are
 			 * compared from a known-good baseline rather than compounding. */
-			memcpy(&s_audio, &snapshot, sizeof(s_audio));
+			memcpy(&s_audio, snapshotMem, sizeof(s_audio));
 		}
+		free(snapshotMem);
 	}
 
 	free(blob);
@@ -7044,24 +7218,15 @@ void NativeAudio_StepVBlank(void)
 		}
 		else
 		{
-			/* Fallback: no worker thread secured (Old3DS, or couldn't claim
-			 * core 1). Renders synchronously on the main thread -- the full
-			 * mixer, so this path is SLOW, but correct and audible: it
-			 * submits to the same ndsp sink the worker would. */
-			s16 scratch[NATIVE_AUDIO_VBLANK_FRAMES * NATIVE_AUDIO_CHANNELS];
-
-			NativeAudio_LockOutput(); /* real on this path too -- harmless,
-			                              nothing else contends for it when
-			                              there is no worker thread */
-			NativeAudio_RenderFramesNoLock(scratch, NATIVE_AUDIO_VBLANK_FRAMES);
-			/* Full software mixer, so this path produces at the SPU rate with
-			 * volume already applied per sample -- unlike the worker's XA
-			 * parcels, which ride the channel at the source rate. Exactly one
-			 * of the two producers exists per process lifetime, so the sink
-			 * only ever sees one rate regime. */
-			N3DS_NdspSubmitMusicParcel(scratch, NATIVE_AUDIO_VBLANK_FRAMES, NATIVE_AUDIO_SAMPLE_RATE, 1.0f, 1.0f);
-			NativeAudio_HwVoiceMirrorNoLock();
-			NativeAudio_UnlockOutput();
+			/* Fallback: no worker thread secured (Old 3DS, or the Old-3DS
+			 * simulation). Runs the worker's own per-vblank job on the main
+			 * thread -- lifecycle + hardware-voice mirror, XA parcels at the
+			 * source rate, the first-play decode pump -- not the full
+			 * software mixer this path used to run (735 MixFrame calls a
+			 * vblank, ~3.8 ms each on an Old 3DS, for a parcel that was
+			 * silent apart from XA; see N3DS_AudioRunVBlankOnCaller). Takes
+			 * the render lock itself. */
+			N3DS_AudioRunVBlankOnCaller();
 		}
 	}
 	/* No CTR_INTERNAL stats-reporting block on this path: with output

@@ -169,6 +169,7 @@ void N3DS_C3DGpuTimeWindow(int *cpuUs, int *gpuUs, unsigned *frames);
  * window.
  */
 void N3DS_LogFlushStats(unsigned *worstUs, unsigned *totalUs, unsigned *count);
+void N3DS_LogAsyncStats(int *async, unsigned *syncDrains, unsigned *syncWorstUs); /* [LOGFLUSH] async writer fields, resets */
 
 /* ------------------------------------------------------------- stereo 3D --- */
 /*
@@ -205,6 +206,39 @@ void N3DS_StereoRenderRightEye(void);
  * overscans X by this so a per-eye shift cannot expose the window edge.
  * Constant per stereosep, not slider-tracking. */
 int N3DS_StereoSkyPadX(void);
+/* System ticks the last N3DS_StereoRenderRightEye spent on the CPU (0 on a
+ * mono frame). Measured in every build: the Old-3DS stereo policy
+ * (N3DS_FramePace_*) prices the right eye with it. */
+unsigned long long N3DS_StereoLastRightEyeTicks(void);
+
+/* -------------------------------------------------- end-of-scene profile --- */
+/*
+ * [ENDPROF] (CTR_INTERNAL): where platform_end_scene_ms goes, phase by phase,
+ * plus the frame-begin wait and the right eye's journal shape. The phases of
+ * NativeRenderer_EndScene are contiguous (each mark closes one and opens the
+ * next), so their sum is the whole EndScene; platform_end_scene_ms minus that
+ * sum is the VRAM-present / pinned-display wrapper around it. Plain int phase
+ * ids, not an enum: this header crosses the -fshort-enums split.
+ * N3DS_EndProfMark adds (now - since) to the phase and returns now; both are
+ * no-ops returning 0 in a production build.
+ */
+#define N3DS_ENDPROF_SKY      0 /* backdrop + sky passes (skyfirst) */
+#define N3DS_ENDPROF_TRACK    1 /* resident track issue (either slot) */
+#define N3DS_ENDPROF_MERGE    2 /* the frame's main N3DS_MergeFlush */
+#define N3DS_ENDPROF_UI       3 /* UI pass (either slot) */
+#define N3DS_ENDPROF_MODEL    4 /* model issue (CPU vertex build + draws) */
+#define N3DS_ENDPROF_SMOKE    5 /* deferred smoke + its flush */
+#define N3DS_ENDPROF_RIGHT    6 /* right-eye journal replay */
+#define N3DS_ENDPROF_BOTTOM   7 /* bottom-screen pass */
+#define N3DS_ENDPROF_FRAMEEND 8 /* C3D_FrameEnd: cache flush + submit */
+#define N3DS_ENDPROF_OTHER    9 /* debug overlays and the rest of EndScene */
+#define N3DS_ENDPROF_BEGIN    10 /* N3DS_C3DBeginFrame: wait for the previous frame + clears */
+#define N3DS_ENDPROF_FLUSH    11 /* inside FRAMEEND: the cache flush alone (c3dflush 1) */
+#define N3DS_ENDPROF_PHASES   12
+unsigned long long N3DS_EndProfNow(void);
+unsigned long long N3DS_EndProfMark(int phase, unsigned long long since);
+/* Formats the window line into out and resets the window. */
+void N3DS_EndProfFormat(char *out, int outSize);
 
 /*
  * One real vertex buffer per FRAME, not per draw. C3D_DrawArrays only
@@ -249,6 +283,12 @@ int N3DS_StereoSkyPadX(void);
  * N3DS_C3DDrawTriangles), or -1 if the frame buffer is full -- caller must
  * skip drawing in that case, not draw from a stale/wrong offset. */
 int N3DS_C3DAppendVertices(const N3DS_Vertex *vertices, int count);
+/* The same allocation without the copy: reserves count vertices at the frame
+ * cursor and returns where to write them (the caller writes every field of
+ * every vertex before the frame ends), with their offset in *baseOut; NULL
+ * and -1 when the frame buffer is full. For per-triangle emitters, which
+ * otherwise build each triangle on the stack only to have it copied. */
+N3DS_Vertex *N3DS_C3DReserveVertices(int count, int *baseOut);
 void N3DS_C3DDrawTriangles(int startVertex, int triangleCount);
 /* Nonzero inside a C3D_FrameBegin/End bracket. Draws outside one would panic
  * libctru's GPU command buffer (NULL after FrameEnd); sites that issue GPU work
@@ -323,12 +363,26 @@ int N3DS_C3DFrameVertexHighWater(void);
 #else
 #define N3DS_ATLAS_COUNT           12
 #endif
+/*
+ * N3DS_ATLAS_COUNT is the MAXIMUM (array sizes). N3DS_C3DInit allocates as many
+ * as the linear heap holds after keeping room for what is allocated later
+ * (N3DS_LINEAR_AFTER_ATLASES in n3ds_backend.c), between N3DS_ATLAS_MIN_COUNT
+ * and N3DS_ATLAS_COUNT: all 11 on a New 3DS (unchanged), 7-8 in a legacy
+ * Old 3DS region. The decode cache keeps its 96 full-page cells at every count
+ * (native_renderer_3ds.c); only the sub-page tier shrinks: 13 physical cells =
+ * 208 slots at 7 atlases against a measured peak of ~86 slots. Fewer atlases
+ * are therefore the same full-page hit rate, not a correctness change.
+ */
+#define N3DS_ATLAS_MIN_COUNT       7
+int N3DS_C3DAtlasCount(void);
 #define N3DS_ATLAS_DIM             1024
 #define N3DS_ATLAS_CELLS_PER_ROW   (N3DS_ATLAS_DIM / N3DS_DECODE_TEXTURE_DIM)
 #define N3DS_ATLAS_CELLS_PER_ATLAS (N3DS_ATLAS_CELLS_PER_ROW * N3DS_ATLAS_CELLS_PER_ROW)
 
 /* tiled256 buffer is RGBA5551 (2 bytes/texel), not RGBA8 -- see N3DS_TILE_BYTES. */
 void N3DS_C3DUploadDecodedCell(int atlasIndex, int cellX, int cellY, const void *tiled256);
+/* A tilesWide x tilesHigh block of 8x8 tiles at (tileCol, tileRow) inside the 32x32-tile cell. */
+void N3DS_C3DUploadDecodedTiles(int atlasIndex, int cellX, int cellY, int tileCol, int tileRow, int tilesWide, int tilesHigh, const void *tiled);
 /* Sub-page counterpart -- writes an
  * 8x8-tile (64x64 texel) sub-cell at physical cell (physCellX,physCellY)'s
  * (subX,subY) quadrant-of-16, instead of a whole 32x32-tile cell. tiled64 is
@@ -697,6 +751,58 @@ void N3DS_DebugSetVRAMForDump(const void *vram, unsigned int bytes, const unsign
  * Reported on screen so runaway allocation is visible as it happens. */
 unsigned long N3DS_HeapUsedBytes(void);
 unsigned long N3DS_LinearFreeBytes(void);
+unsigned long N3DS_HeapGameUsedBytes(void); /* same as HeapUsedBytes (ballast excluded) */
+unsigned long N3DS_HeapFreeBytes(void);     /* heap window minus handed-out bytes */
+unsigned long N3DS_HeapBallastBytes(void);  /* Old-3DS simulation ballast (0 normally) */
+void N3DS_MemSample(void);                  /* fold heap extent / linear free into the water marks */
+void N3DS_MemLog(const char *tag);          /* one "[MEM] tag ..." line: heap, peaks, linear free/min */
+void N3DS_MemLevelBegin(void);              /* "[MEM] level-end" line for the level before, then reset the per-level marks */
+int N3DS_HeapSimCap(unsigned capMiB);       /* Old-3DS simulation: park ballast to a legacy region */
+unsigned long N3DS_LinearHeapSize(void);    /* the linear heap's size (n3ds_heap.c split) */
+unsigned long N3DS_LinearAfterAtlases(void); /* linear kept free at init for what follows the decode atlases */
+unsigned long N3DS_HwVoiceStoreBytes(void);  /* hw-voice sample store size (n3ds_audio_thread.c) */
+/* An allocation the game cannot run without failed (level load, any thread):
+ * the main loop shows the fatal memory screen with these numbers and quits.
+ * First call wins; later ones are logged only. */
+void N3DS_FatalMemRequest(const char *what, unsigned long bytes);
+
+/* Old-3DS simulation on a New 3DS (n3ds_backend.c). */
+void N3DS_O3dsSimInit(void);
+int N3DS_O3dsSimActive(void);       /* 0 off, 1 o3ds-sim.txt, 2 legacy-mode CIA */
+int N3DS_O3dsSimFtpAllowed(void);
+int N3DS_O3dsSimToggleFile(void);   /* DEBUG > ACTIONS; returns the new state */
+int N3DS_ExtraCoresUsable(void);    /* New 3DS and not simulating an Old one */
+
+/*
+ * Frame pacing and the Old-3DS stereo policy (n3ds_backend.c, "frame pace").
+ *
+ * The game flips when sdata->vsyncTillFlip, set at every submit, has counted
+ * down: 2 emulated vblanks (30 fps) is retail. Platform_FlipVBlanks
+ * (native_platform.c) measures each frame's WORK -- flip to flip minus the
+ * time the pacer slept -- hands it to N3DS_FramePaceNoteFrame and returns
+ * N3DS_FramePaceNextFlip: 1 (60 fps), 2 or 3 (20 fps). Option FRAME SKIP
+ * (g_dbg_frameCap, cfg `fpsmode`; the old `fpscap` is migrated): 0 AUTO, 1 30
+ * FPS, 2 OFF. AUTO, on every console: 60 while the frames fit, one step down
+ * (30, then 20) while a quarter of them miss, back up once they all fit with
+ * margin; OFF: 1 vblank whenever the context allows it, each frame taking the
+ * vblanks it needs; 30: retail. A frame is only ever shown for 1 vblank where
+ * the game allows 60 (g_fps60Allowed: racing, not menus / pause / cutscenes /
+ * loads); the frame after it runs its logic at 60 Hz (game/MAIN/MainFps60.c,
+ * include/ctr_fps60.h), so game speed holds at every rate. HOWL runs per
+ * vblank, so music tempo never changes.
+ *
+ * g_dbg_stereo: 0 off, 1 on, 2 AUTO (the Old-3DS default): on an Old 3DS the
+ * right eye is dropped while it alone makes the frame miss the cap the frame
+ * would otherwise hold, and comes back once the frame plus its last measured
+ * cost fits again. On a New 3DS 2 behaves as 1.
+ */
+void N3DS_FramePaceNoteFrame(unsigned workUs);
+int N3DS_FramePaceNextFlip(void);         /* the interval for the frame just submitted */
+int N3DS_FramePaceFlipVBlanks(void);
+int N3DS_FramePaceOldClass(void);          /* Old 3DS / 2DS, or simulating one */
+int N3DS_FramePaceStereoSuppressed(void);  /* AUTO stereo has the right eye off */
+void N3DS_FramePaceFormat(char *out, int outSize); /* [PACE] window line, resets */
+extern int g_dbg_frameCap;                 /* FRAME SKIP: 0 AUTO, 1 30 fps, 2 OFF (cfg fpsmode) */
 
 /* Read-only state for the bottom-screen UI (n3ds_bottomui.c). */
 int N3DS_StereoFrameActive(void);   /* this frame rendered both eyes */

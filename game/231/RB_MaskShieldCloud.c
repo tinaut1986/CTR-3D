@@ -750,7 +750,9 @@ void RB_RainCloud_ThTick(struct Thread *t)
 
 			// you are always 5 frames away from new weapon,
 			// so you get weapon 5 frames after cloud dies
-			d->itemRollTimer = 5;
+			// 60fps: counted down by the driver (VehPhysProc, 60 Hz world),
+			// ModSDK 231_042_RB_RainCloud_ThTick.c FPS_DOUBLE(5)
+			d->itemRollTimer = FPS_DOUBLE(5);
 
 			// you hold zero of this item
 			d->numHeldItems = 0;

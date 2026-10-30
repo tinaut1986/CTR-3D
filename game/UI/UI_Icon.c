@@ -222,7 +222,8 @@ void UI_TrackerBG(struct Icon *targetIcon, s16 centerX, s16 centerY, struct Prim
 	s16 topY;
 	s16 leftX;
 
-	sdata->wumpaShineTheta += UI_TRACKER_BG_SHINE_THETA_STEP;
+	// 60fps: half the step per frame (ModSDK UI_18_TrackerBG)
+	sdata->wumpaShineTheta += FPS_HALF(UI_TRACKER_BG_SHINE_THETA_STEP);
 
 	widthOffset = ((targetIcon->texLayout.u1 - targetIcon->texLayout.u0) * angleX) >> UI_ICON_FIXED_SHIFT;
 	heightOffset = ((targetIcon->texLayout.v2 - targetIcon->texLayout.v0) * angleY) >> UI_ICON_FIXED_SHIFT;

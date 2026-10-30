@@ -103,7 +103,8 @@ extern void NativeAudio_TakeWorkerProfileForAudioThread(unsigned long long *life
  * per vblank) so the DSP resamples in hardware and the CPU resampler --
  * measured at 52-56ms per 16.7ms parcel on the ARM11, i.e. the "talking into
  * a fan" announcer -- disappears entirely. The full-mixer StepVBlank
- * fallback still submits 735 at 44100. Both go through the same sink; only
+ * fallback once submitted 735 at 44100 here; it now runs the XA path too
+ * (N3DS_AudioRunVBlankOnCaller). Both go through the same sink; only
  * the frame COUNT and the channel rate differ, and the parcel unit keeps its
  * meaning for the worker's cushion target either way.
  *
@@ -112,9 +113,9 @@ extern void NativeAudio_TakeWorkerProfileForAudioThread(unsigned long long *life
  */
 #define N3DS_NDSP_PARCEL_FRAMES_MAX 735
 /* The software mixer's fixed PSX SPU rate (native_audio.c
- * NATIVE_AUDIO_SAMPLE_RATE, hand-matched like the frame count above). Only
- * the StepVBlank fallback produces at this rate now; it is also the channel's
- * starting rate before any producer has submitted. */
+ * NATIVE_AUDIO_SAMPLE_RATE, hand-matched like the frame count above). No
+ * producer submits at this rate any more; it is the channel's starting rate
+ * before the first XA parcel. */
 #define N3DS_NDSP_MIXER_RATE_HZ     44100
 /*
  * The sink accumulates N3DS_NDSP_AGG_PARCELS parcels into one wave buffer
@@ -239,8 +240,16 @@ static int s_ndspAggTarget = N3DS_NDSP_AGG_DEFAULT;
 
 /* Hardware-voice linear store (full contract at the plan-B section below);
  * declared here because N3DS_NdspSinkShutdown frees it. */
-#define N3DS_HW_STORE_BYTES  (3 * 1024 * 1024)
+/* 3 MiB with a New 3DS-sized linear heap (unchanged); 2 MiB in a legacy Old 3DS
+ * region. The whole PSX SPU RAM (512 KiB of ADPCM, 16 bytes -> 28 samples) is
+ * 1.75 MiB of PCM, and a full store reclaims (NativeAudio_HwSampleSlotAcquire:
+ * stale entries, then idle ones), so a smaller store costs re-decodes, never a
+ * silent voice. Fixed at the first allocation (N3DS_HwVoiceStoreBytes). */
+#define N3DS_HW_STORE_BYTES_FULL  (3u * 1024u * 1024u)
+#define N3DS_HW_STORE_BYTES_LEAN  (2u * 1024u * 1024u)
+#define N3DS_HW_STORE_LEAN_BELOW  (48u * 1024u * 1024u) /* linear heap size */
 #define N3DS_HW_STORE_BLOCKS 256
+static u32 s_hwStoreBytes;     /* size of s_hwStore once allocated */
 struct N3DS_HwStoreBlock
 {
 	u32 off;
@@ -307,8 +316,8 @@ static void N3DS_NdspSinkInit(void)
 	ndspChnReset(N3DS_NDSP_CHANNEL);
 	ndspChnSetInterp(N3DS_NDSP_CHANNEL, NDSP_INTERP_POLYPHASE);
 	/* Starting rate only. The first submit re-pokes this to whatever the
-	 * producer actually rendered at -- 37800/18900 for native-rate XA, 44100
-	 * for the full-mixer fallback (N3DS_NdspApplyChannelState). */
+	 * producer actually rendered at -- 37800/18900 for native-rate XA
+	 * (N3DS_NdspApplyChannelState). */
 	ndspChnSetRate(N3DS_NDSP_CHANNEL, (float)N3DS_NDSP_MIXER_RATE_HZ);
 	ndspChnSetFormat(N3DS_NDSP_CHANNEL, NDSP_FORMAT_STEREO_PCM16);
 	memset(mix, 0, sizeof(mix));
@@ -730,6 +739,17 @@ static void N3DS_HwStoreBlocksReset(void)
 	s_hwStoreLive = 0;
 }
 
+/* The store's size for this process: see N3DS_HW_STORE_BYTES_LEAN. Also read by
+ * N3DS_LinearAfterAtlases (n3ds_backend.c) to keep room for it. */
+unsigned long N3DS_HwVoiceStoreBytes(void)
+{
+	if (s_hwStore != NULL)
+	{
+		return (unsigned long)s_hwStoreBytes;
+	}
+	return (N3DS_LinearHeapSize() < N3DS_HW_STORE_LEAN_BELOW) ? N3DS_HW_STORE_BYTES_LEAN : N3DS_HW_STORE_BYTES_FULL;
+}
+
 short *N3DS_HwVoiceStoreAlloc(int sampleCount)
 {
 	u32 bytes;
@@ -738,12 +758,26 @@ short *N3DS_HwVoiceStoreAlloc(int sampleCount)
 
 	if (s_hwStore == NULL)
 	{
-		s_hwStore = (s16 *)linearAlloc(N3DS_HW_STORE_BYTES);
+		char line[128];
+
+		s_hwStoreBytes = (u32)N3DS_HwVoiceStoreBytes();
+		s_hwStore = (s16 *)linearAlloc(s_hwStoreBytes);
+		if ((s_hwStore == NULL) && (s_hwStoreBytes > N3DS_HW_STORE_BYTES_LEAN))
+		{
+			s_hwStoreBytes = N3DS_HW_STORE_BYTES_LEAN;
+			s_hwStore = (s16 *)linearAlloc(s_hwStoreBytes);
+		}
 		if (s_hwStore == NULL)
 		{
-			N3DS_DebugLog("[CTR-3DS] hw-voice store: linearAlloc FAILED -- voices silent");
+			snprintf(line, sizeof(line), "[CTR-3DS] hw-voice store: linearAlloc of %lu KiB FAILED (linear free %lu KiB) -- voices silent",
+			         (unsigned long)(s_hwStoreBytes / 1024u), (unsigned long)(linearSpaceFree() / 1024u));
+			N3DS_DebugLog(line);
+			s_hwStoreBytes = 0;
 			return NULL;
 		}
+		snprintf(line, sizeof(line), "[CTR-3DS] hw-voice store: %lu KiB of linear (linear free now %lu KiB)", (unsigned long)(s_hwStoreBytes / 1024u),
+		         (unsigned long)(linearSpaceFree() / 1024u));
+		N3DS_DebugLog(line);
 		N3DS_HwStoreBlocksReset();
 	}
 	if (sampleCount <= 0)
@@ -786,7 +820,7 @@ short *N3DS_HwVoiceStoreAlloc(int sampleCount)
 		return (short *)((u8 *)s_hwStore + s_hwStoreBlocks[best].off);
 	}
 
-	if (((s_hwStoreHiWater + bytes) > N3DS_HW_STORE_BYTES) || (s_hwStoreBlockCount >= N3DS_HW_STORE_BLOCKS))
+	if (((s_hwStoreHiWater + bytes) > s_hwStoreBytes) || (s_hwStoreBlockCount >= N3DS_HW_STORE_BLOCKS))
 	{
 		s_hwStoreFullDrops++;
 		return NULL;
@@ -1238,6 +1272,49 @@ static void N3DS_BeatWatchdogCheck(unsigned int wakeCount)
 	s_awPrevRw = rwCounter;
 }
 
+/*
+ * Wall-clock XA: produce every parcel whose deadline has passed
+ * (catch-up capped -- after a long stall we resync rather than
+ * blast the queue). Independent of the lifecycle drain, so the
+ * music holds real time even when vblank emission crawls. Called
+ * once per worker wake, and once per vblank by the main-thread
+ * fallback (N3DS_AudioRunVBlankOnCaller).
+ *
+ * Cushion-driven XA (hardware run 4's log): keeping the queue at a
+ * "just-in-time" depth meant every SD stall on this same thread
+ * (the pump below, contending with main-thread bulk loads) gapped
+ * the music -- ndspQ sat at 0 through the whole announcer, ring
+ * full, zero underruns: delivery latency, not pacing, was the
+ * bottleneck all along. So: top the queue up to ~200ms of parcels
+ * whenever XA has content, every wake. Stalls drain cushion
+ * instead of audio, catch-up refills it, and nothing is ever
+ * discarded. The wall-clock wait below is just the wake cadence
+ * now. XA position runs up to the cushion ahead of real time --
+ * the PS1's CD buffered ahead the same way.
+ */
+static void N3DS_AudioXaTopUp(void)
+{
+	u64 mark = svcGetSystemTick();
+	int guard = 0;
+	int xaIdle = 0;
+
+	while ((N3DS_NdspGetQueuedBlocks() < N3DS_NdspCushionTarget()) && (guard < 8))
+	{
+		if (!NativeAudio_RenderXAParcelForAudioThread()) /* takes the render lock itself */
+		{
+			xaIdle = 1; /* XA idle (or track just ended) */
+			break;
+		}
+		guard++;
+	}
+	if (xaIdle)
+	{
+		N3DS_NdspFlushPending(); /* play out a track's tail parcels */
+	}
+	s_profParcelTicks += svcGetSystemTick() - mark;
+	s_profParcels += (u32)guard;
+}
+
 static void N3DS_AudioThreadMain(void *arg)
 {
 	const u64 xaPeriodTicks = SYSCLOCK_ARM11 / 60;
@@ -1249,7 +1326,6 @@ static void N3DS_AudioThreadMain(void *arg)
 	{
 		u64 now = svcGetSystemTick();
 		s64 waitNs = 0;
-		u64 mark;
 
 		if ((s64)(nextXaTick - now) > 0)
 		{
@@ -1302,46 +1378,7 @@ static void N3DS_AudioThreadMain(void *arg)
 			LightLock_Unlock(&s_audioCounterLock);
 		}
 
-		/*
-		 * Wall-clock XA: produce every parcel whose deadline has passed
-		 * (catch-up capped -- after a long stall we resync rather than
-		 * blast the queue). Independent of the lifecycle drain above, so
-		 * the music holds real time even when vblank emission crawls.
-		 */
-		/*
-		 * Cushion-driven XA (hardware run 4's log): keeping the queue at a
-		 * "just-in-time" depth meant every SD stall on this same thread
-		 * (the pump below, contending with main-thread bulk loads) gapped
-		 * the music -- ndspQ sat at 0 through the whole announcer, ring
-		 * full, zero underruns: delivery latency, not pacing, was the
-		 * bottleneck all along. So: top the queue up to ~200ms of parcels
-		 * whenever XA has content, every wake. Stalls drain cushion
-		 * instead of audio, catch-up refills it, and nothing is ever
-		 * discarded. The wall-clock wait below is just the wake cadence
-		 * now. XA position runs up to the cushion ahead of real time --
-		 * the PS1's CD buffered ahead the same way.
-		 */
-		{
-			int guard = 0;
-			int xaIdle = 0;
-
-			mark = svcGetSystemTick();
-			while ((N3DS_NdspGetQueuedBlocks() < N3DS_NdspCushionTarget()) && (guard < 8))
-			{
-				if (!NativeAudio_RenderXAParcelForAudioThread()) /* takes the render lock itself */
-				{
-					xaIdle = 1; /* XA idle (or track just ended) */
-					break;
-				}
-				guard++;
-			}
-			if (xaIdle)
-			{
-				N3DS_NdspFlushPending(); /* play out a track's tail parcels */
-			}
-			s_profParcelTicks += svcGetSystemTick() - mark;
-			s_profParcels += (u32)guard;
-		}
+		N3DS_AudioXaTopUp();
 		now = svcGetSystemTick();
 		nextXaTick = now + xaPeriodTicks; /* next top-up check one vblank out */
 
@@ -1420,15 +1457,14 @@ void N3DS_AudioThreadInit(void)
 		}
 	}
 
-	isNew3DS = false;
-	APT_CheckNew3DS(&isNew3DS);
+	isNew3DS = N3DS_ExtraCoresUsable(); /* false on an Old 3DS and in the Old-3DS simulation */
 	if (!isNew3DS)
 	{
 		/* This project targets New3DS-XL only, but fail safe rather than
 		 * assume -- never fall back to a same-core thread (see "What
 		 * changed from v1" in the design doc: core_id=-1 does NOT mean "any
 		 * free core", it means "all CPUs", which resolves to core 0 here). */
-		N3DS_DebugLog("[CTR-3DS] audio worker: NO (APT says not New3DS) -- main-thread fallback");
+		N3DS_DebugLog("[CTR-3DS] audio worker: NO (not a New3DS, or Old-3DS simulation) -- main-thread fallback");
 		return;
 	}
 
@@ -1498,6 +1534,45 @@ void N3DS_AudioThreadNotifyVBlank(void)
 	}
 	LightLock_Unlock(&s_audioCounterLock);
 	svcSignalEvent(s_audioWakeHandle);
+}
+
+/*
+ * One vblank of the worker's job, run synchronously on the caller (the main
+ * thread) when no worker exists: an Old 3DS, or the Old-3DS simulation. The
+ * fallback used to run the full software mixer instead -- 735 MixFrame calls
+ * walking 24 voices one sample at a time, plus the 29-tap XA resampler on
+ * music tracks -- only to submit a parcel whose voice content was silence
+ * (the voices play on their own DSP channels either way). Measured in the
+ * simulation: audio_vblank_ms 19-20 per game frame in the main menu, which
+ * is ~3.8 ms per vblank at 5 vblanks a frame. This is the worker's path
+ * instead: event-batched lifecycle + hardware-voice mirror, cushion-driven
+ * XA parcels at the source rate, and the chunked first-play decode pump
+ * (which the old fallback never ran, so the tail of any sample longer than
+ * the head chunk stayed silent). Same state out as the worker on a New 3DS.
+ * Charged to the same audioprof buckets (wakes stays 0, vbl counts calls).
+ * The XA stream pump is NOT run here: StepVBlank runs it right after.
+ */
+void N3DS_AudioRunVBlankOnCaller(void)
+{
+	u64 mark;
+
+	if (s_audioThreadRunning)
+	{
+		return; /* the worker owns this work; never run it twice */
+	}
+
+	N3DS_AudioRenderLockTimed();
+	mark = svcGetSystemTick();
+	NativeAudio_RenderVBlankForAudioThread();
+	LightLock_Unlock(&s_audioRenderLock);
+	s_profRenderTicks += svcGetSystemTick() - mark;
+	s_profVBlanks++;
+
+	N3DS_AudioXaTopUp();
+
+	mark = svcGetSystemTick();
+	NativeAudio_HwDecodePumpForAudioThread(); /* no locks held: takes the render lock itself */
+	s_profPumpTicks += svcGetSystemTick() - mark;
 }
 
 void N3DS_AudioThreadStopAndJoin(void)

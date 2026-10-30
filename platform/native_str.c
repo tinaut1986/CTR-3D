@@ -1,12 +1,20 @@
 #include <macros.h>
 #include <platform/native_assets.h>
 #include <platform/native_disc_image.h>
+#include <platform/native_perf.h>
 #include <platform/native_renderer.h>
 #include <platform/native_str.h>
 #include <psx/libgpu.h>
 
 #include <stdio.h>
 #include <string.h>
+
+#ifdef __3DS__
+void NativeRenderer3DS_SetVideoRect(int x, int y, int w, int h);
+#define NATIVE_STR_SET_VIDEO_RECT(x, y, w, h) NativeRenderer3DS_SetVideoRect((x), (y), (w), (h))
+#else
+#define NATIVE_STR_SET_VIDEO_RECT(x, y, w, h) ((void)0)
+#endif
 
 #define NATIVE_STR_EXTRACTED_SECTOR_SIZE    0x800
 #define NATIVE_STR_CD_SECTOR_SIZE           0x920
@@ -195,35 +203,35 @@ internal u16 NativeSTR_NegateMdecCode(u16 code)
 	return (u16)((code & 0xfc00) | ((u32)-NativeSTR_Sign10(code) & 0x3ff));
 }
 
-internal u32 NativeSTR_ReadBits(struct NativeSTRBitReader *br, s32 count)
+/* Stream = little-endian 16-bit words, most significant bit first. Peek up to 16
+ * bits from a 48-bit window of the next three words (zero past the end). */
+internal u32 NativeSTR_PeekBits(struct NativeSTRBitReader *br, s32 count)
 {
-	u32 value = 0;
+	s32 wordIdx = br->bitOffset >> 4;
+	s32 byteOffset = wordIdx * 2;
+	u64 window = 0;
 	s32 i;
 
-	for (i = 0; i < count; i++)
+	for (i = 0; i < 3; i++)
 	{
-		s32 byteOffset = (br->bitOffset >> 4) * 2;
-		s32 bit = 15 - (br->bitOffset & 0xf);
 		u32 word = 0;
 
 		if (byteOffset + 1 < br->size)
 		{
 			word = NativeSTR_ReadLE16(&br->data[byteOffset]);
 		}
-
-		value = (value << 1) | ((word >> bit) & 1);
-		br->bitOffset++;
+		window = (window << 16) | word;
+		byteOffset += 2;
 	}
 
-	return value;
+	return (u32)((window >> (48 - (br->bitOffset & 0xf) - count)) & ((1u << count) - 1u));
 }
 
-internal u32 NativeSTR_PeekBits(struct NativeSTRBitReader *br, s32 count)
+internal u32 NativeSTR_ReadBits(struct NativeSTRBitReader *br, s32 count)
 {
-	s32 oldBitOffset = br->bitOffset;
-	u32 value = NativeSTR_ReadBits(br, count);
+	u32 value = NativeSTR_PeekBits(br, count);
 
-	br->bitOffset = oldBitOffset;
+	br->bitOffset += count;
 	return value;
 }
 
@@ -282,22 +290,49 @@ internal s32 NativeSTR_ReadAcCode(struct NativeSTRBitReader *br, u16 *outCode)
 
 internal void NativeSTR_IDCT(const s32 *coefficients, s32 *out)
 {
+	/* Separable form of the 4-way sum: the integer sums are exact, so the result
+	 * (and its single final rounding) is bit-identical to the direct version,
+	 * for ~1/8 of the multiplications; rows of zero coefficients are skipped. */
+	s64 tmp[8][8];
+	u32 rowMask = 0;
 	s32 x;
 	s32 y;
+	s32 u;
+	s32 v;
+
+	for (v = 0; v < 8; v++)
+	{
+		const s32 *row = &coefficients[v * 8];
+
+		if ((row[0] | row[1] | row[2] | row[3] | row[4] | row[5] | row[6] | row[7]) == 0)
+		{
+			continue;
+		}
+
+		rowMask |= 1u << v;
+		for (x = 0; x < 8; x++)
+		{
+			s64 sum = 0;
+
+			for (u = 0; u < 8; u++)
+			{
+				sum += (s64)s_idctBasis[x][u] * row[u];
+			}
+			tmp[v][x] = sum;
+		}
+	}
 
 	for (y = 0; y < 8; y++)
 	{
 		for (x = 0; x < 8; x++)
 		{
 			s64 sum = 0;
-			s32 u;
-			s32 v;
 
 			for (v = 0; v < 8; v++)
 			{
-				for (u = 0; u < 8; u++)
+				if (rowMask & (1u << v))
 				{
-					sum += (s64)s_idctBasis[x][u] * s_idctBasis[y][v] * coefficients[v * 8 + u];
+					sum += (s64)s_idctBasis[y][v] * tmp[v][x];
 				}
 			}
 
@@ -843,6 +878,7 @@ void NativeSTR_Stop(void)
 		s_str.file = NULL;
 	}
 
+	NATIVE_STR_SET_VIDEO_RECT(0, 0, 0, 0);
 	s_str.active = 0;
 	s_str.format = NATIVE_STR_FORMAT_EXTRACTED;
 	s_str.source = NATIVE_STR_SOURCE_NONE;
@@ -869,7 +905,17 @@ s32 NativeSTR_UploadNextFrame(s32 dstX, s32 dstY)
 		return 0;
 	}
 
-	if ((NativeSTR_ReadNextFrame() == 0) || (NativeSTR_DecodeFrame() == 0))
+	NativePerf_BeginScope(NATIVE_PERF_BUCKET_STR_READ);
+	s32 readOk = NativeSTR_ReadNextFrame();
+	NativePerf_EndScope(NATIVE_PERF_BUCKET_STR_READ);
+	if (readOk == 0)
+	{
+		return 0;
+	}
+	NativePerf_BeginScope(NATIVE_PERF_BUCKET_STR_DECODE);
+	s32 decOk = NativeSTR_DecodeFrame();
+	NativePerf_EndScope(NATIVE_PERF_BUCKET_STR_DECODE);
+	if (decOk == 0)
 	{
 		return 0;
 	}
@@ -878,10 +924,13 @@ s32 NativeSTR_UploadNextFrame(s32 dstX, s32 dstY)
 	rect.y = dstY;
 	rect.w = s_str.width;
 	rect.h = s_str.height;
+	NativePerf_BeginScope(NATIVE_PERF_BUCKET_STR_UPLOAD);
+	NATIVE_STR_SET_VIDEO_RECT(rect.x, rect.y, rect.w, rect.h);
 	LoadImage(&rect, s_str.rgb555);
 	// NOTE(aalhendi): Track-preview STR draws these uploaded pixels as same-pass
 	// textured primitives. Retail LoadImage is GPU-visible immediately; refresh
 	// the host VRAM texture at that boundary.
 	NativeRenderer_UpdateVRAM();
+	NativePerf_EndScope(NATIVE_PERF_BUCKET_STR_UPLOAD);
 	return 1;
 }

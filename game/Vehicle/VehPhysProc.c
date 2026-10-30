@@ -197,6 +197,25 @@ CTR_STATIC_ASSERT(ANG_PI == 0x800);
 CTR_STATIC_ASSERT((ANG_TWO_PI - 1) == 0xfff);
 CTR_STATIC_ASSERT(TERRAIN_MUD == 0xe);
 
+// 60fps: ModSDK VehPhysProc_09_PowerSlide_PhysAngular.c ">>3 trick". A per-frame
+// "move 1/8 of the remaining delta" (exponential at 30) split over two 60 Hz
+// frames: 1/16 on odd frames, then 1/8 of (delta * 16/15) on even frames, which
+// undoes the previous 1/16. At 30 this is exactly the original delta >> 3.
+static int VehPhysProc_Fps60_LerpEighth(int delta)
+{
+	if (!FPS60)
+	{
+		return CTR_MipsSra(delta, VEH_PHYS_PROC_DRIFT_ANGLE_LERP_SHIFT);
+	}
+
+	if ((sdata->gGT->timer & 1) != 0)
+	{
+		return CTR_MipsSra(delta, VEH_PHYS_PROC_DRIFT_ANGLE_LERP_SHIFT + 1);
+	}
+
+	return CTR_MipsSra((delta * 16) / 15, VEH_PHYS_PROC_DRIFT_ANGLE_LERP_SHIFT);
+}
+
 static void VehPhysProc_Driving_DecrementTimer(s16 *timer, int elapsed)
 {
 	if (*timer > 0)
@@ -673,7 +692,8 @@ void VehPhysProc_Driving_PhysLinear(struct Thread *thread, struct Driver *driver
 		{
 			// circle button ends timer, if
 			// less than 70 frames (2.3s) remain
-			if (driver->itemRollTimer < VEH_PHYS_PROC_ITEM_ROLL_FAST_STOP_FRAMES)
+			// 60fps: itemRollTimer counts 60 Hz frames (ModSDK VehPhysProc_00_Driving_PhysLinear.c)
+			if (driver->itemRollTimer < FPS_DOUBLE(VEH_PHYS_PROC_ITEM_ROLL_FAST_STOP_FRAMES))
 			{
 				driver->itemRollTimer = 0;
 			}
@@ -697,14 +717,16 @@ void VehPhysProc_Driving_PhysLinear(struct Thread *thread, struct Driver *driver
 
 			// if numHeldItems == 0
 			// wait a full second before next weapon
-			driver->noItemTimer = VEH_PHYS_PROC_WEAPON_COOLDOWN_EMPTY_FRAMES;
+			// 60fps: noItemTimer is decremented per 60 Hz frame above (ModSDK VehPhysProc_00_Driving_PhysLinear.c)
+			driver->noItemTimer = FPS_DOUBLE(VEH_PHYS_PROC_WEAPON_COOLDOWN_EMPTY_FRAMES);
 
 			// If "held item quantity" is zero
 			if (driver->numHeldItems != 0)
 			{
 				// if numHeldItems > 0,
 				// wait 5 frames before next weapon use
-				driver->noItemTimer = VEH_PHYS_PROC_WEAPON_COOLDOWN_STACK_FRAMES;
+				// 60fps: frame duration (ModSDK VehPhysProc_00_Driving_PhysLinear.c)
+				driver->noItemTimer = FPS_DOUBLE(VEH_PHYS_PROC_WEAPON_COOLDOWN_STACK_FRAMES);
 
 				// If you have the Spring weapon
 				if (heldItemID == HELD_ITEM_SPRING)
@@ -749,7 +771,8 @@ CheckJumpButtons:
 			if ((actionsFlagSetCopy & ACTION_JUMP_BUTTON_HELD) == 0)
 			{
 				// 10 frame jump buffer
-				driver->jump_TenBuffer = VEH_PHYS_PROC_JUMP_BUFFER_FRAMES;
+				// 60fps: jump_TenBuffer is decremented per 60 Hz frame (ModSDK VehPhysProc_00_Driving_PhysLinear.c)
+				driver->jump_TenBuffer = FPS_DOUBLE(VEH_PHYS_PROC_JUMP_BUFFER_FRAMES);
 			}
 			goto LAB_8006222c;
 		}
@@ -779,7 +802,8 @@ CheckJumpButtons:
 
 		if (rainCloudEffect != RAIN_CLOUD_EFFECT_JUMP_LOCKOUT)
 		{
-			driver->jump_TenBuffer = VEH_PHYS_PROC_JUMP_BUFFER_FRAMES;
+			// 60fps: frame duration (ModSDK VehPhysProc_00_Driving_PhysLinear.c)
+			driver->jump_TenBuffer = FPS_DOUBLE(VEH_PHYS_PROC_JUMP_BUFFER_FRAMES);
 		LAB_8006222c:
 			actionsFlagSetCopy |= ACTION_JUMP_BUTTON_HELD;
 		}
@@ -1228,7 +1252,8 @@ SkipSetSteer:
 
 	// Change wheel rotation based on StickLX
 	scratchValue = VehPhysJoystick_GetStrengthAbsolute(scratchValue, VEH_PHYS_PROC_WHEEL_ROTATION_STRENGTH, ptrgamepad->rwd);
-	driverBaseSpeedUshort = VehCalc_InterpBySpeed((int)driver->wheelRotation, VEH_PHYS_PROC_WHEEL_ROTATION_INTERP_STEP, CTR_MipsNegLo(scratchValue));
+	// 60fps: half the per-frame interp step (ModSDK VehPhysProc_00_Driving_PhysLinear.c)
+	driverBaseSpeedUshort = VehCalc_InterpBySpeed((int)driver->wheelRotation, FPS_HALF(VEH_PHYS_PROC_WHEEL_ROTATION_INTERP_STEP), CTR_MipsNegLo(scratchValue));
 	driver->wheelRotation = (s16)driverBaseSpeedUshort;
 
 	scratchValue = (int)driver->fireSpeed;
@@ -1263,7 +1288,9 @@ SkipSetSteer:
 		// If base or approximate speed is above the low-speed threshold.
 		if ((approximateSpeed2 > DRIVER_TIRE_COLOR_LOW_SPEED_THRESHOLD) || (approximateSpeed > DRIVER_TIRE_COLOR_LOW_SPEED_THRESHOLD))
 		{
-			driver->tireColorCycleTimer = (s16)CTR_MipsSubLo(driver->tireColorCycleTimer, tireColorStep);
+			// 60fps: per-frame countdown step, halved so the tire color
+			// cycles at the 30 fps rate (not in ModSDK)
+			driver->tireColorCycleTimer = (s16)CTR_MipsSubLo(driver->tireColorCycleTimer, FPS_HALF(tireColorStep));
 		}
 	}
 
@@ -1565,7 +1592,8 @@ void VehPhysProc_PowerSlide_PhysAngular(struct Thread *th, struct Driver *driver
 	{
 		// decrease by 1/8
 		// val = val * 7/8
-		int axisAngleStep = CTR_MipsSra(axisAngleDelta, VEH_PHYS_PROC_DRIFT_ANGLE_LERP_SHIFT);
+		// 60fps: split the per-frame 1/8 over two frames (ModSDK VehPhysProc_09_PowerSlide_PhysAngular.c)
+		int axisAngleStep = VehPhysProc_Fps60_LerpEighth(axisAngleDelta);
 
 		if (axisAngleStep == 0)
 		{
@@ -1707,7 +1735,11 @@ void VehPhysProc_PowerSlide_PhysAngular(struct Thread *th, struct Driver *driver
 	if ((desiredSpinRate == 0) || (driftDirection == 0))
 	{
 		// Interpolate by 1 unit, until zero
-		driver->KartStates.Drifting.numFramesDrifting = VehCalc_InterpBySpeed((int)driver->KartStates.Drifting.numFramesDrifting, 1, 0);
+		// 60fps: numFramesDrifting counts 30 Hz frames (ModSDK VehPhysProc_09_PowerSlide_PhysAngular.c)
+		if (FPS60_HALF_RATE(gGT->timer))
+		{
+			driver->KartStates.Drifting.numFramesDrifting = VehCalc_InterpBySpeed((int)driver->KartStates.Drifting.numFramesDrifting, 1, 0);
+		}
 	}
 
 	// if holding a drift
@@ -1716,7 +1748,11 @@ void VehPhysProc_PowerSlide_PhysAngular(struct Thread *th, struct Driver *driver
 		// if drifting right
 		if (driftDirection < 1)
 		{
-			driver->KartStates.Drifting.numFramesDrifting = (s16)CTR_MipsSubLo((u16)driver->KartStates.Drifting.numFramesDrifting, 1);
+			// 60fps: count 30 Hz frames (ModSDK VehPhysProc_09_PowerSlide_PhysAngular.c)
+			if (FPS60_HALF_RATE(gGT->timer))
+			{
+				driver->KartStates.Drifting.numFramesDrifting = (s16)CTR_MipsSubLo((u16)driver->KartStates.Drifting.numFramesDrifting, 1);
+			}
 
 			if (driver->KartStates.Drifting.numFramesDrifting > 0)
 			{
@@ -1727,7 +1763,11 @@ void VehPhysProc_PowerSlide_PhysAngular(struct Thread *th, struct Driver *driver
 		// if drifting left
 		else
 		{
-			driver->KartStates.Drifting.numFramesDrifting = (s16)CTR_MipsAddLo((u16)driver->KartStates.Drifting.numFramesDrifting, 1);
+			// 60fps: count 30 Hz frames (ModSDK VehPhysProc_09_PowerSlide_PhysAngular.c)
+			if (FPS60_HALF_RATE(gGT->timer))
+			{
+				driver->KartStates.Drifting.numFramesDrifting = (s16)CTR_MipsAddLo((u16)driver->KartStates.Drifting.numFramesDrifting, 1);
+			}
 
 			if (driver->KartStates.Drifting.numFramesDrifting < 0)
 			{
@@ -1810,7 +1850,8 @@ void VehPhysProc_PowerSlide_PhysAngular(struct Thread *th, struct Driver *driver
 
 	int turnAngleDelta = CTR_MipsSubLo(CTR_MipsAddLo(driftTurnAngleBase, driftTurnAngleAssist), driver->turnAngleCurr);
 
-	int turnAngleStep = CTR_MipsSra(turnAngleDelta, VEH_PHYS_PROC_DRIFT_ANGLE_LERP_SHIFT);
+	// 60fps: split the per-frame 1/8 over two frames (ModSDK VehPhysProc_09_PowerSlide_PhysAngular.c)
+	int turnAngleStep = VehPhysProc_Fps60_LerpEighth(turnAngleDelta);
 
 	int turnAngleStepSigned = (s16)turnAngleStep;
 	if (turnAngleDelta != 0)
@@ -1848,10 +1889,11 @@ void VehPhysProc_PowerSlide_PhysAngular(struct Thread *th, struct Driver *driver
 		if (turnWobbleAngleAbs < VEH_PHYS_PROC_TURN_WOBBLE_START_ANGLE_MAX)
 		{
 			// count up for 8 frames
-			driver->turnWobbleTimer = VEH_PHYS_PROC_TURN_WOBBLE_START_TIMER;
+			// 60fps: frame duration doubled, per-frame rate halved (ModSDK VehPhysProc_09_PowerSlide_PhysAngular.c)
+			driver->turnWobbleTimer = FPS_DOUBLE(VEH_PHYS_PROC_TURN_WOBBLE_START_TIMER);
 
 			// distortion, rate of change
-			driver->turnWobbleVelocity = VEH_PHYS_PROC_TURN_WOBBLE_START_VELOCITY;
+			driver->turnWobbleVelocity = FPS_HALF(VEH_PHYS_PROC_TURN_WOBBLE_START_VELOCITY);
 
 			if (driftTurnInput < 0)
 			{
@@ -1887,7 +1929,8 @@ void VehPhysProc_PowerSlide_PhysAngular(struct Thread *th, struct Driver *driver
 	if (driver->turnWobbleTimer == 0)
 	{
 		// nearing spinout sfx
-		driver->turnWobbleVelocity = VEH_PHYS_PROC_TURN_WOBBLE_RETURN_VELOCITY;
+		// 60fps: per-frame rate (ModSDK VehPhysProc_09_PowerSlide_PhysAngular.c)
+		driver->turnWobbleVelocity = FPS_HALF(VEH_PHYS_PROC_TURN_WOBBLE_RETURN_VELOCITY);
 
 		if (0 < driver->turnWobbleAngle)
 		{
@@ -1976,7 +2019,10 @@ void PhysLerpRot(struct Driver *driver, int targetRotW)
 	}
 
 	// Interpolate rotation by speed
-	driver->rotPrev.w = VehCalc_InterpBySpeed((int)driver->rotPrev.w, 8, maxLerpStep);
+	// 60fps: per-frame accel of the rotation velocity, halved (not in ModSDK;
+	// the remainingRot >> 3 above is NOT split like ModSDK does, because the
+	// velocity it feeds is scaled by elapsedTimeMS below, i.e. time-based)
+	driver->rotPrev.w = VehCalc_InterpBySpeed((int)driver->rotPrev.w, FPS_HALF(8), maxLerpStep);
 
 	// Interpolate rotation by speed
 	driver->rotCurr.w = VehCalc_InterpBySpeed((int)driver->rotCurr.w, CTR_MipsSra(CTR_MipsMulLo(driver->rotPrev.w, sdata->gGT->elapsedTimeMS), 5), targetRotW);
@@ -2102,7 +2148,8 @@ void VehPhysProc_PowerSlide_Update(struct Thread *t, struct Driver *d)
 			else
 			{
 				// force exhaust feedback for the failed boost
-				d->failedBoostExhaustTimer = VEH_PHYS_PROC_DRIFT_FAILED_BOOST_EXHAUST_TIMER;
+				// 60fps: counted down per 60 Hz frame in VehEmitter_ShouldSkipExhaust (not in ModSDK)
+				d->failedBoostExhaustTimer = FPS_DOUBLE(VEH_PHYS_PROC_DRIFT_FAILED_BOOST_EXHAUST_TIMER);
 			}
 
 			meterLeft = 0;
@@ -2279,6 +2326,14 @@ void VehPhysProc_SlamWall_Animate(struct Thread *t, struct Driver *d)
 {
 	struct Instance *inst = t->inst;
 
+	// 60fps: model anim data is not doubled, so the crash animation
+	// (animFrame and baked matrixIndex) advances on 30 Hz ticks only
+	// (ModSDK VehPhysProc_18_SlamWall_Animate.c gates matrixIndex++)
+	if (!FPS60_HALF_RATE(sdata->gGT->timer))
+	{
+		return;
+	}
+
 	inst->animFrame = (s16)CTR_MipsAddLo((u16)inst->animFrame, 1);
 
 	d->matrixIndex = (u8)CTR_MipsAddLo(d->matrixIndex, 1);
@@ -2429,8 +2484,13 @@ void VehPhysProc_SpinFirst_PhysAngular(struct Thread *t, struct Driver *d)
 
 	d->numFramesSpentSteering = VEH_PHYS_PROC_STEER_RESET_FRAMES;
 
-	d->rotationSpinRate = (s16)CTR_MipsSubLo((u16)d->rotationSpinRate, CTR_MipsSra(d->rotationSpinRate, 3));
-	d->turnWobbleAngle = (s16)CTR_MipsSubLo((u16)d->turnWobbleAngle, CTR_MipsSra(d->turnWobbleAngle, 3));
+	// 60fps: per-frame 1/8 decay, on 30 Hz ticks only
+	// (ModSDK VehPhysProc_22_SpinFirst_PhysAngular.c / VehPhysProc_27_SpinLast_PhysAngular.c)
+	if (FPS60_HALF_RATE(sdata->gGT->timer))
+	{
+		d->rotationSpinRate = (s16)CTR_MipsSubLo((u16)d->rotationSpinRate, CTR_MipsSra(d->rotationSpinRate, 3));
+		d->turnWobbleAngle = (s16)CTR_MipsSubLo((u16)d->turnWobbleAngle, CTR_MipsSra(d->turnWobbleAngle, 3));
+	}
 
 	d->turnAngleCurr =
 	    (s16)CTR_MipsSubLo(CTR_MipsAddLo(CTR_MipsAddLo((u16)d->turnAngleCurr, (u16)d->KartStates.Spinning.driftSpinRate), ANG_PI) & (ANG_TWO_PI - 1), ANG_PI);
@@ -2492,13 +2552,14 @@ void VehPhysProc_SpinFirst_Init(struct Thread *t, struct Driver *d)
 
 	// if spinning left
 	d->KartStates.Spinning.spinDir = 1;
-	d->KartStates.Spinning.driftSpinRate = VEH_PHYS_PROC_SPIN_INITIAL_RATE;
+	// 60fps: per-frame turnAngleCurr step, halved (ModSDK VehPhysProc_24_SpinFirst_Init.c)
+	d->KartStates.Spinning.driftSpinRate = FPS_HALF(VEH_PHYS_PROC_SPIN_INITIAL_RATE);
 
 	if (d->ampTurnState < 0)
 	{
 		// if spinning right
 		d->KartStates.Spinning.spinDir = -1;
-		d->KartStates.Spinning.driftSpinRate = -VEH_PHYS_PROC_SPIN_INITIAL_RATE;
+		d->KartStates.Spinning.driftSpinRate = FPS_HALF(-VEH_PHYS_PROC_SPIN_INITIAL_RATE);
 	}
 
 	if ((s8)d->simpTurnState < 1)
@@ -2560,8 +2621,13 @@ void VehPhysProc_SpinLast_PhysAngular(struct Thread *t, struct Driver *d)
 
 	d->numFramesSpentSteering = VEH_PHYS_PROC_STEER_RESET_FRAMES;
 
-	d->rotationSpinRate = (s16)CTR_MipsSubLo((u16)d->rotationSpinRate, CTR_MipsSra(d->rotationSpinRate, 3));
-	d->turnWobbleAngle = (s16)CTR_MipsSubLo((u16)d->turnWobbleAngle, CTR_MipsSra(d->turnWobbleAngle, 3));
+	// 60fps: per-frame 1/8 decay, on 30 Hz ticks only
+	// (ModSDK VehPhysProc_22_SpinFirst_PhysAngular.c / VehPhysProc_27_SpinLast_PhysAngular.c)
+	if (FPS60_HALF_RATE(sdata->gGT->timer))
+	{
+		d->rotationSpinRate = (s16)CTR_MipsSubLo((u16)d->rotationSpinRate, CTR_MipsSra(d->rotationSpinRate, 3));
+		d->turnWobbleAngle = (s16)CTR_MipsSubLo((u16)d->turnWobbleAngle, CTR_MipsSra(d->turnWobbleAngle, 3));
+	}
 
 	d->ampTurnState = d->rotationSpinRate;
 
@@ -2572,9 +2638,10 @@ void VehPhysProc_SpinLast_PhysAngular(struct Thread *t, struct Driver *d)
 			d->KartStates.Spinning.driftSpinRate = (s16)CTR_MipsSra(CTR_MipsNegLo(CTR_MipsSll(driftAngleCurr, VEH_PHYS_PROC_SPIN_RECENTER_RATE_NUM_SHIFT)),
 			                                                        VEH_PHYS_PROC_SPIN_RECENTER_RATE_DEN_SHIFT);
 
-			if (d->KartStates.Spinning.driftSpinRate < VEH_PHYS_PROC_SPIN_MIN_RECENTER_RATE)
+			// 60fps: per-frame minimum step, halved (ModSDK VehPhysProc_27_SpinLast_PhysAngular.c)
+			if (d->KartStates.Spinning.driftSpinRate < FPS_HALF(VEH_PHYS_PROC_SPIN_MIN_RECENTER_RATE))
 			{
-				d->KartStates.Spinning.driftSpinRate = VEH_PHYS_PROC_SPIN_MIN_RECENTER_RATE;
+				d->KartStates.Spinning.driftSpinRate = FPS_HALF(VEH_PHYS_PROC_SPIN_MIN_RECENTER_RATE);
 			}
 		}
 
@@ -2594,9 +2661,10 @@ void VehPhysProc_SpinLast_PhysAngular(struct Thread *t, struct Driver *d)
 			d->KartStates.Spinning.driftSpinRate = (s16)CTR_MipsSra(CTR_MipsNegLo(CTR_MipsSll(driftAngleCurr, VEH_PHYS_PROC_SPIN_RECENTER_RATE_NUM_SHIFT)),
 			                                                        VEH_PHYS_PROC_SPIN_RECENTER_RATE_DEN_SHIFT);
 
-			if (d->KartStates.Spinning.driftSpinRate > -VEH_PHYS_PROC_SPIN_MIN_RECENTER_RATE)
+			// 60fps: per-frame minimum step, halved (ModSDK VehPhysProc_27_SpinLast_PhysAngular.c)
+			if (d->KartStates.Spinning.driftSpinRate > FPS_HALF(-VEH_PHYS_PROC_SPIN_MIN_RECENTER_RATE))
 			{
-				d->KartStates.Spinning.driftSpinRate = -VEH_PHYS_PROC_SPIN_MIN_RECENTER_RATE;
+				d->KartStates.Spinning.driftSpinRate = FPS_HALF(-VEH_PHYS_PROC_SPIN_MIN_RECENTER_RATE);
 			}
 		}
 
@@ -2688,6 +2756,14 @@ void VehPhysProc_SpinStop_PhysAngular(struct Thread *t, struct Driver *d)
 void VehPhysProc_SpinStop_Animate(struct Thread *t, struct Driver *d)
 {
 	struct Instance *inst = t->inst;
+
+	// 60fps: model anim data is not doubled, so the steer sweep (animFrame
+	// +-5 / interp by 2 per frame) advances on 30 Hz ticks only (replaces
+	// ModSDK VehPhysProc_32_SpinStop_Animate.c numFrames FPS_DOUBLE)
+	if (!FPS60_HALF_RATE(sdata->gGT->timer))
+	{
+		return;
+	}
 
 	int numFrames = VehFrameInst_GetNumAnimFrames(inst, inst->animIndex);
 

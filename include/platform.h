@@ -23,6 +23,13 @@ void Platform_PresentVRAMDisplay(void);
 void Platform_PinVRAMDisplayFrames(int frameCount);
 void Platform_PinVRAMDisplayRect(int x, int y, int w, int h, int frameCount);
 int Platform_GetVBlankCount(void);
+/* Emulated vblanks the next flip waits for: 2 (30 fps, retail) or 3 (20 fps,
+ * the 3DS frame cap: n3ds_backend.h's frame-pace block). Called once per
+ * submit; also measures the frame just finished for the cap's AUTO mode. */
+int Platform_FlipVBlanks(void);
+/* Emulated vblanks between the last two flips (1 = the last frame was shown
+ * at 60 fps). The 60 fps game logic (game/MAIN/MainFps60.c) keys off it. */
+int Platform_LastFrameVBlanks(void);
 void Platform_WaitUntilVBlank(int targetVBlank);
 void Platform_PollHostEvents(void);
 int Platform_PollInput(void);

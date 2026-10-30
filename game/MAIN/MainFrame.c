@@ -273,7 +273,8 @@ void MainFrame_GameLogic(struct GameTracker *gGT, struct GamepadSystem *gGamepad
 		{
 			psVar9 = (struct Driver *)psVar12->object;
 
-			if (psVar9->clockSend)
+			// 60fps: a 30 Hz-world countdown (see include/ctr_fps60.h).
+			if (psVar9->clockSend && g_fps60Full)
 			{
 				psVar9->clockSend--;
 			}
@@ -310,7 +311,11 @@ void MainFrame_GameLogic(struct GameTracker *gGT, struct GamepadSystem *gGamepad
 #if defined(CTR_NATIVE)
 				DISPLAY_Blur_Main(pushBuffer, -uVar3);
 #endif
-				psVar9->clockFlash--;
+				// 60fps: a 30 Hz-world countdown.
+				if (g_fps60Full)
+				{
+					psVar9->clockFlash--;
+				}
 			}
 		LAB_80034e74:
 			pushBuffer = pushBuffer + 1;
@@ -341,6 +346,8 @@ void MainFrame_GameLogic(struct GameTracker *gGT, struct GamepadSystem *gGamepad
 		// before msInThisLEV and elapsedEventTime consume it.
 		NativeReplayScheduler_ConsumeFrameElapsedTimeMS(&gGT->elapsedTimeMS);
 #endif
+		// 60fps: the 30 Hz world's clock (timer lag, accumulated elapsed).
+		Fps60_AfterTimerTick(gGT);
 		gGT->msInThisLEV += gGT->elapsedTimeMS;
 		if (gGT->trafficLightsTimer < 1)
 		{
@@ -363,9 +370,10 @@ void MainFrame_GameLogic(struct GameTracker *gGT, struct GamepadSystem *gGamepad
 					}
 					else
 					{
-						uVar3 = gGT->timer;
+						// 60fps: retail frames (30 Hz timer), once per 30 Hz tick.
+						uVar3 = Fps60_Timer30();
 						// NOTE(aalhendi): ASM-verified NTSC-U 926 0x80034f84-0x80034fec for frozen-time tick SFX.
-						if (uVar3 == (uVar3 / 6) * 6)
+						if (g_fps60Full && (uVar3 == (uVar3 / 6) * 6))
 						{
 							if (uVar3 == (uVar3 / 0xc) * 0xc)
 							{
@@ -385,8 +393,9 @@ void MainFrame_GameLogic(struct GameTracker *gGT, struct GamepadSystem *gGamepad
 			gGT->elapsedEventTime = 0;
 		}
 
-		CTR_CycleTex_AllModels(-1, (struct Model **)sdata->PLYROBJECTLIST, gGT->timer);
-		CTR_CycleTex_AllModels(gGT->level1->numModels, gGT->level1->ptrModelsPtrArray, gGT->timer);
+		// 60fps: texture cycles count retail frames (ModSDK CTR_04/05 + MainFrame "Emulate 30fps").
+		CTR_CycleTex_AllModels(-1, (struct Model **)sdata->PLYROBJECTLIST, Fps60_Timer30());
+		CTR_CycleTex_AllModels(gGT->level1->numModels, gGT->level1->ptrModelsPtrArray, Fps60_Timer30());
 
 		psVar8 = 0;
 		psVar9 = 0;
@@ -436,6 +445,19 @@ void MainFrame_GameLogic(struct GameTracker *gGT, struct GamepadSystem *gGamepad
 			    // if threads exist
 			    (gGT->threadBuckets[iVar4].thread != 0))
 			{
+				// 60fps: only the drivers, AI, camera and turbo flames tick
+				// at 60; every other bucket is the 30 Hz world.
+				int bucket30 = (iVar4 != PLAYER) && (iVar4 != ROBOT) && (iVar4 != CAMERA) && (iVar4 != TURBO);
+
+				if (bucket30 && !g_fps60Full)
+				{
+					continue;
+				}
+				if (bucket30)
+				{
+					Fps60_Enter30();
+				}
+
 				if (iVar4 == 0)
 				{
 					for (psVar12 = gGT->threadBuckets[iVar4].thread; psVar12 != 0; psVar12 = psVar12->siblingThread)
@@ -470,19 +492,36 @@ void MainFrame_GameLogic(struct GameTracker *gGT, struct GamepadSystem *gGamepad
 				}
 
 				ThTick_RunBucket(gGT->threadBuckets[iVar4].thread);
+
+				if (bucket30)
+				{
+					Fps60_Leave30();
+				}
 			}
 		}
 
 #if defined(CTR_NATIVE)
 		BOTS_UpdateGlobals();
 #endif
-		GhostTape_WriteMoves(0);
+		// 60fps: the ghost recorder samples retail frames (30 Hz world).
+		if (g_fps60Full)
+		{
+			Fps60_Enter30();
+			GhostTape_WriteMoves(0);
+			Fps60_Leave30();
+		}
 		gGT->unk1cc4[4] = (u32)(gGT->unk1cc4[4] * 10000) / 0x147e;
 
 #if defined(CTR_NATIVE)
 
 
-		Particle_UpdateAllParticles();
+		// 60fps: particles are the 30 Hz world (Particle_Init thins 60 Hz spawns).
+		if (g_fps60Full)
+		{
+			Fps60_Enter30();
+			Particle_UpdateAllParticles();
+			Fps60_Leave30();
+		}
 
 #endif
 	}
@@ -491,7 +530,10 @@ void MainFrame_GameLogic(struct GameTracker *gGT, struct GamepadSystem *gGamepad
 		psVar12 = gGT->threadBuckets[AKUAKU].thread;
 		if (psVar12 != 0)
 		{
+			// 60fps: never at 60 when paused; the swap keeps the 30 Hz timer continuous.
+			Fps60_Enter30();
 			ThTick_RunBucket(psVar12);
+			Fps60_Leave30();
 		}
 	}
 
@@ -499,9 +541,12 @@ void MainFrame_GameLogic(struct GameTracker *gGT, struct GamepadSystem *gGamepad
 	if (uVar5 != 0)
 	{
 #if defined(CTR_NATIVE)
-		if ((gGT->gameMode1 & PAUSE_ALL) == 0)
+		// 60fps: 30 Hz world.
+		if (((gGT->gameMode1 & PAUSE_ALL) == 0) && g_fps60Full)
 		{
+			Fps60_Enter30();
 			RB_Bubbles_RoosTubes();
+			Fps60_Leave30();
 		}
 #endif
 		if (gGT->threadBuckets[BURST].thread != 0)

@@ -923,7 +923,9 @@ void Platform_PollHostEvents(void)
 int Platform_PollInput(void)
 {
 	Platform_PollHostEvents();
+	NativePerf_BeginScope(NATIVE_PERF_BUCKET_POLL_INPUTUPD);
 	Platform_InputUpdate();
+	NativePerf_EndScope(NATIVE_PERF_BUCKET_POLL_INPUTUPD);
 	return 1;
 }
 
@@ -984,10 +986,107 @@ internal void Native_EnsureVBlankTarget(void)
 	}
 }
 
+#if defined(__3DS__)
+/*
+ * Background voice-cache fill (NativeAudio_VoiceCacheBackgroundStep): the boot
+ * hold no longer reads the ~20k sectors of voice lines, so they load here, in
+ * the part of a wait the frame would have slept through, one bounded step at
+ * a time. A step is at most NATIVE_VOICE_FILL_STEP_SECTORS of SD reads (or one
+ * track's de-interleave), and one only starts with at least
+ * NATIVE_VOICE_FILL_MIN_US left before the vblank target, so a slow card read
+ * eats margin, not the frame. Never during a level load (the reads would
+ * queue behind or ahead of the load's own on the same card), and a no-op on
+ * an Old 3DS, where the heap leaves no room for the cache at all.
+ */
+#define NATIVE_VOICE_FILL_STEP_SECTORS 8
+#define NATIVE_VOICE_FILL_MIN_US       9000
+
+/*
+ * Measured step cost (Old-3DS class, g_dbg_voiceFillPace, dumpreq `vcpace`,
+ * default on). On the Old 3DS a step's SD read is slow and varies a lot (the
+ * card, the FS session shared with the log flush): with a fixed 9 ms window a
+ * step that took longer ran the frame past its vblank target, and the frame
+ * then waited for the NEXT vblank -- 20 fps menus showed 4-vblank frames
+ * (avgTotalUs 58.6 ms against the 50 ms cap). The window is now the larger of
+ * 9 ms and the worst recent step plus a margin; the worst decays by 1/16 per
+ * wait so one slow read does not park the fill for good. A New 3DS keeps the
+ * fixed window. [VFILL] reports steps, worst/avg step and overruns.
+ */
+#define NATIVE_VOICE_FILL_MARGIN_US 2000
+int g_dbg_voiceFillPace = 1;
+global_variable u32 s_voiceFillWorstUs = 0; /* decaying worst step cost */
+global_variable u32 s_vfSteps = 0;
+global_variable u32 s_vfOverruns = 0;
+global_variable u32 s_vfMaxUs = 0;
+global_variable u64 s_vfTotalUs = 0;
+global_variable u32 s_vfDeferred = 0; /* waits that had time for the fixed window but not the measured one */
+
+int N3DS_FramePaceOldClass(void);
+
+internal int Native_VoiceFillAllowed(void)
+{
+	return NativeAudio_VoiceCacheBackgroundPending() && (sdata != NULL) && (sdata->Loading.stage == LOAD_IDLE);
+}
+
+/* [VFILL] window line (native_perf.c, after [PACE]); resets the window. Empty
+ * string when the window ran no step and none was deferred. */
+void Native_VoiceFillFormat(char *out, int outSize)
+{
+	out[0] = '\0';
+	if ((s_vfSteps != 0) || (s_vfDeferred != 0))
+	{
+		snprintf(out, (size_t)outSize, "[VFILL] steps=%u avgUs=%u maxUs=%u overruns=%u deferred=%u windowUs=%u pace=%d", (unsigned)s_vfSteps,
+		         (unsigned)((s_vfSteps != 0) ? (s_vfTotalUs / s_vfSteps) : 0u), (unsigned)s_vfMaxUs, (unsigned)s_vfOverruns, (unsigned)s_vfDeferred,
+		         (unsigned)s_voiceFillWorstUs, g_dbg_voiceFillPace);
+	}
+	s_vfSteps = 0;
+	s_vfOverruns = 0;
+	s_vfMaxUs = 0;
+	s_vfTotalUs = 0;
+	s_vfDeferred = 0;
+}
+#endif
+
+/*
+ * Frame-pace bookkeeping (3DS, see n3ds_backend.h's frame-pace block): the
+ * performance-counter time spent inside Native_WaitUntilVBlankTarget since the
+ * last flip -- sleeping, spinning, or filling the voice cache in time the frame
+ * would have slept -- and when that flip was. Platform_FlipVBlanks turns the
+ * pair into the frame's WORK. Two counter reads per wait.
+ */
+global_variable u64 s_paceIdleCounter = 0;
+global_variable u64 s_paceLastFlipCounter = 0;
+
+internal void Native_WaitUntilVBlankTargetBody(void);
+
 internal void Native_WaitUntilVBlankTarget(void)
+{
+	const u64 t0 = SDL_GetPerformanceCounter();
+
+	Native_WaitUntilVBlankTargetBody();
+	s_paceIdleCounter += SDL_GetPerformanceCounter() - t0;
+}
+
+internal void Native_WaitUntilVBlankTargetBody(void)
 {
 	const u64 freq = SDL_GetPerformanceFrequency();
 	const u64 spinWindow = Native_CounterFromMicroseconds(freq, NATIVE_VSYNC_SPIN_US);
+#if defined(__3DS__)
+	const u64 voiceFillMinWindow = Native_CounterFromMicroseconds(freq, NATIVE_VOICE_FILL_MIN_US);
+	u64 voiceFillWindow = voiceFillMinWindow;
+	const int voiceFillPaced = g_dbg_voiceFillPace && N3DS_FramePaceOldClass();
+
+	if (voiceFillPaced)
+	{
+		const u32 needUs = s_voiceFillWorstUs + NATIVE_VOICE_FILL_MARGIN_US;
+
+		if (needUs > NATIVE_VOICE_FILL_MIN_US)
+		{
+			voiceFillWindow = Native_CounterFromMicroseconds(freq, needUs);
+		}
+		s_voiceFillWorstUs -= s_voiceFillWorstUs / 16u;
+	}
+#endif
 
 	NativePerf_BeginScope(NATIVE_PERF_BUCKET_VSYNC_WAIT);
 	while (1)
@@ -1003,6 +1102,40 @@ internal void Native_WaitUntilVBlankTarget(void)
 		}
 
 		remaining = s_nextVBlankCounter - now;
+#if defined(__3DS__)
+		if ((remaining > voiceFillWindow) && Native_VoiceFillAllowed())
+		{
+			u64 stepEnd;
+			u32 stepUs;
+
+			NativePerf_EndScope(NATIVE_PERF_BUCKET_VSYNC_WAIT);
+			NativePerf_BeginScope(NATIVE_PERF_BUCKET_VOICE_CACHE_FILL);
+			NativeAudio_VoiceCacheBackgroundStep(NATIVE_VOICE_FILL_STEP_SECTORS);
+			NativePerf_EndScope(NATIVE_PERF_BUCKET_VOICE_CACHE_FILL);
+			NativePerf_BeginScope(NATIVE_PERF_BUCKET_VSYNC_WAIT);
+
+			stepEnd = SDL_GetPerformanceCounter();
+			stepUs = (u32)(((stepEnd - now) * 1000000ull) / freq);
+			s_vfSteps++;
+			s_vfTotalUs += stepUs;
+			s_vfMaxUs = (stepUs > s_vfMaxUs) ? stepUs : s_vfMaxUs;
+			s_vfOverruns += (stepEnd >= s_nextVBlankCounter) ? 1u : 0u;
+			if (voiceFillPaced)
+			{
+				const u32 needUs = ((stepUs > s_voiceFillWorstUs) ? stepUs : s_voiceFillWorstUs) + NATIVE_VOICE_FILL_MARGIN_US;
+
+				s_voiceFillWorstUs = (stepUs > s_voiceFillWorstUs) ? stepUs : s_voiceFillWorstUs;
+				voiceFillWindow = Native_CounterFromMicroseconds(freq, (needUs > NATIVE_VOICE_FILL_MIN_US) ? needUs : NATIVE_VOICE_FILL_MIN_US);
+			}
+			continue;
+		}
+		if (voiceFillPaced && (remaining > voiceFillMinWindow) && (voiceFillWindow > voiceFillMinWindow) && Native_VoiceFillAllowed())
+		{
+			/* Once per wait: the next pass is past this branch's window. */
+			s_vfDeferred++;
+			voiceFillWindow = (u64)-1;
+		}
+#endif
 		if (remaining <= spinWindow)
 		{
 			// NOTE(aalhendi): SDL_Delay can wake late. Sleep while safely far
@@ -1026,11 +1159,16 @@ internal void Native_WaitUntilVBlankTarget(void)
 
 internal void Native_EmitVBlank(void)
 {
+	NativePerf_BeginScope(NATIVE_PERF_BUCKET_VBL_EMIT);
+	NativePerf_BeginScope(NATIVE_PERF_BUCKET_VBL_RCNT);
 	NativeRCnt_EmitVBlank();
+	NativePerf_EndScope(NATIVE_PERF_BUCKET_VBL_RCNT);
 
 	if (vsync_callback != NULL)
 	{
+		NativePerf_BeginScope(NATIVE_PERF_BUCKET_VBL_CALLBACK);
 		vsync_callback();
+		NativePerf_EndScope(NATIVE_PERF_BUCKET_VBL_CALLBACK);
 	}
 
 	NativeAudio_StepVBlank();
@@ -1047,6 +1185,7 @@ internal void Native_EmitVBlank(void)
 		N3DS_DebugLog(line);
 	}
 #endif
+	NativePerf_EndScope(NATIVE_PERF_BUCKET_VBL_EMIT);
 }
 
 internal int Native_CatchUpDueVBlanks(void)
@@ -1148,6 +1287,61 @@ void N3DS_DebugGameState(int *level, unsigned *mode, int *mainState, int *loadSt
 int Platform_GetVBlankCount(void)
 {
 	return s_nativeVBlankCount;
+}
+
+/* Emulated vblanks between the last two submits (Platform_FlipVBlanks). The
+ * game's 60 fps logic (game/MAIN/MainFps60.c) runs a frame at 60 Hz after a
+ * frame that took 1. Only the 3DS ever shows a frame for a single vblank. */
+global_variable int s_paceLastFlipVBlank = -1;
+global_variable int s_paceLastFrameVBlanks = 2;
+
+int Platform_LastFrameVBlanks(void)
+{
+#if defined(__3DS__)
+	return s_paceLastFrameVBlanks;
+#else
+	return 2;
+#endif
+}
+
+/* The retail loading stage, for instruments outside the game TUs (the disc
+ * read log tags its slow reads with it). -1 before sdata exists. */
+int Platform_LoadStageForLog(void)
+{
+	return (sdata != NULL) ? (int)sdata->Loading.stage : -1;
+}
+
+int Platform_FlipVBlanks(void)
+{
+	const u64 now = SDL_GetPerformanceCounter();
+	const u64 last = s_paceLastFlipCounter;
+	const u64 idle = s_paceIdleCounter;
+
+	if (s_paceLastFlipVBlank >= 0)
+	{
+		const int d = s_nativeVBlankCount - s_paceLastFlipVBlank;
+
+		s_paceLastFrameVBlanks = (d < 1) ? 1 : d;
+	}
+	s_paceLastFlipVBlank = s_nativeVBlankCount;
+	s_paceLastFlipCounter = now;
+	s_paceIdleCounter = 0;
+#if defined(__3DS__)
+	if (last != 0)
+	{
+		const u64 freq = SDL_GetPerformanceFrequency();
+		const u64 period = now - last;
+		const u64 work = (idle < period) ? (period - idle) : 0;
+		const u64 workUs = (freq != 0) ? ((work * 1000000) / freq) : 0;
+
+		N3DS_FramePaceNoteFrame((workUs > 0xFFFFFFFFull) ? 0xFFFFFFFFu : (unsigned)workUs);
+	}
+	return N3DS_FramePaceNextFlip();
+#else
+	(void)last;
+	(void)idle;
+	return 2;
+#endif
 }
 
 void Platform_WaitUntilVBlank(int targetVBlank)

@@ -340,7 +340,10 @@ UpdateTrackerState:
 	// set pointer of the missile or warpball chasing the player
 	d->thTrackingMe = trackerTh;
 
-	if (timer != 0)
+	// 60fps: the timer indexes trackerAnim1/2 per retail frame: count every
+	// other frame (ModSDK UI_26_TrackerSelf doubles the 12 / 8 resets, which
+	// would read past the 8 / 11-entry anim tables)
+	if ((timer != 0) && FPS60_HALF_RATE(gGT->timer))
 	{
 		data.trackerTimer[driverID]--;
 	}
@@ -378,14 +381,15 @@ UpdateTrackerState:
 		trackerDistance = (s16)missileDist;
 		data.trackerDist[driverID] = trackerDistance;
 
-		beepRate = UI_TRACKER_BEEP_RATE_NEAR;
+		// 60fps: rates in 60 Hz frames (ModSDK UI_26_TrackerSelf)
+		beepRate = FPS_DOUBLE(UI_TRACKER_BEEP_RATE_NEAR);
 		if (missileDist > UI_TRACKER_BEEP_DIST_NEAR_MAX)
 		{
-			beepRate = UI_TRACKER_BEEP_RATE_MID;
+			beepRate = FPS_DOUBLE(UI_TRACKER_BEEP_RATE_MID);
 		}
 		if (missileDist > UI_TRACKER_BEEP_DIST_MID_MAX)
 		{
-			beepRate = UI_TRACKER_BEEP_RATE_FAR;
+			beepRate = FPS_DOUBLE(UI_TRACKER_BEEP_RATE_FAR);
 		}
 
 		// red

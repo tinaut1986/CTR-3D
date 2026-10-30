@@ -85,10 +85,12 @@ void MainFrame_RenderFrame(struct GameTracker *gGT, struct GamepadSystem *gGamep
 
 	MAINFRAME_PERF_BEGIN(NATIVE_PERF_BUCKET_MAINFRAME_SETUP);
 	MAINFRAME_LOG_CHECKPOINT("SETUP");
+	MAINFRAME_PERF_BEGIN(NATIVE_PERF_BUCKET_SETUP_MISC);
 	DrawUnpluggedMsg(gGT, gGamepads);
 	DrawFinalLap(gGT);
 
 	ElimBG_HandleState(gGT);
+	MAINFRAME_PERF_END(NATIVE_PERF_BUCKET_SETUP_MISC);
 
 	if (lev != 0)
 	{
@@ -97,7 +99,9 @@ void MainFrame_RenderFrame(struct GameTracker *gGT, struct GamepadSystem *gGamep
 
 	if ((gGT->renderFlags & RENDER_FLAG_VISMEM_REFRESH_MASK) != 0)
 	{
+		MAINFRAME_PERF_BEGIN(NATIVE_PERF_BUCKET_SETUP_VISMEM);
 		MainFrame_VisMemFullFrame(gGT, gGT->level1);
+		MAINFRAME_PERF_END(NATIVE_PERF_BUCKET_SETUP_VISMEM);
 	}
 
 
@@ -107,11 +111,15 @@ void MainFrame_RenderFrame(struct GameTracker *gGT, struct GamepadSystem *gGamep
 		{
 			if (lev != 0)
 			{
-				CTR_CycleTex_LEV(lev->ptr_anim_tex, gGT->timer);
+				// 60fps: retail frames (ModSDK CTR_04_CycleTex_LEV).
+				MAINFRAME_PERF_BEGIN(NATIVE_PERF_BUCKET_SETUP_CYCLETEX);
+				CTR_CycleTex_LEV(lev->ptr_anim_tex, Fps60_Timer30());
+				MAINFRAME_PERF_END(NATIVE_PERF_BUCKET_SETUP_CYCLETEX);
 			}
 		}
 	}
 
+	MAINFRAME_PERF_BEGIN(NATIVE_PERF_BUCKET_SETUP_MENU);
 	if ((sdata->ptrActiveMenu != 0) || ((gGT->gameMode1 & END_OF_RACE) != 0))
 	{
 		RECTMENU_CollectInput();
@@ -124,10 +132,13 @@ void MainFrame_RenderFrame(struct GameTracker *gGT, struct GamepadSystem *gGamep
 			RECTMENU_ProcessState();
 		}
 	}
+	MAINFRAME_PERF_END(NATIVE_PERF_BUCKET_SETUP_MENU);
 
+	MAINFRAME_PERF_BEGIN(NATIVE_PERF_BUCKET_SETUP_MISC);
 	RainLogic(gGT);
 	DropRain_MakeSound(gGT);
 	MenuHighlight();
+	MAINFRAME_PERF_END(NATIVE_PERF_BUCKET_SETUP_MISC);
 	MAINFRAME_PERF_END(NATIVE_PERF_BUCKET_MAINFRAME_SETUP);
 
 	MAINFRAME_PERF_BEGIN(NATIVE_PERF_BUCKET_MAINFRAME_EFFECTS);
@@ -266,9 +277,12 @@ void MainFrame_RenderFrame(struct GameTracker *gGT, struct GamepadSystem *gGamep
 		if (sdata->Loading.stage == LOAD_IDLE)
 		{
 			// If game is not paused
-			if ((gGT->gameMode1 & PAUSE_ALL) == 0)
+			// 60fps: AI item use and its cooldowns are the 30 Hz world.
+			if (((gGT->gameMode1 & PAUSE_ALL) == 0) && g_fps60Full)
 			{
+				Fps60_Enter30();
 				PickupBots_Update();
+				Fps60_Leave30();
 			}
 
 #if defined(CTR_NATIVE)
@@ -530,7 +544,11 @@ void DrawFinalLap(struct GameTracker *gGT)
 		// and by doing this, "FINAL LAP" draws under the character icons instead
 		DecalFont_DrawLineOT(sdata->lngStrings[LNG_FINAL_LAP], resultPos.x, resultPos.y, FONT_BIG, (JUSTIFY_CENTER | ORANGE), pb->ptrOT);
 
-		sdata->finalLapTextTimer[i]--;
+		// 60fps: 90 retail frames at any rate (drawn every frame).
+		if (FPS60_HALF_RATE(gGT->timer))
+		{
+			sdata->finalLapTextTimer[i]--;
+		}
 	}
 
 #if defined(CTR_NATIVE) && CTR_NATIVE_GTE_CAPTURE
@@ -604,7 +622,8 @@ void RenderAllWeather(struct GameTracker *gGT)
 		return;
 	}
 
-	RenderWeather(&gGT->pushBuffer[0], &gGT->backBuffer->primMem, &gGT->rainBuffer[0], numPlyrCurrGame, gGT->gameMode1 & PAUSE_ALL);
+	// 60fps: the drops move on 30 Hz-world frames only (nonzero = draw, no update).
+	RenderWeather(&gGT->pushBuffer[0], &gGT->backBuffer->primMem, &gGT->rainBuffer[0], numPlyrCurrGame, (gGT->gameMode1 & PAUSE_ALL) | (g_fps60Full ? 0 : 1));
 }
 
 void RenderAllConfetti(struct GameTracker *gGT)
@@ -1309,20 +1328,23 @@ void RenderAllLevelGeometry(struct GameTracker *gGT, struct Level *level1, struc
 
 		// === Temporary 60FPS macros ===
 		// Emulate 30fps on 60fps for SCVert and OVert
+		// 60fps: Fps60_Timer30() is that 30fps clock (here and 2P-4P below).
 
 		// if no SCVert
+		MAINFRAME_PERF_BEGIN(NATIVE_PERF_BUCKET_LEVEL_ANIMATE);
 		if ((level1->configFlags & 4) == 0)
 		{
 			// assume OVert (no primitives generated here)
-			AnimateWater1P(gGT->timer, level1->numWaterVertices, level1->ptr_water, level1->ptr_tex_waterEnvMap, gGT->visMem1->visOVertList[0]);
+			AnimateWater1P(Fps60_Timer30(), level1->numWaterVertices, level1->ptr_water, level1->ptr_tex_waterEnvMap, gGT->visMem1->visOVertList[0]);
 		}
 
 		// if SCVert
 		else
 		{
 			// draw SCVert (no primitives generated here
-			AnimateQuad(gGT->timer << 7, level1->numSCVert, level1->ptrSCVert, gGT->visMem1->visSCVertList[0]);
+			AnimateQuad(Fps60_Timer30() << 7, level1->numSCVert, level1->ptrSCVert, gGT->visMem1->visSCVertList[0]);
 		}
+		MAINFRAME_PERF_END(NATIVE_PERF_BUCKET_LEVEL_ANIMATE);
 
 		// camera of player 1
 		pushBuffer = &gGT->pushBuffer[0];
@@ -1391,11 +1413,13 @@ void RenderAllLevelGeometry(struct GameTracker *gGT, struct Level *level1, struc
 		}
 #endif
 
+		MAINFRAME_PERF_BEGIN(NATIVE_PERF_BUCKET_LEVEL_RENDERLISTS);
 		RenderLists_PreInit();
 		gGT->bspLeafsDrawn = 0;
 
 		gGT->bspLeafsDrawn += RenderLists_Init1P2P(ptr_mesh_info->bspRoot, gGT->visMem1->visLeafList[0], pushBuffer, (u32)&gGT->LevRenderLists[0],
 		                                           gGT->visMem1->bspList[0], numPlyrCurrGame);
+		MAINFRAME_PERF_END(NATIVE_PERF_BUCKET_LEVEL_RENDERLISTS);
 
 #if defined(CTR_NATIVE) && defined(CTR_NATIVE_TRACK_RENDERER) && CTR_NATIVE_TRACK_RENDERER
 		// Native track renderer (rung 3a step 1): per-frame camera + visibility
@@ -1416,7 +1440,9 @@ void RenderAllLevelGeometry(struct GameTracker *gGT, struct Level *level1, struc
 			// the compiler doesn't flag a direct incompatible-pointer-type cast
 			// as a strict-aliasing hazard for what is actually the same object
 			// DrawLevelOvr1P below already reads through its own void* parameter.
+			MAINFRAME_PERF_BEGIN(NATIVE_PERF_BUCKET_LEVEL_TRACK_RECORD);
 			NativeTrackFrame_Record(gGT, ptr_mesh_info, (struct DrawLevelOvr1PRenderList *)(void *)&gGT->LevRenderLists[0], pushBuffer);
+			MAINFRAME_PERF_END(NATIVE_PERF_BUCKET_LEVEL_TRACK_RECORD);
 		}
 #endif
 
@@ -1458,13 +1484,19 @@ void RenderAllLevelGeometry(struct GameTracker *gGT, struct Level *level1, struc
 			               level1->ptr_tex_waterEnvMap); // waterEnvMap?
 		}
 
+		MAINFRAME_PERF_BEGIN(NATIVE_PERF_BUCKET_LEVEL_SKY);
 		DrawSky_Full(level1->ptr_skybox, pushBuffer, &gGT->backBuffer->primMem);
 
 		// skybox gradient
 		if ((level1->configFlags & 1) != 0)
 		{
-			goto SkyboxGlow;
+			for (i = 0; i < numPlyrCurrGame; i++)
+			{
+				pushBuffer = &gGT->pushBuffer[i];
+				CAM_SkyboxGlow(&level1->glowGradient[0], pushBuffer, &gGT->backBuffer->primMem, &pushBuffer->ptrOT[0x3ff]);
+			}
 		}
+		MAINFRAME_PERF_END(NATIVE_PERF_BUCKET_LEVEL_SKY);
 
 		return;
 	}
@@ -1477,7 +1509,7 @@ void RenderAllLevelGeometry(struct GameTracker *gGT, struct Level *level1, struc
 		if ((level1->configFlags & 4) == 0)
 		{
 			// assume OVert (no primitives generated here)
-			AnimateWater2P(gGT->timer, level1->numWaterVertices, level1->ptr_water, level1->ptr_tex_waterEnvMap, gGT->visMem1->visOVertList[0],
+			AnimateWater2P(Fps60_Timer30(), level1->numWaterVertices, level1->ptr_water, level1->ptr_tex_waterEnvMap, gGT->visMem1->visOVertList[0],
 			               gGT->visMem1->visOVertList[1]);
 		}
 
@@ -1507,14 +1539,14 @@ void RenderAllLevelGeometry(struct GameTracker *gGT, struct Level *level1, struc
 		if (numPlyrCurrGame == 3)
 		{
 			// assume OVert (no primitives generated here)
-			AnimateWater3P(gGT->timer, level1->numWaterVertices, level1->ptr_water, level1->ptr_tex_waterEnvMap, gGT->visMem1->visOVertList[0],
+			AnimateWater3P(Fps60_Timer30(), level1->numWaterVertices, level1->ptr_water, level1->ptr_tex_waterEnvMap, gGT->visMem1->visOVertList[0],
 			               gGT->visMem1->visOVertList[1], gGT->visMem1->visOVertList[2]);
 		}
 
 		else // 4P mode
 		{
 			// assume OVert (no primitives generated here)
-			AnimateWater4P(gGT->timer, level1->numWaterVertices, level1->ptr_water, level1->ptr_tex_waterEnvMap, gGT->visMem1->visOVertList[0],
+			AnimateWater4P(Fps60_Timer30(), level1->numWaterVertices, level1->ptr_water, level1->ptr_tex_waterEnvMap, gGT->visMem1->visOVertList[0],
 			               gGT->visMem1->visOVertList[1], gGT->visMem1->visOVertList[2], gGT->visMem1->visOVertList[3]);
 		}
 	}
@@ -1805,13 +1837,21 @@ void RenderSubmit(struct GameTracker *gGT)
 
 #if defined(CTR_NATIVE)
 
-	sdata->vsyncTillFlip = 2;
+	// NOTE: 2 everywhere but the 3DS frame cap, which can ask for 3 (20fps)
+	// on an Old 3DS -- see Platform_FlipVBlanks.
+	// 60fps: tell the pacer whether this context may be shown at 60.
+	Fps60_BeforeSubmit(gGT);
+	MAINFRAME_PERF_BEGIN(NATIVE_PERF_BUCKET_SUBMIT_FLIP);
+	sdata->vsyncTillFlip = Platform_FlipVBlanks();
+	MAINFRAME_PERF_END(NATIVE_PERF_BUCKET_SUBMIT_FLIP);
 
 	// Native still renders immediately through PsyCross, so keep the host GPU's
 	// active draw/display envs in step with the retail DB selected this frame.
+	MAINFRAME_PERF_BEGIN(NATIVE_PERF_BUCKET_SUBMIT_ENVS);
 	PutDrawEnv(&gGT->backBuffer->drawEnv);
 	gGT->frontBuffer = &gGT->db[1 - gGT->swapchainIndex];
 	PutDispEnv(&gGT->frontBuffer->dispEnv);
+	MAINFRAME_PERF_END(NATIVE_PERF_BUCKET_SUBMIT_ENVS);
 
 #else
 
@@ -1838,7 +1878,9 @@ void RenderSubmit(struct GameTracker *gGT)
 
 	void *ot = &gGT->pushBuffer[0].ptrOT[0x3ff];
 
+	MAINFRAME_PERF_BEGIN(NATIVE_PERF_BUCKET_SUBMIT_DRAWOTAG);
 	DrawOTag(ot);
+	MAINFRAME_PERF_END(NATIVE_PERF_BUCKET_SUBMIT_DRAWOTAG);
 
 	gGT->frameTimer_notPaused = gGT->frameTimer_VsyncCallback;
 

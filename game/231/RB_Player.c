@@ -195,7 +195,8 @@ void RB_Player_ModifyWumpa(struct Driver *driver, int wumpaDelta)
 		// Play "juiced up" sound
 		OtherFX_Play(0x41, 1);
 
-		driver->BattleHUD.juicedUpCooldown = DRIVER_WUMPA_JUICED_HUD_COOLDOWN_FRAMES;
+		// 60fps: counted down by UI_Weapon_DrawBG (RenderFrame, 60 Hz world)
+		driver->BattleHUD.juicedUpCooldown = FPS_DOUBLE(DRIVER_WUMPA_JUICED_HUD_COOLDOWN_FRAMES);
 	}
 }
 
@@ -249,7 +250,9 @@ void RB_Player_ToggleFlicker(void)
 		    (0x2a0 < d->invincibleTimer) &&
 
 		    // odd number frames
-		    ((gGT->timer & 1) != 0))
+		    // 60fps: called from MainFrame_RenderFrame every frame; blink at the
+		    // retail 30 Hz rate, ModSDK 231_040_RB_Player_ToggleFlicker.c FPS_DOUBLE(1)
+		    ((gGT->timer & FPS_DOUBLE(1)) != 0))
 		{
 			struct InstDrawPerPlayer *idpp = INST_GETIDPP(d->instSelf);
 

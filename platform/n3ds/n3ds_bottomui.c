@@ -324,17 +324,20 @@ enum
 {
 	OPT_BTMMAP = 0,
 	OPT_STEREO,
+	OPT_FPSCAP,
 	OPT_CPU804,
 	OPT_SDLOG,
 	OPT_COUNT
 };
 
+/* Five rows of 34 px at a 37 px pitch: the last ends at 216, clear of the
+ * message line at UI_H - 12. */
 static void ui_opt_rect(int i, int *x, int *y, int *w, int *h)
 {
 	*x = 6;
-	*y = CONTENT_Y + 6 + (i * 44);
+	*y = CONTENT_Y + 6 + (i * 37);
 	*w = 308;
-	*h = 40;
+	*h = 34;
 }
 
 #ifdef CTR_INTERNAL
@@ -344,6 +347,8 @@ enum
 	ACT_RTHREAD,
 	ACT_FLUSH,
 	ACT_FTP,
+	ACT_O3DSSIM,
+	ACT_SDLOG,
 	ACT_COUNT
 };
 
@@ -453,6 +458,22 @@ static void ui_ring_stats(u32 *minUs, u32 *maxUs, u32 *avgUs)
 	*avgUs = (s_ringCount > 0) ? (u32)(sum / (unsigned)s_ringCount) : 0;
 }
 
+/* Mean of the newest `n` frame times. The STATUS tab repaints every 250 ms, so
+ * showing the single latest frame (s_lastDtUs) read one random frame per
+ * repaint: on the New 3DS, where the game thread's call interval is not
+ * vblank-locked, that swung 28-80 while the presented rate sat at a steady 30. */
+static u32 ui_ring_recent_avg(int n)
+{
+	unsigned long long sum = 0;
+	int i, k = (n < s_ringCount) ? n : s_ringCount;
+
+	for (i = 1; i <= k; i++)
+	{
+		sum += s_ring[(s_ringHead - i + (UI_RING * 2)) % UI_RING];
+	}
+	return (k > 0) ? (u32)(sum / (unsigned)k) : 0;
+}
+
 int N3DS_BottomUi_Snapshot(unsigned char *bgr)
 {
 	int x, y;
@@ -536,7 +557,11 @@ static void ui_draw_status(void)
 
 	ui_ring_stats(&mn, &mx, &av);
 
-	ui_fmt10(a, sizeof(a), (s_lastDtUs > 0) ? (10000000ULL / s_lastDtUs) : 0ULL);
+	{
+		const u32 recent = ui_ring_recent_avg(15); /* ~0.5 s at 30 fps */
+
+		ui_fmt10(a, sizeof(a), (recent > 0) ? (10000000ULL / recent) : 0ULL);
+	}
 	ui_fmt10(b, sizeof(b), (av > 0) ? (10000000ULL / av) : 0ULL);
 	snprintf(c, sizeof(c), "%s  AVG %s", a, b);
 	ui_kv(y, "FPS", c, ui_time_col(av));
@@ -548,10 +573,8 @@ static void ui_draw_status(void)
 	y += 17;
 
 	{
-		struct mallinfo mi = mallinfo();
-
-		ui_fmt_mb(a, sizeof(a), (unsigned long long)mi.uordblks);
-		ui_fmt_mb(b, sizeof(b), (unsigned long long)mi.fordblks);
+		ui_fmt_mb(a, sizeof(a), (unsigned long long)N3DS_HeapUsedBytes());
+		ui_fmt_mb(b, sizeof(b), (unsigned long long)N3DS_HeapFreeBytes());
 		snprintf(c, sizeof(c), "%sMB / %sMB FREE", a, b);
 		ui_kv(y, "HEAP", c, COL_TEXT);
 		y += 17;
@@ -564,7 +587,8 @@ static void ui_draw_status(void)
 		APT_CheckNew3DS(&n);
 		s_isNew3DS = n ? 1 : 0;
 	}
-	snprintf(c, sizeof(c), "%s %s", s_isNew3DS ? "NEW" : "OLD", (s_isNew3DS && N3DS_SpeedupEnabled()) ? "804MHZ" : "268MHZ");
+	snprintf(c, sizeof(c), "%s %s%s", s_isNew3DS ? "NEW" : "OLD", (s_isNew3DS && N3DS_SpeedupEnabled()) ? "804MHZ" : "268MHZ",
+	         N3DS_O3dsSimActive() ? " SIM" : "");
 	ui_kv(y, "3DS", c, (s_isNew3DS && !N3DS_SpeedupEnabled()) ? COL_WARN : COL_TEXT);
 	y += 17;
 
@@ -572,7 +596,10 @@ static void ui_draw_status(void)
 		const float sl = N3DS_StereoSliderState();
 
 		snprintf(c, sizeof(c), "%d.%02d %s", (int)sl, (int)(sl * 100.0f) % 100,
-		         !g_dbg_stereo ? TR("OFF (OPTIONS)", "NO (OPCIONES)") : N3DS_StereoFrameActive() ? "3D" : "2D");
+		         !g_dbg_stereo                     ? TR("OFF (OPTIONS)", "NO (OPCIONES)")
+		         : N3DS_FramePaceStereoSuppressed() ? TR("2D (AUTO, SLOW)", "2D (AUTO, LENTO)")
+		         : N3DS_StereoFrameActive()         ? "3D"
+		                                            : "2D");
 		ui_kv(y, TR("3D SLIDER", "SLIDER 3D"), c, COL_TEXT);
 		y += 17;
 	}
@@ -623,14 +650,49 @@ static void ui_draw_option(int i, const char *label, int on, const char *stateTe
 
 	ui_opt_rect(i, &x, &y, &w, &h);
 	ui_button(x, y, w, h, on ? COL_BTN_ON : COL_BTN_OFF, (i == s_pressBtn));
-	ui_text(x + 10, y + 13, 2, COL_TEXT, label);
-	ui_text(x + w - 10 - ui_text_w(2, stateText), y + 13, 2, COL_TEXT, stateText);
+	ui_text(x + 10, y + 10, 2, COL_TEXT, label);
+	ui_text(x + w - 10 - ui_text_w(2, stateText), y + 10, 2, COL_TEXT, stateText);
+}
+
+/* 3D EFFECT: OFF / ON / AUTO (the Old-3DS default: the right eye yields when it
+ * alone costs the frame its cap, see n3ds_backend.h's frame-pace block). */
+static const char *ui_stereo_text(void)
+{
+	if (g_dbg_stereo == 2)
+	{
+		return N3DS_FramePaceStereoSuppressed() ? TR("AUTO (2D)", "AUTO (2D)") : "AUTO";
+	}
+	return ui_onoff(g_dbg_stereo);
+}
+
+/* FRAME SKIP: OFF (60 whenever a frame fits), AUTO (60 / 30 / 20, adaptive;
+ * shows the rate in force) or 30 (retail). */
+static const char *ui_fpscap_text(void)
+{
+	if (g_dbg_frameCap == 1)
+	{
+		return "30";
+	}
+	if (g_dbg_frameCap == 2)
+	{
+		return "OFF";
+	}
+	switch (N3DS_FramePaceFlipVBlanks())
+	{
+	case 1:
+		return "AUTO (60)";
+	case 3:
+		return "AUTO (20)";
+	default:
+		return "AUTO (30)";
+	}
 }
 
 static void ui_draw_options(void)
 {
 	ui_draw_option(OPT_BTMMAP, TR("MINIMAP BELOW", "MAPA ABAJO"), g_dbg_btmMap, ui_onoff(g_dbg_btmMap));
-	ui_draw_option(OPT_STEREO, TR("3D EFFECT", "EFECTO 3D"), g_dbg_stereo, ui_onoff(g_dbg_stereo));
+	ui_draw_option(OPT_STEREO, TR("3D EFFECT", "EFECTO 3D"), g_dbg_stereo, ui_stereo_text());
+	ui_draw_option(OPT_FPSCAP, TR("FRAME SKIP", "SALTO FRAMES"), 1, ui_fpscap_text());
 	if (s_isNew3DS < 0)
 	{
 		bool n = false;
@@ -649,7 +711,7 @@ static void ui_draw_options(void)
 
 		ui_opt_rect(OPT_CPU804, &x, &y, &w, &h);
 		ui_rect(x, y, w, h, COL_PANEL);
-		ui_text(x + 10, y + 13, 2, COL_LABEL, "OLD 3DS: 268MHZ");
+		ui_text(x + 10, y + 10, 2, COL_LABEL, "OLD 3DS: 268MHZ");
 	}
 	ui_draw_option(OPT_SDLOG, TR("SD LOG", "LOG EN SD"), g_dbg_sdLog, ui_onoff(g_dbg_sdLog));
 	if (s_msg[0] != '\0')
@@ -878,6 +940,13 @@ static void ui_act_label(int i, const char **name, const char **state, u16 *col)
 	case ACT_DRAWMERGE: *name = "DRAW MERGE"; on = g_dbg_drawMerge; break;
 	case ACT_RTHREAD: *name = "RENDER THREAD"; on = g_dbg_renderThread; break;
 	case ACT_FLUSH: *name = "LOG"; *state = "FLUSH"; return;
+	case ACT_SDLOG: *name = TR("LOG TO SD", "LOG A LA SD"); on = g_dbg_sdLog; break;
+	case ACT_O3DSSIM:
+		*name = "OLD 3DS SIM";
+		on = (N3DS_O3dsSimActive() != 0);
+		*state = ui_onoff(on);
+		*col = on ? COL_BTN_ON : COL_BTN_OFF;
+		return;
 	default:
 		*name = "FTP";
 		on = (ftp == N3DS_FTP_STATUS_LISTENING) || (ftp == N3DS_FTP_STATUS_WAITING_WIFI);
@@ -905,17 +974,17 @@ static void ui_draw_dbg_actions(void)
 		ui_text(x + 6, y + 5, 1, COL_TEXT, name);
 		ui_text(x + 6, y + 22, 2, COL_TEXT, state);
 	}
-	ui_text(6, CONTENT_Y + 134, 1, COL_LABEL, TR("SAME SWITCHES AS DUMPREQ.TXT", "LOS MISMOS INTERRUPTORES QUE DUMPREQ.TXT"));
+	ui_text(6, CONTENT_Y + 174, 1, COL_LABEL, TR("SAME SWITCHES AS SITE DUMPREQ", "LOS MISMOS INTERRUPTORES QUE SITE DUMPREQ"));
 	if (N3DS_FtpStatus() == N3DS_FTP_STATUS_LISTENING)
 	{
 		char c[48];
 
 		ui_ftp_address(c, sizeof(c));
-		ui_text(6, CONTENT_Y + 146, 1, COL_GOOD, c);
+		ui_text(6, CONTENT_Y + 184, 1, COL_GOOD, c);
 	}
 	if (s_msg[0] != '\0')
 	{
-		ui_text(6, CONTENT_Y + 160, 1, COL_GOOD, s_msg);
+		ui_text(6, CONTENT_Y + 194, 1, COL_GOOD, s_msg);
 	}
 }
 
@@ -1131,8 +1200,22 @@ static void ui_press_option(int i)
 		N3DS_ConfigSet("btmmap", g_dbg_btmMap);
 		break;
 	case OPT_STEREO:
-		g_dbg_stereo ^= 1;
+		/* Old 3DS / 2DS (and the simulation): AUTO -> ON -> OFF -> AUTO. A New
+		 * 3DS keeps its two states (a 2 left by the simulation reads as ON). */
+		if (N3DS_FramePaceOldClass())
+		{
+			g_dbg_stereo = (g_dbg_stereo == 2) ? 1 : (g_dbg_stereo == 1) ? 0 : 2;
+		}
+		else
+		{
+			g_dbg_stereo = g_dbg_stereo ? 0 : 1;
+		}
 		N3DS_ConfigSet("stereo", g_dbg_stereo);
+		break;
+	case OPT_FPSCAP:
+		/* AUTO -> 30 -> OFF -> AUTO. */
+		g_dbg_frameCap = (g_dbg_frameCap + 1) % 3;
+		N3DS_ConfigSet("fpsmode", g_dbg_frameCap);
 		break;
 	case OPT_CPU804:
 		if (s_isNew3DS > 0)
@@ -1204,6 +1287,20 @@ static void ui_press_action(int i)
 	case ACT_FLUSH:
 		N3DS_LogFlushNow();
 		ui_set_msg("LOG FLUSHED");
+		break;
+	case ACT_SDLOG:
+		N3DS_SetSdLogEnabled(!g_dbg_sdLog);
+		ui_set_msg(g_dbg_sdLog ? TR("SD LOG ON (CAN CAUSE HITCHES)", "LOG EN SD ACTIVO (PUEDE DAR TIRONES)") : TR("SD LOG OFF", "LOG EN SD APAGADO"));
+		break;
+	case ACT_O3DSSIM:
+		if (N3DS_O3dsSimToggleFile() == 2)
+		{
+			ui_set_msg("LEGACY-MODE BUILD: ALWAYS SIM");
+		}
+		else
+		{
+			ui_set_msg(N3DS_O3dsSimActive() ? "OLD 3DS SIM: 268MHZ NOW, RESTART FOR MEMORY+CORES" : "OLD 3DS SIM OFF, RESTART");
+		}
 		break;
 	default:
 	{
@@ -1423,7 +1520,11 @@ static void ui_updater_poll(void)
 void N3DS_BottomUi_Frame(const struct N3DS_BottomUiGameInfo *gi)
 {
 	const u64 now = svcGetSystemTick();
-	const u64 liveTicks = (u64)SYSCLOCK_ARM11 / 4ULL; /* 250 ms */
+	/* 250 ms; 1 s on the Old-3DS class, where one live repaint (full software
+	 * paint, Morton tile, texture copy + flush) is ~10-20 ms of the game
+	 * thread: [ENDPROF] btm=2.4 ms a frame in a static menu, nearly all of it
+	 * this tick on the STATUS tab. */
+	const u64 liveTicks = N3DS_FramePaceOldClass() ? (u64)SYSCLOCK_ARM11 : ((u64)SYSCLOCK_ARM11 / 4ULL);
 	unsigned sig;
 	int tab = s_tab;
 
@@ -1480,6 +1581,17 @@ void N3DS_BottomUi_Frame(const struct N3DS_BottomUiGameInfo *gi)
 		if (N3DS_FtpNotice() != NULL)
 		{
 			s_tab = TAB_UPDATER; /* an upload/install has begun: show where */
+		}
+	}
+	{
+		/* The frame cap and AUTO 3D change on their own (OPTIONS shows both). */
+		static int s_paceSig = -1;
+		const int paceSig = (N3DS_FramePaceFlipVBlanks() * 2) + N3DS_FramePaceStereoSuppressed();
+
+		if (paceSig != s_paceSig)
+		{
+			s_paceSig = paceSig;
+			s_dirty = 1;
 		}
 	}
 	if ((now - s_lastLiveTick) >= liveTicks)

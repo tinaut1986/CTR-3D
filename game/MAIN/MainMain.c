@@ -376,6 +376,9 @@ u32 main(void)
 			// Start new frame (ClearOTagR)
 			MainFrame_ResetDB(gGT);
 
+			// 60fps: this frame's logic mode (include/ctr_fps60.h).
+			Fps60_BeginFrame(gGT);
+
 			if (
 			    // If you're in Demo Mode
 			    (gGT->boolDemoMode != 0) &&
@@ -476,7 +479,13 @@ u32 main(void)
 			// if mask is talking in Adventure Hub
 			if (sdata->boolDraw3D_AdvMask != 0)
 			{
-				AH_MaskHint_Update();
+				// 60fps: Aku/Uka hints are the 30 Hz world.
+				if (g_fps60Full)
+				{
+					Fps60_Enter30();
+					AH_MaskHint_Update();
+					Fps60_Leave30();
+				}
 			}
 #if defined(CTR_NATIVE) && defined(CTR_INTERNAL)
 			{
@@ -697,7 +706,11 @@ void StateZero()
 	// interactive). Must stay above Music_SetIntro for that reason.
 	//
 	// The MUSIC sector-count memo is table-fed and reads nothing, so what this
-	// holds for is the GAME and EXTRA voice-line cache and the crate extents.
+	// holds for is the crate extents. On 3DS the GAME and EXTRA voice-line
+	// cache is no longer read here: ~20k sectors held the logo for most of a
+	// 16 s boot, so the cache fills after boot in idle frame time instead
+	// (NativeAudio_VoiceCacheBackgroundStep, run by the frame pacer), and a
+	// line asked for before its track lands streams from the card.
 	{
 		enum
 		{

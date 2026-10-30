@@ -61,6 +61,9 @@ static FILE *s_logFile = NULL;
  * any other thread exists.
  */
 static LightLock s_logBufferLock;
+/* The SD FILE itself under the async writer (see N3DS_LogDrainFileLocked):
+ * taken before s_logBufferLock, never after it. */
+static LightLock s_logFileLock;
 /* Rosalina-freeze bisect: 1 = stop emitting svcOutputDebugString (the SD and
  * netload sinks are unaffected). dumpreq `dbgoff`. */
 static int s_logSvcOff = 0;
@@ -316,12 +319,131 @@ void N3DS_ConfigSet(const char *key, int value)
 	N3DS_ConfigWrite();
 }
 
+/*
+ * Old-3DS simulation on a New 3DS (see docs/3DS_PORT.md, "Old 3DS").
+ *
+ * Switched on by an `o3ds-sim.txt` in the app dir (DEBUG > ACTIONS toggles it)
+ * or automatically when a New 3DS runs a legacy-mode CIA (package-cia.sh
+ * O3DS_SIM=1: SystemModeExt Legacy, app region <= 96 MiB). It then
+ *   - turns the 804 MHz clock-up (and with it the L2 cache) off at start,
+ *   - makes the render worker and the audio worker unavailable, exactly as
+ *     the `!isNew3DS` branches do on a real Old 3DS (cores 2/3 do not exist),
+ *   - with the file only: parks ballast so heap + linear match a legacy app
+ *     region of `mem=NN` MiB (default 80; a legacy-mode CIA already is one).
+ * The FTP server and the updater run where a real Old 3DS puts them: core 0,
+ * lowest priority, behind the game (n3ds_ftp.c); `ftp=0` in the file turns the
+ * server off.
+ * File contents: optional words `mem=NN` and `ftp=0`.
+ * Memory and threads need a restart; the clock applies at once.
+ */
+#define N3DS_O3DS_SIM_FILE N3DS_APP_DIR "/o3ds-sim.txt"
+#define N3DS_O3DS_SIM_DEFAULT_MIB 80
+static int s_o3dsSim = 0;     /* 0 off, 1 flag file, 2 legacy-mode CIA */
+static int s_o3dsSimMem = 0;  /* MiB cap to emulate, 0 = none */
+static int s_o3dsSimFtp = 1;
+
+void N3DS_O3dsSimInit(void)
+{
+	bool isNew3DS = false;
+	FILE *f;
+
+	APT_CheckNew3DS(&isNew3DS);
+	if (!isNew3DS)
+	{
+		return; /* a real Old 3DS needs no simulation */
+	}
+	f = fopen(N3DS_O3DS_SIM_FILE, "rb");
+	if (f != NULL)
+	{
+		char buf[128];
+		const size_t n = fread(buf, 1, sizeof(buf) - 1, f);
+		const char *p;
+
+		fclose(f);
+		buf[n] = '\0';
+		s_o3dsSim = 1;
+		s_o3dsSimMem = N3DS_O3DS_SIM_DEFAULT_MIB;
+		p = strstr(buf, "mem=");
+		if ((p != NULL) && (atoi(p + 4) >= 40))
+		{
+			s_o3dsSimMem = atoi(p + 4);
+		}
+		p = strstr(buf, "ftp=0");
+		s_o3dsSimFtp = (p == NULL);
+	}
+	else if (osGetMemRegionSize(MEMREGION_APPLICATION) <= (96u << 20))
+	{
+		s_o3dsSim = 2; /* legacy-mode CIA: the region itself is the cap */
+	}
+	if (s_o3dsSim)
+	{
+		char msg[160];
+
+		snprintf(msg, sizeof(msg), "[O3DS-SIM] ACTIVE (%s): clock-up off, no core-2/3 workers, ftp %s, memory cap %d MiB%s",
+		         (s_o3dsSim == 1) ? "o3ds-sim.txt" : "legacy-mode CIA", s_o3dsSimFtp ? "on" : "off", s_o3dsSimMem,
+		         (s_o3dsSim == 2) ? " (real region)" : "");
+		N3DS_DebugLog(msg);
+	}
+}
+
+int N3DS_O3dsSimActive(void)
+{
+	return s_o3dsSim;
+}
+
+int N3DS_O3dsSimFtpAllowed(void)
+{
+	return !s_o3dsSim || s_o3dsSimFtp;
+}
+
+/* Cores 2 and 3 usable: a real New 3DS that is not pretending to be an old one. */
+int N3DS_ExtraCoresUsable(void)
+{
+	bool isNew3DS = false;
+
+	APT_CheckNew3DS(&isNew3DS);
+	return isNew3DS && !s_o3dsSim;
+}
+
+/* DEBUG > ACTIONS: create/remove the flag file. Takes effect at the next start
+ * (the clock part is applied here at once). Returns the new state. */
+int N3DS_O3dsSimToggleFile(void)
+{
+	int now = (s_o3dsSim == 1);
+
+	if (s_o3dsSim == 2)
+	{
+		return 2; /* a legacy-mode CIA is always simulating */
+	}
+	if (now)
+	{
+		remove(N3DS_O3DS_SIM_FILE);
+		s_o3dsSim = 0;
+		N3DS_SetSpeedup(N3DS_ConfigGet("cpu804", 1));
+	}
+	else
+	{
+		FILE *f = fopen(N3DS_O3DS_SIM_FILE, "wb");
+
+		if (f != NULL)
+		{
+			fputs("mem=80\n", f);
+			fclose(f);
+		}
+		s_o3dsSim = 1;
+		s_o3dsSimMem = N3DS_O3DS_SIM_DEFAULT_MIB;
+		N3DS_SetSpeedup(0);
+	}
+	return s_o3dsSim;
+}
+
 void N3DS_EarlyInit(void)
 {
 	/* Before anything can call N3DS_DebugLog (the netload-stream connect
 	 * message a few lines down does exactly that) and long before any worker
 	 * thread exists to contend for it. */
 	LightLock_Init(&s_logBufferLock);
+	LightLock_Init(&s_logFileLock);
 
 	consoleDebugInit(debugDevice_SVC);
 
@@ -336,12 +458,31 @@ void N3DS_EarlyInit(void)
 	mkdir("sdmc:/3ds", 0777);
 	mkdir(N3DS_APP_DIR, 0777);
 	N3DS_ConfigLoad();
+	N3DS_O3dsSimInit();
 	{
 		extern int g_dbg_btmMap;
 		extern int g_dbg_stereo;
 
 		g_dbg_btmMap = N3DS_ConfigGet("btmmap", g_dbg_btmMap);
+		/* AUTO 3D by default on an Old 3DS / 2DS (and in the simulation): the
+		 * right eye yields when it alone costs the frame its cap. A saved
+		 * choice wins either way. */
+		if (N3DS_FramePaceOldClass())
+		{
+			g_dbg_stereo = 2;
+		}
 		g_dbg_stereo = N3DS_ConfigGet("stereo", g_dbg_stereo);
+		/* FRAME SKIP (cfg `fpsmode`: 0 AUTO, 1 30, 2 OFF) replaced FRAME CAP
+		 * (`fpscap`: 0 AUTO, 1 30, 2 20): AUTO -> AUTO, 30 -> 30, 20 -> AUTO. */
+		{
+			const int oldCap = N3DS_ConfigGet("fpscap", 0);
+
+			g_dbg_frameCap = N3DS_ConfigGet("fpsmode", (oldCap == 1) ? 1 : 0);
+			if ((g_dbg_frameCap < 0) || (g_dbg_frameCap > 2))
+			{
+				g_dbg_frameCap = 0;
+			}
+		}
 	}
 
 	/* FTP: debug builds on by default, production only with dev-ftp.txt (see
@@ -376,6 +517,124 @@ int g_dbg_sdLog = 0;
 static unsigned s_logFlushWorstUs = 0;
 static unsigned s_logFlushTotalUs = 0;
 static unsigned s_logFlushCount = 0;
+
+/*
+ * Asynchronous SD log (g_dbg_logAsync, dumpreq `logasync`, default on).
+ * [LOGFLUSH] worstUs tracked [PACE] maxWorkUs window for window on the Old 3DS
+ * (menu: 146 ms flush -> 188 ms frame, 129 -> 171, 127 -> 169; race: up to
+ * 285 ms): the 2 s fflush+fsync ran on whichever thread logged, the game
+ * thread almost always, and SD latency there is high and variable. Now a
+ * logging thread only appends the line to a RAM buffer (s_logBufferLock, a
+ * memcpy); a low-priority writer thread swaps the buffer out every ~2 s (or
+ * when half full) and does the fwrite + fflush + fsync under s_logFileLock,
+ * which no logging thread takes. On core 0 at 0x3E it runs while the game
+ * waits for the vblank or the GPU. A full buffer (the writer starved during a
+ * load) drains synchronously on the logging thread, the old cost, counted as
+ * sync=. Lock order: s_logFileLock before s_logBufferLock, never the reverse.
+ * N3DS_LogFlushNow / N3DS_LogCloseFile drain synchronously.
+ * [LOGFLUSH] then times the writer's flushes (off the game thread) and adds
+ * async=, sync= (game-thread drains) and syncWorstUs=.
+ */
+#define N3DS_LOG_ABUF_SIZE (64 * 1024)
+int g_dbg_logAsync = 1;
+static char s_logABuf[2][N3DS_LOG_ABUF_SIZE];
+static int s_logABufCur = 0;     /* buffer the logging threads append to */
+static size_t s_logABufUsed = 0; /* bytes in s_logABuf[s_logABufCur] */
+static Thread s_logWriterThread = NULL;
+static int s_logWriterFailed = 0;
+static unsigned s_logSyncDrains = 0;
+static unsigned s_logSyncWorstUs = 0;
+static u64 s_logWriterLastTick = 0;
+
+/* Caller holds s_logFileLock and NOT s_logBufferLock. Swaps the append buffer
+ * out and writes it; flushes (fflush + fsync) when `commit`. Returns the
+ * microseconds it took. */
+static unsigned N3DS_LogDrainFileLocked(int commit)
+{
+	const u64 t0 = svcGetSystemTick();
+	const char *data;
+	size_t bytes;
+	FILE *f;
+
+	LightLock_Lock(&s_logBufferLock);
+	data = s_logABuf[s_logABufCur];
+	bytes = s_logABufUsed;
+	s_logABufCur ^= 1;
+	s_logABufUsed = 0;
+	f = s_logFile;
+	LightLock_Unlock(&s_logBufferLock);
+
+	if (f != NULL)
+	{
+		if (bytes != 0)
+		{
+			fwrite(data, 1, bytes, f);
+		}
+		if (commit)
+		{
+			fflush(f);
+			fsync(fileno(f));
+		}
+	}
+	return (unsigned)(((svcGetSystemTick() - t0) * 1000000ull) / (u64)SYSCLOCK_ARM11);
+}
+
+static void N3DS_LogWriterMain(void *arg)
+{
+	(void)arg;
+	for (;;)
+	{
+		u64 now;
+		int due;
+
+		svcSleepThread(50ll * 1000ll * 1000ll);
+		now = svcGetSystemTick();
+		LightLock_Lock(&s_logBufferLock);
+		due = g_dbg_logAsync && (s_logFile != NULL) && (s_logABufUsed != 0) &&
+		      (((now - s_logWriterLastTick) > (SYSCLOCK_ARM11 * 2ull)) || (s_logABufUsed >= (N3DS_LOG_ABUF_SIZE / 2)));
+		LightLock_Unlock(&s_logBufferLock);
+		if (!due)
+		{
+			continue;
+		}
+
+		LightLock_Lock(&s_logFileLock);
+		{
+			const unsigned tookUs = N3DS_LogDrainFileLocked(1);
+
+			LightLock_Lock(&s_logBufferLock);
+			s_logFlushTotalUs += tookUs;
+			if (tookUs > s_logFlushWorstUs)
+			{
+				s_logFlushWorstUs = tookUs;
+			}
+			s_logFlushCount++;
+			LightLock_Unlock(&s_logBufferLock);
+		}
+		LightLock_Unlock(&s_logFileLock);
+		s_logWriterLastTick = now;
+	}
+}
+
+/* Caller holds s_logBufferLock. Whether lines go through the writer. */
+static int N3DS_LogAsyncActiveLocked(void)
+{
+	if (!g_dbg_logAsync || s_logWriterFailed)
+	{
+		return 0;
+	}
+	if (s_logWriterThread == NULL)
+	{
+		s_logWriterLastTick = svcGetSystemTick();
+		s_logWriterThread = threadCreate(N3DS_LogWriterMain, NULL, 16 * 1024, 0x3E, -2, true);
+		if (s_logWriterThread == NULL)
+		{
+			s_logWriterFailed = 1;
+			return 0;
+		}
+	}
+	return 1;
+}
 
 void N3DS_DebugLog(const char *msg)
 {
@@ -419,7 +678,37 @@ void N3DS_DebugLog(const char *msg)
 		N3DS_LogOpenFileLocked();
 	}
 
-	if ((s_logFile != NULL) && g_dbg_sdLog)
+	if ((s_logFile != NULL) && g_dbg_sdLog && N3DS_LogAsyncActiveLocked())
+	{
+		const size_t len = strlen(msg);
+
+		if (s_logABufUsed + len + 1u > (size_t)N3DS_LOG_ABUF_SIZE)
+		{
+			/* Full: the writer is starved (a load keeps the game thread
+			 * busy). Drain here, outside the buffer lock (lock order). */
+			unsigned tookUs;
+
+			LightLock_Unlock(&s_logBufferLock);
+			LightLock_Lock(&s_logFileLock);
+			tookUs = N3DS_LogDrainFileLocked(0);
+			LightLock_Unlock(&s_logFileLock);
+			LightLock_Lock(&s_logBufferLock);
+			s_logSyncDrains++;
+			if (tookUs > s_logSyncWorstUs)
+			{
+				s_logSyncWorstUs = tookUs;
+			}
+		}
+		if (s_logABufUsed + len + 1u <= (size_t)N3DS_LOG_ABUF_SIZE)
+		{
+			char *dst = &s_logABuf[s_logABufCur][s_logABufUsed];
+
+			memcpy(dst, msg, len);
+			dst[len] = '\n';
+			s_logABufUsed += len + 1u;
+		}
+	}
+	else if ((s_logFile != NULL) && g_dbg_sdLog)
 	{
 		fputs(msg, s_logFile);
 		fputc('\n', s_logFile);
@@ -428,8 +717,9 @@ void N3DS_DebugLog(const char *msg)
 	/* Flush BOTH buffered sinks at most every ~2s (SD file and the netload
 	 * stderr stream -- see the setvbuf in N3DS_NetloadStreamInit). Both are
 	 * post-hoc trails that tolerate a bounded tail loss on a hard crash;
-	 * svcOutputDebugString above is the per-line instant trail. */
-	if (((s_logFile != NULL) && g_dbg_sdLog) || s_netloadStreamActive)
+	 * svcOutputDebugString above is the per-line instant trail. With the
+	 * async writer the SD file is its job; only the stream flushes here. */
+	if (((s_logFile != NULL) && g_dbg_sdLog && (s_logWriterThread == NULL || !g_dbg_logAsync)) || s_netloadStreamActive)
 	{
 		const u64 now = svcGetSystemTick();
 
@@ -444,7 +734,7 @@ void N3DS_DebugLog(const char *msg)
 			 * its back. Reported as [LOGFLUSH]. */
 			const u64 flushStart = svcGetSystemTick();
 
-			if ((s_logFile != NULL) && g_dbg_sdLog)
+			if ((s_logFile != NULL) && g_dbg_sdLog && (s_logWriterThread == NULL || !g_dbg_logAsync))
 			{
 				fflush(s_logFile);
 				/* fflush alone moves bytes into the FS session; the FAT
@@ -483,17 +773,17 @@ void N3DS_DebugLog(const char *msg)
  * only ever sits in a buffer the next power-cycle discards. */
 void N3DS_LogFlushNow(void)
 {
-	LightLock_Lock(&s_logBufferLock);
-	if (s_logFile != NULL)
-	{
-		fflush(s_logFile);
-		fsync(fileno(s_logFile));
-	}
-	LightLock_Unlock(&s_logBufferLock);
+	/* File lock first (lock order): the drain writes the async buffer, then
+	 * commits; with no async lines it is the old fflush + fsync. */
+	LightLock_Lock(&s_logFileLock);
+	(void)N3DS_LogDrainFileLocked(1);
+	LightLock_Unlock(&s_logFileLock);
 }
 
 void N3DS_LogCloseFile(void)
 {
+	LightLock_Lock(&s_logFileLock);
+	(void)N3DS_LogDrainFileLocked(0);
 	LightLock_Lock(&s_logBufferLock);
 	if (s_logFile != NULL)
 	{
@@ -501,7 +791,20 @@ void N3DS_LogCloseFile(void)
 		fclose(s_logFile);
 		s_logFile = NULL;
 	}
+	LightLock_Unlock(&s_logFileLock);
 	g_dbg_sdLog = 0;
+	LightLock_Unlock(&s_logBufferLock);
+}
+
+/* Game-side drains of a full async buffer since the last call, and the worst. */
+void N3DS_LogAsyncStats(int *async, unsigned *syncDrains, unsigned *syncWorstUs)
+{
+	LightLock_Lock(&s_logBufferLock);
+	*async = (g_dbg_logAsync && (s_logWriterThread != NULL)) ? 1 : 0;
+	*syncDrains = s_logSyncDrains;
+	*syncWorstUs = s_logSyncWorstUs;
+	s_logSyncDrains = 0;
+	s_logSyncWorstUs = 0;
 	LightLock_Unlock(&s_logBufferLock);
 }
 
@@ -645,6 +948,7 @@ void N3DS_ShowFatalAssetScreen(const char *assetDir)
  * libctru has no getter. */
 int g_n3dsSpeedup = 1;
 
+static void N3DS_LogSpeedupAccess(int on);
 void N3DS_HeapDescribe(char *out, unsigned cap); /* n3ds_heap.c */
 unsigned long N3DS_LinearHeapSize(void);
 
@@ -666,8 +970,10 @@ void N3DS_ShowFatalGfxScreen(const char *what)
 	printf("\n  CTR 3D\n\n  Graphics could not start:\n  %s\n\n", what);
 	printf("  Linear memory free: %lu KiB\n", (unsigned long)(linearSpaceFree() / 1024));
 	printf("  Linear heap:        %lu KiB\n", N3DS_LinearHeapSize() / 1024);
-	printf("  Heap free:          %lu KiB\n\n", (unsigned long)(mallinfo().fordblks / 1024));
-	printf("  The game needs about 48 MiB of linear\n  memory. On an Old 3DS (64 MB) it does not fit.\n\n");
+	printf("  Heap free:          %lu KiB\n", N3DS_HeapFreeBytes() / 1024);
+	printf("  App memory region:  %lu KiB\n\n", (unsigned long)(osGetMemRegionSize(MEMREGION_APPLICATION) / 1024));
+	printf("  The decode atlases alone need %d x 2 MiB\n  of linear memory, plus ~%lu MiB for the rest.\n\n", N3DS_ATLAS_MIN_COUNT,
+	       (N3DS_LinearAfterAtlases() + (4ul << 20)) >> 20);
 	printf("  Press START to exit.\n");
 	while (aptMainLoop())
 	{
@@ -683,6 +989,30 @@ void N3DS_ShowFatalGfxScreen(const char *what)
 	exit(1);
 }
 
+/*
+ * Linear memory N3DS_C3DInit keeps free when it sizes the decode atlases: what
+ * is allocated after them, measured from the code (sizes in bytes):
+ *   VRAM display textures   N3DS_VRAM_DISPLAY_TEX_COUNT x 256^2 x 2 =   512 KiB (right after the atlases)
+ *   bottom UI texture       512 x 256 x 2                           =   256 KiB (first GPU frame)
+ *   ndsp PCM blocks         6 x 5880 frames x 4 B                   =   138 KiB (first sound)
+ *   hw-voice sample store   N3DS_HwVoiceStoreBytes()                = 3 MiB, 2 MiB on a small linear heap
+ *   track atlas             N3DS_TRACK_ATLAS_MAX_UNITS x 512^2 x 2  =  4096 KiB (per level)
+ *   track geometry          one linearAlloc per level               ~ 4 MiB (largest level, New 3DS log)
+ *   margin (linear allocator alignment / fragmentation)                1 MiB
+ */
+#define N3DS_LINEAR_TRACK_GEOM_MAX (4ul << 20)
+#define N3DS_LINEAR_MARGIN         (1ul << 20)
+unsigned long N3DS_LinearAfterAtlases(void)
+{
+	return ((unsigned long)N3DS_VRAM_DISPLAY_TEX_COUNT * N3DS_VRAM_DISPLAY_TEX_DIM * N3DS_VRAM_DISPLAY_TEX_DIM * 2ul) +
+	       ((unsigned long)N3DS_BOTTOM_UI_TEX_W * N3DS_BOTTOM_UI_TEX_H * 2ul) + (140ul << 10) + N3DS_HwVoiceStoreBytes() +
+	       ((unsigned long)N3DS_TRACK_ATLAS_MAX_UNITS * N3DS_TRACK_ATLAS_DIM * N3DS_TRACK_ATLAS_DIM * 2ul) + N3DS_LINEAR_TRACK_GEOM_MAX +
+	       N3DS_LINEAR_MARGIN;
+}
+
+/* CFG model has a parallax panel (not an Old 2DS / New 2DS XL). Set in N3DS_GfxInit. */
+static int s_has3dPanel = 1;
+
 void N3DS_GfxInit(void)
 {
 	/*
@@ -695,19 +1025,49 @@ void N3DS_GfxInit(void)
 	 * Harmless on an Old3DS, where libctru makes it a no-op.
 	 */
 	g_n3dsSpeedup = N3DS_ConfigGet("cpu804", 1) ? 1 : 0;
+	if (s_o3dsSim)
+	{
+		g_n3dsSpeedup = 0; /* Old-3DS simulation: 268 MHz, no L2 (cpu804 in the cfg is left alone) */
+	}
 	osSetSpeedupEnable(g_n3dsSpeedup != 0);
+	N3DS_LogSpeedupAccess(g_n3dsSpeedup);
+	if (s_o3dsSim == 1)
+	{
+		/* Before anything takes linear memory: gfxInit follows. */
+		N3DS_HeapSimCap((unsigned)s_o3dsSimMem);
+	}
+	N3DS_MemLog("gfxinit");
 
 	gfxInitDefault();
 
 	/*
-	 * Stereoscopic 3D: double-buffer the top screen's RIGHT framebuffer too.
-	 * Costs ~576KB of linear heap up front; with the physical slider at zero
-	 * the parallax barrier is off, the right buffer is never presented, and
-	 * the render path draws one eye exactly as before (N3DS_StereoLatchFrame).
-	 * Called here, before any framebuffer is fetched, because gfxSet3D
-	 * reallocates the top screen's buffers.
+	 * Stereoscopic 3D. With the physical slider at zero the parallax barrier is
+	 * off, the right buffer is never presented, and the render path draws one
+	 * eye exactly as before (N3DS_StereoLatchFrame). Costs no linear memory:
+	 * this libctru's gfxInit always allocates the top buffers at the stereo
+	 * width (800x240, checked in gfx.o) and gfxSet3D only sets the mode. A 2DS
+	 * / New 2DS XL has no 3D panel: 3D stays off there, and N3DS_C3DInit
+	 * skips the right-eye render target (768 KiB of VRAM).
 	 */
-	gfxSet3D(true);
+	{
+		u8 model = CFG_MODEL_3DS;
+
+		if (R_SUCCEEDED(cfguInit()))
+		{
+			if (R_SUCCEEDED(CFGU_GetSystemModel(&model)))
+			{
+				s_has3dPanel = (model != CFG_MODEL_2DS) && (model != CFG_MODEL_N2DSXL);
+			}
+			cfguExit();
+		}
+		{
+			char msg[96];
+
+			snprintf(msg, sizeof(msg), "[CTR-3DS] console model %u: %s", (unsigned)model, s_has3dPanel ? "3D panel, stereo available" : "no 3D panel (2DS), stereo off");
+			N3DS_DebugLog(msg);
+		}
+	}
+	gfxSet3D(s_has3dPanel != 0);
 
 	/*
 	 * The bottom screen is the UI's (n3ds_bottomui.c): graphics mode from the
@@ -906,6 +1266,13 @@ static void *s_vertexBufferMem = NULL;
 static int s_vertexCursor = 0;
 static int s_vertexHighWater = 0;
 static C3D_Tex s_atlasTextures[N3DS_ATLAS_COUNT];
+/* How many of s_atlasTextures were allocated (N3DS_C3DInit; see N3DS_ATLAS_MIN_COUNT). */
+static int s_atlasCount = 0;
+
+int N3DS_C3DAtlasCount(void)
+{
+	return s_atlasCount;
+}
 static C3D_Tex s_vramDisplayTex[N3DS_VRAM_DISPLAY_TEX_COUNT];
 
 /* Native track renderer's dedicated atlas pool (rung 2b) -- see the header
@@ -1003,6 +1370,13 @@ static int s_trackDepthWriteState = -1;
  * the other track statics because N3DS_TrackDraw_Begin resets it and sits above
  * the function that uses it. */
 static int s_trackTexturedState = -1;
+/* Track-atlas units bound to texture units 0 and 1 inside the current track
+ * bracket (-1 = unknown; Begin resets both, since the packet path rebinds
+ * unit 0 between brackets). C3D_TexBind marks the unit dirty even when the
+ * texture is the same, which re-emits its configuration on the next draw --
+ * per leaf, and again per leaf in the right eye's replay. */
+static int s_trackBoundUnit0 = -1;
+static int s_trackBoundUnit1 = -1;
 static C3D_AttrInfo s_trackAttrInfo;
 static C3D_BufInfo s_trackBufInfo;
 
@@ -1094,7 +1468,7 @@ static int s_trackDrawActive = 0;
  * shifts RIGHT in the right eye. p = k*(1 - C/d) with k > 0 for the right
  * eye gives exactly that. If hardware disagrees, `stereosep -12` is the A/B.
  */
-int g_dbg_stereo = 1; /* master enable; the slider still gates frame by frame */
+int g_dbg_stereo = 1; /* master enable: 0 off, 1 on, 2 AUTO (Old-3DS default, frame-pace block); the slider still gates frame by frame */
 /*
  * WINDOW MODE: with pop-out allowed, the
  * clamp band turns the near ground into a constant-disparity sheet -- a
@@ -1278,7 +1652,7 @@ static void N3DS_StereoLatchFrame(void)
 	s_stereoEye = 0;
 	s_stereoFrameActive = 0;
 
-	if (g_dbg_stereo && (s_renderTargetRight != NULL))
+	if (g_dbg_stereo && (s_renderTargetRight != NULL) && !N3DS_FramePaceStereoSuppressed())
 	{
 		slider = osGet3DSliderState();
 		if (slider > 0.01f)
@@ -1319,7 +1693,10 @@ static void N3DS_StereoLatchFrame(void)
 	{
 		char msg[96];
 
-		snprintf(msg, sizeof(msg), s_stereoFrameActive ? "[CTR-3DS] stereo: ACTIVE (slider=%d%% sep=%d conv=%d pktdepth=%d)" : "[CTR-3DS] stereo: inactive (slider down)",
+		snprintf(msg, sizeof(msg),
+		         s_stereoFrameActive                ? "[CTR-3DS] stereo: ACTIVE (slider=%d%% sep=%d conv=%d pktdepth=%d)"
+		         : N3DS_FramePaceStereoSuppressed() ? "[CTR-3DS] stereo: inactive (AUTO 3D: right eye off, frame over its cap)"
+		                                            : "[CTR-3DS] stereo: inactive (slider down)",
 		         (int)(slider * 100.0f), (int)s_stereoSep, (int)s_stereoConv, N3DS_StereoPacketDepthActive());
 		N3DS_DebugLog(msg);
 		s_wasActive = s_stereoFrameActive;
@@ -1364,6 +1741,125 @@ void N3DS_StereoRecordVram(int slot, int baseVertex)
 		op->u.pkt.baseVertex = baseVertex;
 		op->u.pkt.vertCount = 6;
 	}
+}
+
+/* ------------------------------------------------ end-of-scene profile --- */
+/* See n3ds_backend.h. Window accumulators in system ticks, folded and reset by
+ * N3DS_EndProfFormat from the [PERF] window report (same thread as every
+ * mark: the no-worker path is the one this exists for; with the render worker
+ * the EndScene marks land on core 2 and a torn read costs one frame of 64). */
+static unsigned long long s_rightEyeLastTicks; /* every build: the stereo policy reads it */
+
+unsigned long long N3DS_StereoLastRightEyeTicks(void)
+{
+	return s_rightEyeLastTicks;
+}
+
+/* ----------------------------------------------------------- frame pace --- */
+/* The policy lives in n3ds_framepace.c (host-tested); the console bits here. */
+static int s_paceOldClass = -1; /* lazily: APT_CheckNew3DS and the simulation */
+
+int N3DS_FramePaceOldClass(void)
+{
+	if (s_paceOldClass < 0)
+	{
+		bool isNew3DS = false;
+
+		APT_CheckNew3DS(&isNew3DS);
+		s_paceOldClass = isNew3DS ? 0 : 1;
+	}
+	/* The simulation can be switched on from the DEBUG tab mid-run, so it is
+	 * read live; the console model cannot change. */
+	return s_paceOldClass || (s_o3dsSim != 0);
+}
+
+unsigned N3DS_FramePaceRightEyeUs(int *stereo)
+{
+	*stereo = (s_rightEyeLastTicks != 0);
+	return (unsigned)((s_rightEyeLastTicks * 1000000ull) / (unsigned long long)SYSCLOCK_ARM11);
+}
+
+#include "n3ds_framepace.c"
+
+#ifdef CTR_INTERNAL
+static unsigned long long s_endProfTicks[N3DS_ENDPROF_PHASES];
+static unsigned s_endProfFrames;
+static unsigned s_endProfStereoFrames;
+/* Journal shape, summed over the window's stereo frames: what the right eye
+ * replays per frame, by op kind (index = N3DS_STEREO_OP_*). */
+static unsigned s_endProfOps[N3DS_STEREO_OP_MODEL_END + 1];
+static unsigned s_endProfOverflows;
+#endif
+
+unsigned long long N3DS_EndProfNow(void)
+{
+#ifdef CTR_INTERNAL
+	return (unsigned long long)svcGetSystemTick();
+#else
+	return 0;
+#endif
+}
+
+unsigned long long N3DS_EndProfMark(int phase, unsigned long long since)
+{
+#ifdef CTR_INTERNAL
+	const unsigned long long now = (unsigned long long)svcGetSystemTick();
+
+	if ((phase >= 0) && (phase < N3DS_ENDPROF_PHASES))
+	{
+		s_endProfTicks[phase] += now - since;
+	}
+	if (phase == N3DS_ENDPROF_FRAMEEND)
+	{
+		s_endProfFrames++; /* the chain's last mark: one per EndScene */
+	}
+	return now;
+#else
+	(void)phase;
+	(void)since;
+	return 0;
+#endif
+}
+
+void N3DS_EndProfFormat(char *out, int outSize)
+{
+#ifdef CTR_INTERNAL
+	const unsigned n = (s_endProfFrames != 0) ? s_endProfFrames : 1;
+	const unsigned st = (s_endProfStereoFrames != 0) ? s_endProfStereoFrames : 1;
+	unsigned us[N3DS_ENDPROF_PHASES];
+	unsigned sum = 0;
+	int i;
+
+	for (i = 0; i < N3DS_ENDPROF_PHASES; i++)
+	{
+		us[i] = (unsigned)((s_endProfTicks[i] * 1000000ull) / ((unsigned long long)SYSCLOCK_ARM11 * n));
+		if ((i != N3DS_ENDPROF_BEGIN) && (i != N3DS_ENDPROF_FLUSH))
+		{
+			sum += us[i];
+		}
+	}
+	/* avg us per frame; rEyeSt = per STEREO frame; ops per stereo frame. */
+	snprintf(out, (size_t)outSize,
+	         "[ENDPROF] frames=%u st=%u sum=%u sky=%u trk=%u mrg=%u ui=%u mdl=%u smk=%u oth=%u rEye=%u btm=%u fend=%u flush=%u | begin=%u | "
+	         "rEyeSt=%u ops/f pkt=%u vram=%u leaf=%u run=%u inst=%u brk=%u ovf=%u",
+	         s_endProfFrames, s_endProfStereoFrames, sum, us[N3DS_ENDPROF_SKY], us[N3DS_ENDPROF_TRACK], us[N3DS_ENDPROF_MERGE], us[N3DS_ENDPROF_UI],
+	         us[N3DS_ENDPROF_MODEL], us[N3DS_ENDPROF_SMOKE], us[N3DS_ENDPROF_OTHER], us[N3DS_ENDPROF_RIGHT], us[N3DS_ENDPROF_BOTTOM],
+	         us[N3DS_ENDPROF_FRAMEEND], us[N3DS_ENDPROF_FLUSH], us[N3DS_ENDPROF_BEGIN],
+	         (unsigned)((s_endProfTicks[N3DS_ENDPROF_RIGHT] * 1000000ull) / ((unsigned long long)SYSCLOCK_ARM11 * st)),
+	         s_endProfOps[N3DS_STEREO_OP_PKT] / st, s_endProfOps[N3DS_STEREO_OP_VRAM] / st, s_endProfOps[N3DS_STEREO_OP_TRACK_LEAF] / st,
+	         s_endProfOps[N3DS_STEREO_OP_MODEL_RUN] / st, s_endProfOps[N3DS_STEREO_OP_MODEL_INSTANCE] / st,
+	         (s_endProfOps[N3DS_STEREO_OP_TRACK_BEGIN] + s_endProfOps[N3DS_STEREO_OP_MODEL_BEGIN]) / st, s_endProfOverflows);
+	memset(s_endProfTicks, 0, sizeof(s_endProfTicks));
+	memset(s_endProfOps, 0, sizeof(s_endProfOps));
+	s_endProfFrames = 0;
+	s_endProfStereoFrames = 0;
+	s_endProfOverflows = 0;
+#else
+	if (outSize > 0)
+	{
+		out[0] = '\0';
+	}
+#endif
 }
 
 /* Top-screen widescreen mode. 0 = off (4:3 pillarbox crop).
@@ -1577,6 +2073,7 @@ static void N3DS_GpuAptHook(APT_HookType type, void *param)
 	int waited;
 
 	(void)param;
+	N3DS_FtpAptEvent((int)type);
 	if (!s_c3dUp)
 	{
 		return;
@@ -1827,14 +2324,15 @@ int N3DS_C3DInit(void)
 	 * and says so once, rather than refusing to boot over an optional
 	 * feature. Every stereo path is gated on this pointer being non-NULL.
 	 */
-	s_renderTargetRight = C3D_RenderTargetCreate(240, 400, GPU_RB_RGBA8, GPU_RB_DEPTH24_STENCIL8);
+	s_renderTargetRight = s_has3dPanel ? C3D_RenderTargetCreate(240, 400, GPU_RB_RGBA8, GPU_RB_DEPTH24_STENCIL8) : NULL;
 	if (s_renderTargetRight != NULL)
 	{
 		C3D_RenderTargetSetOutput(s_renderTargetRight, GFX_TOP, GFX_RIGHT, N3DS_DISPLAY_TRANSFER_FLAGS);
 	}
 	else
 	{
-		N3DS_DebugLog("[CTR-3DS] stereo: right-eye render target FAILED to allocate, 3D disabled");
+		N3DS_DebugLog(s_has3dPanel ? "[CTR-3DS] stereo: right-eye render target FAILED to allocate, 3D disabled"
+		                           : "[CTR-3DS] stereo: no 3D panel, no right-eye render target");
 	}
 
 	s_shaderDvlb = DVLB_ParseFile((u32 *)ctr_shbin, ctr_shbin_size);
@@ -1925,23 +2423,53 @@ int N3DS_C3DInit(void)
 		 * longer uses. If allocation ever fails now, the log line below
 		 * states exactly which atlas index and how much free KiB remained --
 		 * trust that over any comment. */
-		snprintf(msg, sizeof(msg), "[CTR-3DS] linear free before atlases: %lu KiB (want %d x %d KiB)",
-		         (unsigned long)(linearSpaceFree() / 1024), N3DS_ATLAS_COUNT,
-		         (N3DS_ATLAS_DIM * N3DS_ATLAS_DIM * 2) / 1024);
+		/* As many atlases as the linear heap holds once everything allocated
+		 * after them has room (N3DS_LinearAfterAtlases): the maximum on a
+		 * New 3DS, fewer in a legacy Old 3DS region (N3DS_ATLAS_MIN_COUNT's
+		 * comment). Below the minimum is fatal, never a blind run. */
+		const unsigned long atlasBytes = (unsigned long)N3DS_ATLAS_DIM * N3DS_ATLAS_DIM * 2ul;
+		const unsigned long freeLin = (unsigned long)linearSpaceFree();
+		const unsigned long after = N3DS_LinearAfterAtlases();
+		int want = (int)((freeLin > after) ? ((freeLin - after) / atlasBytes) : 0ul);
+
+		if (want > N3DS_ATLAS_COUNT)
+		{
+			want = N3DS_ATLAS_COUNT;
+		}
+		/* Lean (legacy-region) linear heap: atlases past the minimum only grow
+		 * the sub-page tier (already ~2.4x its measured peak at 7), while the
+		 * per-level track geometry has no fallback -- keep the room for it. */
+		if ((N3DS_LinearHeapSize() < (48ul << 20)) && (want > N3DS_ATLAS_MIN_COUNT))
+		{
+			want = N3DS_ATLAS_MIN_COUNT;
+		}
+		if (want < N3DS_ATLAS_MIN_COUNT)
+		{
+			want = N3DS_ATLAS_MIN_COUNT;
+		}
+		snprintf(msg, sizeof(msg), "[CTR-3DS] linear free before atlases: %lu KiB; %d x %lu KiB atlases (min %d, max %d), %lu KiB kept for later",
+		         freeLin / 1024ul, want, atlasBytes / 1024ul, N3DS_ATLAS_MIN_COUNT, N3DS_ATLAS_COUNT, after / 1024ul);
 		N3DS_DebugLog(msg);
 
-		for (i = 0; i < N3DS_ATLAS_COUNT; i++)
+		s_atlasCount = 0;
+		for (i = 0; i < want; i++)
 		{
 			if (!C3D_TexInit(&s_atlasTextures[i], N3DS_ATLAS_DIM, N3DS_ATLAS_DIM, GPU_RGBA5551))
 			{
-				snprintf(msg, sizeof(msg), "[CTR-3DS] atlas %d of %d FAILED to allocate; linear free %lu KiB", i,
-				         N3DS_ATLAS_COUNT, (unsigned long)(linearSpaceFree() / 1024));
+				snprintf(msg, sizeof(msg), "[CTR-3DS] atlas %d of %d FAILED to allocate; linear free %lu KiB", i, want,
+				         (unsigned long)(linearSpaceFree() / 1024));
 				N3DS_DebugLog(msg);
-				return 0;
+				if (i < N3DS_ATLAS_MIN_COUNT)
+				{
+					return 0;
+				}
+				break; /* contiguous space ran out above the minimum: keep what we have */
 			}
 			C3D_TexSetFilter(&s_atlasTextures[i], GPU_NEAREST, GPU_NEAREST);
 			C3D_TexSetWrap(&s_atlasTextures[i], GPU_CLAMP_TO_EDGE, GPU_CLAMP_TO_EDGE);
+			s_atlasCount = i + 1;
 		}
+		N3DS_MemLog("atlases");
 	}
 
 	/* Boot-splash present texture pool -- see the header comment on
@@ -2079,10 +2607,11 @@ static void N3DS_C3DTeardown(void)
 		C3D_TexDelete(&s_vramDisplayTex[i]);
 	}
 
-	for (i = 0; i < N3DS_ATLAS_COUNT; i++)
+	for (i = 0; i < s_atlasCount; i++)
 	{
 		C3D_TexDelete(&s_atlasTextures[i]);
 	}
+	s_atlasCount = 0;
 
 	if (s_vertexBufferMem != NULL)
 	{
@@ -2300,6 +2829,23 @@ static int N3DS_NextPktBias(int cur)
  */
 int g_dbg_frameSync = 0;
 
+/*
+ * What C3D_FrameEnd flushes from the CPU's data cache before the GPU reads the
+ * frame. 0 (default): C3D_FrameEnd(0), i.e. citro3d's GSPGPU_FlushDataCache
+ * over the WHOLE linear heap (32 MiB on an Old 3DS, 88 MiB on a New 3DS) every
+ * frame. 1: only what the CPU wrote for this frame and nobody flushed yet --
+ * the vertex range [0, s_vertexCursor) -- plus GX_CMDLIST_FLUSH, which has
+ * GSP flush the command list itself. Every other CPU write the GPU reads
+ * flushes at its own site: decoded cells and track-atlas rects
+ * (N3DS_C3DUploadTileBlock), the track geometry block and its per-frame
+ * patches, the VRAM-display chunks, the bottom-UI texture. dumpreq
+ * `c3dflush [N]`; [ENDPROF] `fend` is the whole FrameEnd and `flush` the
+ * range flush of mode 1. Off by default until hardware says the range flush
+ * is the cheaper one (the kernel may well clean the whole L1 for a range that
+ * large, which would make mode 0 the cheap one).
+ */
+int g_dbg_c3dFlush = 0;
+
 /* Nonzero between a successful C3D_FrameBegin and C3D_FrameEnd. citro3d
  * points libctru's GPU command buffer at NULL once a frame ends, so ANY draw
  * or state change issued outside the bracket is a svcBreak (GPUCMD_Add's
@@ -2332,6 +2878,8 @@ void N3DS_C3DBeginFrame(void)
 	 * cleared, which parallax the left eye's own uniforms carry, and whether
 	 * the draw journal records. Pure CPU, so it sits ahead of the SYNCDRAW
 	 * wait rather than inside the frame bracket. */
+	const unsigned long long endProfT = N3DS_EndProfNow();
+
 	N3DS_StereoLatchFrame();
 
 	N3DS_FrameTrace("[CTR-3DS] FrameBegin: enter (SYNCDRAW wait)");
@@ -2425,6 +2973,7 @@ void N3DS_C3DBeginFrame(void)
 	 * fresh offset (see the header comment on N3DS_C3DAppendVertices) --
 	 * reset the write cursor once per frame, not per draw. */
 	s_vertexCursor = 0;
+	(void)N3DS_EndProfMark(N3DS_ENDPROF_BEGIN, endProfT);
 }
 
 /* GPU-time window accumulator (see n3ds_backend.h). Written on whichever
@@ -2450,7 +2999,21 @@ void N3DS_C3DEndFrame(void)
 	N3DS_FrameTrace("[CTR-3DS] FrameEnd: enter (submit)");
 	N3DS_BeatMark(beatThread, N3DS_BEAT_WHERE_FRAMEEND);
 	s_frameOpen = 0;
-	C3D_FrameEnd(0);
+	if (g_dbg_c3dFlush && (s_vertexBufferMem != NULL))
+	{
+		const unsigned long long flushT = N3DS_EndProfNow();
+
+		if (s_vertexCursor > 0)
+		{
+			GSPGPU_FlushDataCache(s_vertexBufferMem, (u32)((size_t)s_vertexCursor * sizeof(N3DS_Vertex)));
+		}
+		(void)N3DS_EndProfMark(N3DS_ENDPROF_FLUSH, flushT);
+		C3D_FrameEnd(GX_CMDLIST_FLUSH);
+	}
+	else
+	{
+		C3D_FrameEnd(0);
+	}
 	N3DS_BeatMark(beatThread, N3DS_BEAT_WHERE_OK);
 	N3DS_FrameTrace("[CTR-3DS] FrameEnd: returned");
 
@@ -2497,6 +3060,27 @@ int N3DS_C3DAppendVertices(const N3DS_Vertex *vertices, int count)
 	}
 
 	return base;
+}
+
+N3DS_Vertex *N3DS_C3DReserveVertices(int count, int *baseOut)
+{
+	int base;
+
+	if ((count <= 0) || ((s_vertexCursor + count) > N3DS_MAX_FRAME_VERTICES))
+	{
+		*baseOut = -1;
+		return NULL;
+	}
+
+	base = s_vertexCursor;
+	s_vertexCursor += count;
+	if (s_vertexHighWater < s_vertexCursor)
+	{
+		s_vertexHighWater = s_vertexCursor;
+	}
+
+	*baseOut = base;
+	return (N3DS_Vertex *)s_vertexBufferMem + base;
 }
 
 int N3DS_C3DFrameVertexHighWater(void)
@@ -2605,16 +3189,25 @@ static void N3DS_C3DUploadTileBlock(C3D_Tex *tex, int tilesPerRow, int baseTileC
 
 void N3DS_C3DUploadDecodedCell(int atlasIndex, int cellX, int cellY, const void *tiled256)
 {
-	if ((atlasIndex < 0) || (atlasIndex >= N3DS_ATLAS_COUNT))
+	if ((atlasIndex < 0) || (atlasIndex >= s_atlasCount))
 	{
 		return;
 	}
 	N3DS_C3DUploadTileBlock(&s_atlasTextures[atlasIndex], N3DS_ATLAS_DIM / 8, cellX * 32, cellY * 32, 32, 32, tiled256); /* unchanged behavior */
 }
 
+void N3DS_C3DUploadDecodedTiles(int atlasIndex, int cellX, int cellY, int tileCol, int tileRow, int tilesWide, int tilesHigh, const void *tiled)
+{
+	if ((atlasIndex < 0) || (atlasIndex >= s_atlasCount))
+	{
+		return;
+	}
+	N3DS_C3DUploadTileBlock(&s_atlasTextures[atlasIndex], N3DS_ATLAS_DIM / 8, (cellX * 32) + tileCol, (cellY * 32) + tileRow, tilesWide, tilesHigh, tiled);
+}
+
 void N3DS_C3DUploadDecodedSubCell(int atlasIndex, int physCellX, int physCellY, int subX, int subY, const void *tiled64)
 {
-	if ((atlasIndex < 0) || (atlasIndex >= N3DS_ATLAS_COUNT))
+	if ((atlasIndex < 0) || (atlasIndex >= s_atlasCount))
 	{
 		return;
 	}
@@ -2635,7 +3228,7 @@ static void N3DS_DebugWriteAtlasDump(void)
 	char msg[96];
 	int i, written = 0;
 
-	for (i = 0; i < N3DS_ATLAS_COUNT; i++)
+	for (i = 0; i < s_atlasCount; i++)
 	{
 		FILE *f;
 
@@ -2656,7 +3249,7 @@ static void N3DS_DebugWriteAtlasDump(void)
 		written++;
 	}
 
-	snprintf(msg, sizeof(msg), "[CTR-3DS] dumped %d/%d atlas textures (%u bytes each)", written, N3DS_ATLAS_COUNT, (unsigned)bytes);
+	snprintf(msg, sizeof(msg), "[CTR-3DS] dumped %d/%d atlas textures (%u bytes each)", written, s_atlasCount, (unsigned)bytes);
 	N3DS_DebugLog(msg);
 }
 #endif
@@ -2695,7 +3288,7 @@ void N3DS_C3DSetColorDoubling(int enable)
 
 void N3DS_C3DBindAtlas(int atlasIndex)
 {
-	if ((atlasIndex < 0) || (atlasIndex >= N3DS_ATLAS_COUNT))
+	if ((atlasIndex < 0) || (atlasIndex >= s_atlasCount))
 	{
 		return;
 	}
@@ -2886,6 +3479,10 @@ int N3DS_TrackGeom_Upload(const void *verts, int vertCount, int vertStride, cons
 
 	memcpy(block, verts, vertBytes);
 	memcpy(block + indexOffset, indices, (size_t)indexCount * sizeof(u16));
+	/* Once per level load. Covered by C3D_FrameEnd(0)'s whole-heap flush
+	 * anyway; required under `c3dflush 1`, which flushes only the frame's
+	 * vertex range. */
+	GSPGPU_FlushDataCache(block, (u32)totalBytes);
 
 	s_trackGeomMem = block;
 	s_trackIndexPtr = block + indexOffset;
@@ -2900,6 +3497,12 @@ int N3DS_TrackGeom_Upload(const void *verts, int vertCount, int vertStride, cons
 	BufInfo_Add(&s_trackBufInfo, s_trackGeomMem, vertStride, 3, 0x210);
 
 	s_trackGeomReady = 1;
+	{
+		char tag[48];
+
+		snprintf(tag, sizeof(tag), "trackgeom +%uKiB", (unsigned)(totalBytes / 1024u));
+		N3DS_MemLog(tag);
+	}
 	return 1;
 }
 
@@ -3283,6 +3886,8 @@ void N3DS_TrackDraw_Begin(const float *qx, const float *qy, const float *qw, flo
 	/* The packet path owns texenv 0 between track frames, so whatever
 	 * N3DS_TrackDraw_SetTextured last recorded is stale by now. */
 	s_trackTexturedState = 0;
+	s_trackBoundUnit0 = -1;
+	s_trackBoundUnit1 = -1;
 
 	s_trackDrawActive = 1;
 }
@@ -3402,10 +4007,15 @@ void N3DS_TrackDraw_Leaf(int firstIndex, int indexCount, float otIndexLo, float 
 		 * bilinear off, mode 1 is the nearest single-sample path unchanged. */
 		int split = g_dbg_trackBilinear && (blend == 3);
 
-		N3DS_TrackAtlas_Bind(atlasBin);
-		if (split)
+		if (s_trackBoundUnit0 != atlasBin)
+		{
+			N3DS_TrackAtlas_Bind(atlasBin);
+			s_trackBoundUnit0 = atlasBin;
+		}
+		if (split && (s_trackBoundUnit1 != atlasBin))
 		{
 			N3DS_TrackAtlas_BindNearestView(atlasBin);
+			s_trackBoundUnit1 = atlasBin;
 		}
 		N3DS_TrackDraw_SetTextured(split ? 2 : 1);
 	}
@@ -3770,7 +4380,7 @@ void N3DS_ModelDraw_Run(int startVertex, int triangleCount, int atlasIndex, int 
 		N3DS_C3DSetBlendMode(blend);
 	}
 
-	if (textured && (atlasIndex >= 0) && (atlasIndex < N3DS_ATLAS_COUNT))
+	if (textured && (atlasIndex >= 0) && (atlasIndex < s_atlasCount))
 	{
 		/* Bind only on change. The caller sorts a frame's triangles into
 		 * texture-homogeneous runs, so consecutive runs frequently share an
@@ -3927,6 +4537,7 @@ int N3DS_BottomPass_Wanted(int mapDrawing)
 int N3DS_BottomPass_Begin(void)
 {
 	const unsigned short *tiled;
+	int firstUpload = 0;
 	static const float zeroVec[2][4] = {{0, 0, 0, 0}, {0, 0, 0, 0}};
 
 	if (s_bottomTargetFailed || !s_frameOpen)
@@ -3945,6 +4556,7 @@ int N3DS_BottomPass_Begin(void)
 		C3D_TexSetWrap(&s_bottomUiTex, GPU_CLAMP_TO_EDGE, GPU_CLAMP_TO_EDGE);
 		s_bottomUiTexReady = 1;
 		tiled = N3DS_BottomUi_Paint(1); /* first picture: always upload */
+		firstUpload = 1;
 	}
 	else
 	{
@@ -3963,8 +4575,13 @@ int N3DS_BottomPass_Begin(void)
 	}
 	if (tiled != NULL)
 	{
-		memcpy(s_bottomUiTex.data, tiled, (size_t)N3DS_BOTTOM_UI_TEX_W * N3DS_BOTTOM_UI_TEX_H * 2U);
-		GSPGPU_FlushDataCache(s_bottomUiTex.data, (u32)N3DS_BOTTOM_UI_TEX_W * N3DS_BOTTOM_UI_TEX_H * 2U);
+		/* After the first upload, the picture's 30 tile rows (240 lines) only:
+		 * the last 16 lines are never painted and keep the first upload's
+		 * zeros. */
+		const size_t bytes = (size_t)N3DS_BOTTOM_UI_TEX_W * (firstUpload ? (size_t)N3DS_BOTTOM_UI_TEX_H : 240U) * 2U;
+
+		memcpy(s_bottomUiTex.data, tiled, bytes);
+		GSPGPU_FlushDataCache(s_bottomUiTex.data, (u32)bytes);
 	}
 
 	/* Queued clear before any bottom draw; every draw this frame executes at
@@ -4098,11 +4715,19 @@ void N3DS_StereoRenderRightEye(void)
 	int i;
 	int lastDoubling = -1;
 	int lastDepthWrite = 1;
+	/* Atlas bound to texture unit 0 by the previous packet op; -1 after
+	 * anything else binds it (VRAM quads, track/model brackets). Consecutive
+	 * merge emits often share an atlas, and C3D_TexBind dirties the unit even
+	 * for the same texture. */
+	int lastAtlas = -1;
+	unsigned long long rightT0;
 
+	s_rightEyeLastTicks = 0;
 	if (!s_stereoFrameActive || (s_renderTargetRight == NULL) || !s_frameOpen)
 	{
 		return;
 	}
+	rightT0 = (unsigned long long)svcGetSystemTick();
 
 	s_stereoRecording = 0;
 	s_stereoEye = 1;
@@ -4137,10 +4762,20 @@ void N3DS_StereoRenderRightEye(void)
 		}
 	}
 
+#ifdef CTR_INTERNAL
+	s_endProfStereoFrames++;
+	s_endProfOverflows += (unsigned)s_stereoOverflow;
+#endif
 	for (i = 0; i < s_stereoOpCount; i++)
 	{
 		const N3DS_StereoOp *op = &s_stereoOps[i];
 
+#ifdef CTR_INTERNAL
+		if (op->kind <= N3DS_STEREO_OP_MODEL_END)
+		{
+			s_endProfOps[op->kind]++;
+		}
+#endif
 		switch (op->kind)
 		{
 		case N3DS_STEREO_OP_PKT:
@@ -4156,7 +4791,11 @@ void N3DS_StereoRenderRightEye(void)
 				lastDepthWrite = (int)op->u.pkt.depthWrite;
 			}
 			N3DS_C3DSetBlendMode((int)op->u.pkt.blend);
-			N3DS_C3DBindAtlas((int)op->u.pkt.atlas);
+			if ((int)op->u.pkt.atlas != lastAtlas)
+			{
+				N3DS_C3DBindAtlas((int)op->u.pkt.atlas);
+				lastAtlas = (int)op->u.pkt.atlas;
+			}
 			C3D_DrawArrays(GPU_TRIANGLES, op->u.pkt.baseVertex, op->u.pkt.vertCount);
 			break;
 		}
@@ -4172,6 +4811,7 @@ void N3DS_StereoRenderRightEye(void)
 				lastDoubling = 0;
 			}
 			N3DS_C3DBindVramDisplayTex((int)op->u.pkt.atlas);
+			lastAtlas = -1;
 			C3D_DrawArrays(GPU_TRIANGLES, op->u.pkt.baseVertex, op->u.pkt.vertCount);
 			break;
 		}
@@ -4179,6 +4819,7 @@ void N3DS_StereoRenderRightEye(void)
 		{
 			N3DS_TrackDraw_Begin(op->u.mtx.qx, op->u.mtx.qy, op->u.mtx.qw, op->u.mtx.h);
 			lastDoubling = -1; /* the bracket owns doubling/blend/depth-write */
+			lastAtlas = -1;    /* ... and texture unit 0 */
 			break;
 		}
 		case N3DS_STEREO_OP_TRACK_LEAF:
@@ -4198,6 +4839,7 @@ void N3DS_StereoRenderRightEye(void)
 		{
 			N3DS_ModelDraw_Begin();
 			lastDoubling = -1;
+			lastAtlas = -1;
 			break;
 		}
 		case N3DS_STEREO_OP_MODEL_INSTANCE:
@@ -4238,6 +4880,7 @@ void N3DS_StereoRenderRightEye(void)
 
 	/* s_stereoEye stays 1 until the next frame's latch resets it -- nothing
 	 * else draws between here and N3DS_C3DEndFrame. */
+	s_rightEyeLastTicks = (unsigned long long)svcGetSystemTick() - rightT0;
 }
 
 /* Depth-WRITE only; the test itself stays LEQUAL so translucent content is
@@ -4298,6 +4941,10 @@ void N3DS_C3DUploadVramDisplayChunk(int slotIndex, const void *tiled256)
 	}
 
 	C3D_TexUpload(&s_vramDisplayTex[slotIndex], tiled256);
+	/* C3D_TexUpload is a plain memcpy into linear memory. Covered by
+	 * C3D_FrameEnd(0)'s whole-heap flush anyway; required under
+	 * `c3dflush 1` (see g_dbg_c3dFlush). */
+	GSPGPU_FlushDataCache(s_vramDisplayTex[slotIndex].data, s_vramDisplayTex[slotIndex].size);
 }
 
 void N3DS_C3DBindVramDisplayTex(int slotIndex)
@@ -4344,8 +4991,19 @@ void N3DS_QueueDumpReq(const char *word)
 	if (word != NULL)
 	{
 		snprintf(s_uiReqWord, sizeof(s_uiReqWord), "%s", word);
+		/* The literal "dumpreq" in the binary is what package-3ds.sh and
+		 * pre-release-audit.sh look for to tell an internal build from a
+		 * production one. */
+		N3DS_DebugLog("[CTR-3DS] dumpreq queued");
 	}
 }
+#endif
+
+#ifdef CTR_INTERNAL
+void NativePerf_AddPollUs(int which, unsigned us);
+#else
+/* The perf counters only exist in debug builds. */
+#define NativePerf_AddPollUs(which, us) ((void)(which), (void)(us))
 #endif
 
 unsigned int N3DS_ReadButtons(void)
@@ -4353,28 +5011,51 @@ unsigned int N3DS_ReadButtons(void)
 	unsigned int out = 0;
 	u32 held;
 
+	const u64 hidT0 = svcGetSystemTick();
 	hidScanInput();
 	held = hidKeysHeld();
+	NativePerf_AddPollUs(1, (unsigned)(((svcGetSystemTick() - hidT0) * 1000000ull) / SYSCLOCK_ARM11));
 #ifdef CTR_INTERNAL
 	held |= N3DS_DebugLinkKeys();
 #endif
 
 	/* Bottom-screen UI touch poll (tabs, options, updater, debug). */
-	N3DS_BottomUi_Touch();
+	{
+		const u64 touchT0 = svcGetSystemTick();
+
+		N3DS_BottomUi_Touch();
+		NativePerf_AddPollUs(2, (unsigned)(((svcGetSystemTick() - touchT0) * 1000000ull) / SYSCLOCK_ARM11));
+	}
 
 #ifdef CTR_INTERNAL
 	/* SELECT+R freed (the VRAM/debug capture set). Still reachable as dumpreq `capture`. */
 
-	/* Host-scriptable trigger: Azahar's SD card is a plain host
-	 * folder, so an autonomous session can drive diagnostics by creating
-	 * sdmc:/dumpreq.txt -- no window focus or key injection involved. The
-	 * file's first word selects the action (the A/B toggles need
-	 * to be reachable without a gamepad):
+	/* Diagnostic requests: a word queued with N3DS_QueueDumpReq (the bottom-screen
+	 * debug UI, or `SITE DUMPREQ <word>` over FTP -- see n3ds_debuglink.c) runs
+	 * here on the main thread. The word selects the action (the A/B toggles need
+	 * to be reachable without a gamepad). There is no file channel: opening a file
+	 * on the SD card from here stalled the frame for up to 230 ms when the card
+	 * was busy:
 	 *   capture (or anything else) -- the full SELECT+R capture set
 	 *   subpage     -- toggle g_dbg_disableSubPage (route all to full-page tier)
 	 *   single      -- toggle g_dbg_forceSingleTexture
 	 *   textureless -- toggle g_dbg_texturelessMode
 	 *   triscopes   -- toggle g_dbg_perfTriScopes (per-triangle perf split; taxed)
+ *   g4fast      -- toggle g_dbg_g4Fast (DEFAULT ON): the flag quads of a G4 run
+ *                  skip the depth resolve and float vertex conversion
+ *   g4check     -- toggle g_dbg_g4Check: emit every 8th flag quad both ways
+ *                  and compare ([G4CHECK] checked/bad)
+ *   g4run       -- toggle g_dbg_g4Run (the walk's POLY_G4 run fast path, the
+ *                  menu flag; A/B for [PARSEPROF] / draw_otag_parse_ms)
+ *   flaglean    -- toggle g_dbg_flagLean (DEFAULT ON): the menu flag's 360 RTPT
+ *                  through the lean projection, same SXY and Stores; A/B for
+ *                  mainframe_ui_ms
+ *   flagpar     -- toggle g_dbg_flagPar (DEFAULT ON, needs flaglean): the flag's
+ *                  stereo depth per quad straight to the walk, no capture
+ *                  Stores or lookups; A/B for mainframe_ui_ms / [PARSEPROF]
+ *   mdlgate     -- toggle g_dbg_modelGate (DEFAULT ON): native-model triangles
+ *                  pass the flag/NCLIP/screen gate without the software GTE
+ *                  (same triangles); A/B for [INSTPROF] proj
 	 *   drawmerge   -- toggle g_dbg_drawMerge: 0 falls back to immediate
 	 *                  per-run submission instead of the state-sorted bins
 	 *   flagstyle [N] -- menu/loading flag: 0 = retail grey checkers (default),
@@ -4462,6 +5143,10 @@ unsigned int N3DS_ReadButtons(void)
 	 *   vol [N]     -- output-stage gain, percent of SPU-faithful amplitude
 	 *                  (retail's 0x3fff master is half digital scale, so 200
 	 *                  = full scale and the default). Bare resets to default.
+	 *   c3dflush [N] -- frame-end cache flush (default 0): 0 = citro3d's
+	 *                  flush of the whole linear heap, 1 = only this frame's
+	 *                  vertex range plus GX_CMDLIST_FLUSH. Bare token toggles.
+	 *                  [ENDPROF] fend/flush price the two.
 	 *   gxguard [N] -- bounded C3D_FrameBegin with stall-recovery logging
 	 *                  (Rosalina-freeze hardening, default ON). Bare token
 	 *                  toggles, N sets 0/1. OFF calls libctru's C3D_FrameBegin
@@ -4488,7 +5173,6 @@ unsigned int N3DS_ReadButtons(void)
 	 *                  call site is gated on the sink-up flag already, and a
 	 *                  later XA play request cannot bring it back.
 	 *   dbgoff      -- Rosalina-freeze bisect: stop emitting svcOutputDebugString.
-	 *   nextboot    -- boot barrier: stop consuming lines until the next power-on.
 	 *   rosafix [N] -- Rosalina-freeze display recovery experiment (default OFF).
 	 *   no3d        -- Rosalina-freeze bisect: gfxSet3D(false) at runtime.
 	 *   logclose    -- Rosalina-freeze bisect: fclose the SD log file (sdlog off).
@@ -4497,52 +5181,27 @@ unsigned int N3DS_ReadButtons(void)
 	 *   rosabisect2 -- both of the above (ndspoff + speedoff). Checked BEFORE
 	 *                  rosabisect above -- same "rosabisect" prefix, and
 	 *                  strncmp would otherwise match the shorter word first.
-	 * Polled every 64 frames so the SD probe cost stays negligible on real
-	 * hardware; the request file is deleted first so one request fires once. */
+	 */
 	{
-		/* 1, not 64: the first poll happens on the first button read of the
-		 * boot so a request staged on the card before launch applies ahead of
-		 * the boot-time loads (texwarm, speedoff), not a second into the intro. */
-		static unsigned int s_dumpPollCountdown = 1;
-		/* A word queued by the bottom-screen debug UI (N3DS_QueueDumpReq) runs
-		 * through the very same token chain below, ahead of the next file
-		 * poll and without touching the SD card or the poll countdown. */
 		const int uiReq = (s_uiReqWord[0] != '\0');
 
-		if (uiReq || (--s_dumpPollCountdown == 0))
+		if (uiReq)
 		{
-			FILE *req = uiReq ? NULL : fopen("sdmc:/dumpreq.txt", "rb");
-
-			if (!uiReq)
-			{
-				s_dumpPollCountdown = 64;
-			}
-			if (uiReq || (req != NULL))
 			{
 				extern int g_dbg_disableSubPage;
 				extern int g_dbg_forceSingleTexture;
-				/* The file holds one request per line; each poll consumes the
-				 * FIRST line only and writes the remainder back, so a multi-line
-				 * file drains one request per poll (~64 frames apart) in file
-				 * order. A word is at most 23 chars ("stereoconv 12000" is 16). */
+				/* One request at a time. A word is at most 23 chars
+				 * ("stereoconv 12000" is 16). */
 				char word[24];
 				char file[256];
 				size_t got = 0;
 				size_t lineLen = 0;
 				const char *rest;
-				int consumed = 0;
+				int consumed = 1;
 
-				if (uiReq)
-				{
-					snprintf(file, sizeof(file), "%s", s_uiReqWord);
-					s_uiReqWord[0] = '\0';
-					got = strlen(file);
-				}
-				else
-				{
-					got = fread(file, 1, sizeof(file) - 1, req);
-					fclose(req);
-				}
+				snprintf(file, sizeof(file), "%s", s_uiReqWord);
+				s_uiReqWord[0] = '\0';
+				got = strlen(file);
 				file[got] = '\0';
 
 				while ((file[lineLen] != '\0') && (file[lineLen] != '\n') && (file[lineLen] != '\r'))
@@ -4562,30 +5221,7 @@ unsigned int N3DS_ReadButtons(void)
 					rest++;
 				}
 
-				/* Consumed = the first line is gone from the card. On a host
-				 * filesystem (Azahar) a freshly written file can be transiently
-				 * held open by the OS (AV scan); the remove()/rewrite then fails,
-				 * and acting anyway re-fires the same request every poll -- a
-				 * TOGGLE request flapped a dozen in-place rebuilds that way. Skip
-				 * this poll instead: the file survives and the next poll retries. */
-				if (uiReq)
-				{
-					consumed = 1; /* nothing on the card to remove */
-				}
-				else if (*rest == '\0')
-				{
-					consumed = (remove("sdmc:/dumpreq.txt") == 0);
-				}
-				else
-				{
-					FILE *out = fopen("sdmc:/dumpreq.txt", "wb");
-
-					if (out != NULL)
-					{
-						consumed = (fputs(rest, out) >= 0);
-						fclose(out);
-					}
-				}
+				(void)rest;
 
 				if (!consumed)
 				{
@@ -4628,6 +5264,19 @@ unsigned int N3DS_ReadButtons(void)
 					g_dbg_frameSync ^= 1;
 					N3DS_DebugLog(g_dbg_frameSync ? "[CTR-3DS] framesync: ON (FrameBegin waits for hw vblank)"
 					                              : "[CTR-3DS] framesync: OFF (begin immediately)");
+				}
+				else if (strncmp(word, "c3dflush", 8) == 0)
+				{
+					if (word[8] == ' ')
+					{
+						g_dbg_c3dFlush = (atoi(&word[9]) != 0) ? 1 : 0;
+					}
+					else
+					{
+						g_dbg_c3dFlush = !g_dbg_c3dFlush;
+					}
+					N3DS_DebugLog(g_dbg_c3dFlush ? "[CTR-3DS] c3dflush: 1 (frame vertex range + command list only)"
+					                             : "[CTR-3DS] c3dflush: 0 (citro3d flushes the whole linear heap)");
 				}
 				else if (strncmp(word, "gxguard", 7) == 0)
 				{
@@ -4710,14 +5359,6 @@ unsigned int N3DS_ReadButtons(void)
 				{
 					g_dbg_rosaFix = (word[7] == ' ') ? ((atoi(&word[8]) != 0) ? 1 : 0) : !g_dbg_rosaFix;
 					N3DS_DebugLog(g_dbg_rosaFix ? "[CTR-3DS] rosafix: ON (GPU-right re-acquire after a >2s thaw)" : "[CTR-3DS] rosafix: off");
-				}
-				else if (strncmp(word, "nextboot", 8) == 0)
-				{
-					/* Boot barrier: the lines after this one stay on the card
-					 * for the NEXT power-on, so one file can script several
-					 * boots without a trip to the SD card in between. */
-					s_dumpPollCountdown = 0x7fffffffu;
-					N3DS_DebugLog("[CTR-3DS] nextboot: dumpreq polling stopped for this boot");
 				}
 				else if (strncmp(word, "no3d", 4) == 0)
 				{
@@ -4933,6 +5574,30 @@ unsigned int N3DS_ReadButtons(void)
 					 * native_direct_emit.c. */
 					g_dbg_directEmit ^= 1;
 					N3DS_DebugLog(g_dbg_directEmit ? "[CTR-3DS] direct emit: ON" : "[CTR-3DS] direct emit: OFF");
+				}
+				else if (strncmp(word, "g4fast", 6) == 0)
+				{
+					extern int g_dbg_g4Fast;
+
+					/* Same bins as the generic walker (native_direct_emit.c). */
+					g_dbg_g4Fast ^= 1;
+					N3DS_DebugLog(g_dbg_g4Fast ? "[CTR-3DS] flag quad fast path: ON" : "[CTR-3DS] flag quad fast path: off");
+				}
+				else if (strncmp(word, "g4check", 7) == 0)
+				{
+					extern int g_dbg_g4Check;
+
+					/* Emits every 8th flag quad both ways and compares ([G4CHECK]). */
+					g_dbg_g4Check ^= 1;
+					N3DS_DebugLog(g_dbg_g4Check ? "[CTR-3DS] flag quad check: ON" : "[CTR-3DS] flag quad check: off");
+				}
+				else if (strncmp(word, "g4run", 5) == 0)
+				{
+					extern int g_dbg_g4Run;
+
+					/* Both legs emit the same bins (native_direct_emit.c). */
+					g_dbg_g4Run ^= 1;
+					N3DS_DebugLog(g_dbg_g4Run ? "[CTR-3DS] POLY_G4 run fast path: ON" : "[CTR-3DS] POLY_G4 run fast path: off (one node per walk iteration)");
 				}
 #endif
 				else if (strncmp(word, "resolvememo", 11) == 0)
@@ -5347,7 +6012,7 @@ unsigned int N3DS_ReadButtons(void)
 					}
 					else
 					{
-						g_dbg_atlasView = (g_dbg_atlasView + 1) % (N3DS_ATLAS_COUNT + 1);
+						g_dbg_atlasView = (g_dbg_atlasView + 1) % (s_atlasCount + 1);
 					}
 					snprintf(msg, sizeof(msg), "[CTR-3DS] atlas view: %d", g_dbg_atlasView - 1);
 					N3DS_DebugLog(g_dbg_atlasView ? msg : "[CTR-3DS] atlas view: off");
@@ -5528,7 +6193,8 @@ unsigned int N3DS_ReadButtons(void)
 				}
 				else if (strncmp(word, "stereo", 6) == 0)
 				{
-					g_dbg_stereo ^= 1;
+					/* Not ^= 1: 2 is AUTO (the Old-3DS default), see the frame-pace block. */
+					g_dbg_stereo = g_dbg_stereo ? 0 : 1;
 					N3DS_DebugLog(g_dbg_stereo ? "[CTR-3DS] stereo: enabled (slider gates per frame)" : "[CTR-3DS] stereo: FORCED OFF");
 				}
 				else if (strncmp(word, "depthtest", 9) == 0)
@@ -5643,6 +6309,82 @@ unsigned int N3DS_ReadButtons(void)
 					}
 					snprintf(msg, sizeof(msg), "[CTR-3DS] model render: %s", names[g_dbg_modelRender]);
 					N3DS_DebugLog(msg);
+				}
+				else if (strncmp(word, "mdlgate", 7) == 0)
+				{
+					extern int g_dbg_modelGate;
+
+					/* Native-model projection gate (platform/native_model_gate.c):
+					 * a replaced instance's triangles are accepted on the CPU
+					 * without the software GTE. Both legs accept the same
+					 * triangles; A/B for [INSTPROF] proj and
+					 * mainframe_execute_instances_ms. Latched per instance. */
+					g_dbg_modelGate ^= 1;
+					N3DS_DebugLog(g_dbg_modelGate ? "[CTR-3DS] model gate: ON (no software GTE for native-model triangles)"
+					                              : "[CTR-3DS] model gate: off (software GTE per triangle)");
+				}
+				else if (strncmp(word, "logasync", 8) == 0)
+				{
+					/* SD log through the writer thread (default) or the old
+					 * fflush + fsync on the logging thread every ~2 s. Drained
+					 * first so the two paths never share the FILE. A/B for
+					 * [LOGFLUSH] and [PACE] maxWorkUs. */
+					N3DS_LogFlushNow();
+					g_dbg_logAsync ^= 1;
+					N3DS_DebugLog(g_dbg_logAsync ? "[CTR-3DS] sd log: async writer" : "[CTR-3DS] sd log: flush on the logging thread");
+				}
+				else if (strncmp(word, "trkanimvis", 10) == 0)
+				{
+					extern int g_dbg_trackAnimVisible;
+
+					/* Animated track vertices (water) patched only in the
+					 * leaves the walk draws (native_track_mesh.c). Off: every
+					 * animated vertex every walk. A/B for track_anim_ms and
+					 * [TRKANIM] animPatched/f. */
+					g_dbg_trackAnimVisible ^= 1;
+					N3DS_DebugLog(g_dbg_trackAnimVisible ? "[CTR-3DS] track anim: visible leaves only" : "[CTR-3DS] track anim: every animated vertex");
+				}
+				else if (strncmp(word, "vcstop", 6) == 0)
+				{
+					extern int g_dbg_voiceFillStopFull;
+
+					/* Background voice-cache fill stops reading once the
+					 * budget is full (native_audio.c). Off: every wanted file
+					 * is still read, for the count memo only. A/B for
+					 * voice_cache_fill_ms and disc_read_main_ms. */
+					g_dbg_voiceFillStopFull ^= 1;
+					N3DS_DebugLog(g_dbg_voiceFillStopFull ? "[CTR-3DS] voice fill: stops when the cache is full"
+					                                      : "[CTR-3DS] voice fill: reads every file (count memo) after full");
+				}
+				else if (strncmp(word, "vcpace", 6) == 0)
+				{
+					extern int g_dbg_voiceFillPace;
+
+					/* Old-3DS class: a fill step starts only when the measured
+					 * worst step fits before the vblank target (native_platform.c).
+					 * A/B for [VFILL] overruns and [PERF] avgTotalUs. */
+					g_dbg_voiceFillPace ^= 1;
+					N3DS_DebugLog(g_dbg_voiceFillPace ? "[CTR-3DS] voice fill pace: measured window" : "[CTR-3DS] voice fill pace: fixed 9 ms window");
+				}
+				else if (strncmp(word, "flagpar", 7) == 0)
+				{
+					extern int g_dbg_flagPar;
+
+					/* The flag's stereo depth through its own per-quad table
+					 * (no capture Stores, no walk-side lookups). Needs flaglean.
+					 * A/B for mainframe_ui_ms and [PARSEPROF] g4run. */
+					g_dbg_flagPar ^= 1;
+					N3DS_DebugLog(g_dbg_flagPar ? "[CTR-3DS] flag parallax table: ON" : "[CTR-3DS] flag parallax table: off (capture Stores + lookups)");
+				}
+				else if (strncmp(word, "flaglean", 8) == 0)
+				{
+					extern int g_dbg_flagLean;
+
+					/* Menu/loading flag projected through the lean projection
+					 * (same SXY, same capture Stores) instead of 360 software
+					 * RTPT ops. A/B for mainframe_ui_ms. */
+					g_dbg_flagLean ^= 1;
+					N3DS_DebugLog(g_dbg_flagLean ? "[CTR-3DS] flag lean projection: ON" : "[CTR-3DS] flag lean projection: off (software GTE)");
 				}
 				else if (strncmp(word, "hudui", 5) == 0)
 				{
@@ -6267,9 +7009,7 @@ unsigned int N3DS_ReadButtons(void)
 
 unsigned long N3DS_HeapUsedBytes(void)
 {
-	struct mallinfo mi = mallinfo();
-
-	return (unsigned long)mi.uordblks;
+	return N3DS_HeapGameUsedBytes(); /* simulation ballast excluded */
 }
 
 unsigned long N3DS_LinearFreeBytes(void)
@@ -6288,9 +7028,27 @@ float N3DS_StereoSliderState(void)
 	return osGet3DSliderState();
 }
 
+/* Does this process hold ptm:sysm? osSetSpeedupEnable silently does nothing
+ * without it (the CIA's exheader must list the service). Logged so a
+ * non-working clock toggle is visible. */
+static void N3DS_LogSpeedupAccess(int on)
+{
+	char msg[96];
+	const Result rc = ptmSysmInit();
+
+	if (R_SUCCEEDED(rc))
+	{
+		ptmSysmExit();
+	}
+	snprintf(msg, sizeof(msg), "[CTR-3DS] speedup %s: ptm:sysm %s (rc=0x%08lx)", on ? "on" : "off", R_SUCCEEDED(rc) ? "available" : "DENIED -- toggle has no effect",
+	         (unsigned long)rc);
+	N3DS_DebugLog(msg);
+}
+
 void N3DS_SetSpeedup(int on)
 {
 	osSetSpeedupEnable(on != 0);
+	N3DS_LogSpeedupAccess(on);
 	g_n3dsSpeedup = (on != 0);
 	N3DS_DebugLog(on ? "[CTR-3DS] speedup: New3DS clock-up enabled" : "[CTR-3DS] speedup: New3DS clock-up disabled");
 }
@@ -6314,7 +7072,15 @@ static void N3DS_BeatMainTick(void)
 	static unsigned int s_beatPrevRwCounter;
 	static u64 s_beatMainStallStartTick;
 	static unsigned int s_beatPostThawFrames;
+	static unsigned int s_memSampleDiv;
 	const u64 now = svcGetSystemTick();
+
+	/* Every 512th call, not 8th: the sample (sbrk + linearSpaceFree) was seen
+	 * costing 15-140 ms on an Old 3DS (the [SPIKE] beat= field), every ~12 frames. */
+	if ((++s_memSampleDiv & 511u) == 0)
+	{
+		N3DS_MemSample(); /* heap extent / linear free water marks, see N3DS_MemLog */
+	}
 
 	if (s_beatLastTick != 0)
 	{
@@ -6421,16 +7187,124 @@ static void N3DS_BeatMainTick(void)
 	}
 }
 
+/* ------------------------------------------------ fatal out-of-memory --- */
+
+static volatile int s_fatalMemPending = 0;
+static const char *s_fatalMemWhat = NULL;
+static unsigned long s_fatalMemBytes = 0;
+static unsigned long s_fatalMemLinFree = 0;
+static unsigned long s_fatalMemHeapFree = 0;
+
+void N3DS_FatalMemRequest(const char *what, unsigned long bytes)
+{
+	char line[200];
+	const unsigned long linFree = (unsigned long)linearSpaceFree();
+	const unsigned long heapFree = N3DS_HeapFreeBytes();
+
+	snprintf(line, sizeof(line), "[MEM] FATAL: %s needs %lu KiB; linear free %lu KiB of %lu KiB, heap free %lu KiB", (what != NULL) ? what : "?",
+	         bytes / 1024ul, linFree / 1024ul, N3DS_LinearHeapSize() / 1024ul, heapFree / 1024ul);
+	N3DS_DebugLog(line);
+	if (__sync_bool_compare_and_swap(&s_fatalMemPending, 0, 1))
+	{
+		s_fatalMemWhat = what;
+		s_fatalMemBytes = bytes;
+		s_fatalMemLinFree = linFree;
+		s_fatalMemHeapFree = heapFree;
+		__sync_synchronize();
+		s_fatalMemPending = 2; /* published */
+	}
+}
+
+/*
+ * The main loop's half of N3DS_FatalMemRequest: the GPU is let idle (the frame
+ * the render worker may still be building ends, the queue drains), the top
+ * screen becomes a text console with the numbers, and after START (or the
+ * system closing the app) the game quits through the normal exit path.
+ */
+#if defined(CTR_NATIVE_RENDER_THREAD)
+void NativeRenderQueue_Fence(void); /* native_render_queue.c: plain void, no game types */
+#endif
+
+static void N3DS_ShowFatalMemScreen(void)
+{
+	char heap[200];
+	int waited;
+
+	N3DS_MemLog("fatal");
+	N3DS_HeapDescribe(heap, sizeof(heap));
+	N3DS_DebugLog(heap);
+	N3DS_LogFlushNow();
+#if defined(CTR_NATIVE_RENDER_THREAD)
+	/* Jobs this (the game) thread posted run to the end first: no worker frame
+	 * may start after the console takes the top screen. */
+	NativeRenderQueue_Fence();
+#endif
+	for (waited = 0; (s_frameOpen || s_beginActive) && (waited < 1000); waited++)
+	{
+		svcSleepThread(1000 * 1000LL);
+	}
+	if (s_c3dUp && !s_gpuGone && !s_frameOpen)
+	{
+		C3D_FrameSync();
+	}
+	N3DS_BottomUi_SetStatus("OUT OF MEMORY");
+	consoleInit(GFX_TOP, NULL);
+	printf("\n  CTR 3D\n\n  Out of memory:\n  %s\n\n", (s_fatalMemWhat != NULL) ? s_fatalMemWhat : "?");
+	printf("  Needed:             %lu KiB\n", s_fatalMemBytes / 1024ul);
+	printf("  Linear free:        %lu KiB\n", s_fatalMemLinFree / 1024ul);
+	printf("  Linear heap:        %lu KiB\n", N3DS_LinearHeapSize() / 1024ul);
+	printf("  Heap free:          %lu KiB\n", s_fatalMemHeapFree / 1024ul);
+	printf("  App memory region:  %lu KiB\n", (unsigned long)(osGetMemRegionSize(MEMREGION_APPLICATION) / 1024));
+	printf("  Decode atlases:     %d\n\n", N3DS_C3DAtlasCount());
+	printf("  The log (sdmc:/ctr3ds.log with\n  enable-log.txt) has the [MEM] lines.\n\n");
+	printf("  Press START to exit.\n");
+	while (aptMainLoop())
+	{
+		hidScanInput();
+		if (hidKeysDown() & KEY_START)
+		{
+			return;
+		}
+		gfxFlushBuffers();
+		gfxSwapBuffers();
+		gspWaitForVBlank();
+	}
+	if (!s_gpuGone)
+	{
+		s_gpuGone = 1;
+		__sync_synchronize();
+		N3DS_ExitLog("quit event from the system on the fatal screen (GPU gone)");
+	}
+}
+
 int N3DS_MainLoopActive(void)
 {
-	N3DS_BeatMainTick();
+	{
+		const u64 beatT0 = svcGetSystemTick();
+
+		N3DS_BeatMainTick();
+		NativePerf_AddPollUs(3, (unsigned)(((svcGetSystemTick() - beatT0) * 1000000ull) / SYSCLOCK_ARM11));
+	}
+	if (s_fatalMemPending == 2)
+	{
+		s_fatalMemPending = 3; /* shown once */
+		N3DS_ShowFatalMemScreen();
+		return 0;
+	}
+	if (s_fatalMemPending == 3)
+	{
+		return 0;
+	}
 	/* An FTP "SITE INSTALL" finished: leave through the normal quit path so
 	 * aptExit() chainloads the freshly installed build. */
 	if (N3DS_FtpRelaunchDue())
 	{
 		return 0;
 	}
-	if (!aptMainLoop())
+	const u64 aptT0 = svcGetSystemTick();
+	const int aptAlive = aptMainLoop();
+	NativePerf_AddPollUs(0, (unsigned)(((svcGetSystemTick() - aptT0) * 1000000ull) / SYSCLOCK_ARM11));
+	if (!aptAlive)
 	{
 		/* The system is closing the app (HOME -> Close, power): the GPU is no
 		 * longer ours. Not one more frame may wait for it (see s_gpuGone). */

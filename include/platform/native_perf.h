@@ -163,6 +163,59 @@ enum NativePerfBucket
 	 * this enum.
 	 */
 	NATIVE_PERF_BUCKET_DISC_READ_MAIN,
+	/*
+	 * 3DS background voice-cache fill (NativeAudio_VoiceCacheBackgroundStep),
+	 * run by the frame pacer in time it would otherwise sleep -- carved out of
+	 * vsync_wait_ms so idle time is not reported as work or vice versa. Its
+	 * SD reads also land in disc_read_main_ms, which nests inside it.
+	 * Appended, never inserted: s_bucketInfo is indexed by this enum.
+	 */
+	NATIVE_PERF_BUCKET_VOICE_CACHE_FILL,
+	/*
+	 * mainframe_level_geometry_ms split, 1P path (RenderAllLevelGeometry):
+	 * AnimateWater1P / AnimateQuad, the BSP render-list walk
+	 * (RenderLists_Init1P2P: frustum MVMVA + LOD RTPS), the resident track's
+	 * frame snapshot (NativeTrackFrame_Record), and the sky (DrawSky_Full +
+	 * CAM_SkyboxGlow: the menu's ~586 RTPT a frame). All nest inside
+	 * mainframe_level_geometry_ms (not dominant candidates). Appended, never
+	 * inserted: s_bucketInfo is indexed by this enum.
+	 */
+	NATIVE_PERF_BUCKET_LEVEL_ANIMATE,
+	NATIVE_PERF_BUCKET_LEVEL_RENDERLISTS,
+	NATIVE_PERF_BUCKET_LEVEL_TRACK_RECORD,
+	NATIVE_PERF_BUCKET_LEVEL_SKY,
+	/*
+	 * render_submit_ms by phase (RenderSubmit): Platform_FlipVBlanks (the
+	 * pacing policy), PutDrawEnv/PutDispEnv, and DrawOTag as a whole (which
+	 * holds draw_otag_ms plus the scene begin/end around it). All nest inside
+	 * render_submit_ms (not dominant candidates). Appended, never inserted.
+	 */
+	NATIVE_PERF_BUCKET_SUBMIT_FLIP,
+	NATIVE_PERF_BUCKET_SUBMIT_ENVS,
+	NATIVE_PERF_BUCKET_SUBMIT_DRAWOTAG,
+	/*
+	 * mainframe_setup_ms by part (MainFrame_RenderFrame): the VisMem refresh,
+	 * the animated-texture cycle, the active menu's input + state machine, and
+	 * the rest (rain, highlight, unplugged/final-lap messages, ElimBG). All
+	 * nest inside mainframe_setup_ms (not dominant candidates).
+	 */
+	NATIVE_PERF_BUCKET_SETUP_VISMEM,
+	NATIVE_PERF_BUCKET_SETUP_CYCLETEX,
+	NATIVE_PERF_BUCKET_SETUP_MENU,
+	NATIVE_PERF_BUCKET_SETUP_MISC,
+	NATIVE_PERF_BUCKET_STR_READ,
+	NATIVE_PERF_BUCKET_STR_DECODE,
+	NATIVE_PERF_BUCKET_STR_UPLOAD,
+	NATIVE_PERF_BUCKET_VBL_EMIT,
+	NATIVE_PERF_BUCKET_VBL_RCNT,
+	NATIVE_PERF_BUCKET_VBL_CALLBACK,
+	NATIVE_PERF_BUCKET_VBL_HOWL,
+	NATIVE_PERF_BUCKET_VBL_POLLINPUT,
+	NATIVE_PERF_BUCKET_POLL_APT,
+	NATIVE_PERF_BUCKET_POLL_HID,
+	NATIVE_PERF_BUCKET_POLL_TOUCH,
+	NATIVE_PERF_BUCKET_POLL_BEAT,
+	NATIVE_PERF_BUCKET_POLL_INPUTUPD,
 	NATIVE_PERF_BUCKET_COUNT
 };
 
@@ -228,6 +281,79 @@ struct NativeOtagSplitStats
 };
 
 void NativePerf_TakeOtagSplit(struct NativeOtagSplitStats *out);
+#endif
+
+#if defined(__3DS__)
+/*
+ * [INSTPROF] / [GTEPROF] -- what mainframe_execute_instances_ms (and the rest
+ * of the game thread's GTE work) is made of, on hardware. 3DS CTR_INTERNAL
+ * builds only; one window per [PERF] window (native_perf.c has the report).
+ *
+ * GTE ops: every software-GTE op is counted by phase -- the innermost of the
+ * game-thread scopes below that is open (game logic, instance queue/execute,
+ * level geometry, effects + hud, ui; anything else is "other"). A count costs
+ * one increment; multiplied by an op's cycle cost it says where the GTE time
+ * of a phase goes without timing every op.
+ *
+ * Instances: RenderBucket_DispatchDrawFunc is timed whole per draw-func kind
+ * (two ticks per drawn instance), and DrawFunc_Normal counts its per-command
+ * work and times one command in NATIVE_INSTPROF_SAMPLE_EVERY phase by phase
+ * (vertex decode, projection + cull, native-model capture, packet write).
+ * Ticks are SYSCLOCK_ARM11 (268 MHz) units: Old-3DS CPU cycles.
+ */
+#define NATIVE_INSTPROF_SAMPLE_EVERY 16
+
+enum NativeGteProfPhase
+{
+	NATIVE_GTEPROF_OTHER = 0,
+	NATIVE_GTEPROF_LOGIC,
+	NATIVE_GTEPROF_QUEUE,
+	NATIVE_GTEPROF_EXEC,
+	NATIVE_GTEPROF_LEVEL,
+	NATIVE_GTEPROF_EFFECTS,
+	NATIVE_GTEPROF_UI,
+	NATIVE_GTEPROF_PHASES
+};
+
+enum NativeInstProfPhase
+{
+	NATIVE_INSTPROF_DECODE = 0,
+	NATIVE_INSTPROF_PROJECT,
+	NATIVE_INSTPROF_CAPTURE,
+	NATIVE_INSTPROF_PACKET,
+	NATIVE_INSTPROF_PHASES
+};
+
+/* Draw-func kinds, in RenderBucket_DispatchDrawFunc's switch order. */
+#define NATIVE_INSTPROF_FUNCS 6
+
+struct NativeInstProf
+{
+	/* Per instance, every drawn instance (index = draw-func kind, last = unknown). */
+	u32 instCount[NATIVE_INSTPROF_FUNCS];
+	u32 instTicks[NATIVE_INSTPROF_FUNCS];
+	/* DrawFunc_Normal, every command. */
+	u32 cmds;        /* command words walked (color-only ones included) */
+	u32 decodes;     /* vertices decoded from the frame stream */
+	u32 cached;      /* vertices re-read from the packed-vertex scratch */
+	u32 rtpt;        /* triangles projected with RTPT (strip starts) */
+	u32 rtps;        /* triangles projected with RTPS (strip continuations) */
+	u32 accepted;    /* triangles past the flag / NCLIP / screen-window gate */
+	u32 claimed;     /* triangles the native model path took (no packet) */
+	u32 packets;     /* triangles that went to the packet writer */
+	u32 gated;       /* of rtpt + rtps: projected by the native-model gate, not the software GTE */
+	/* Sampled phases: one command in NATIVE_INSTPROF_SAMPLE_EVERY. */
+	u32 clock;
+	u32 samples[NATIVE_INSTPROF_PHASES];
+	u32 ticks[NATIVE_INSTPROF_PHASES];
+};
+
+extern struct NativeInstProf g_instProf;
+extern int g_gteProfPhase;
+extern u32 g_gteProfOps[NATIVE_GTEPROF_PHASES][64];
+
+/* Low 32 bits of the ARM11 system tick; differences are exact for 16 s. */
+u32 NativeInstProf_Tick(void);
 #endif
 #else
 /*

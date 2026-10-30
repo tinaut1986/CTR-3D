@@ -161,6 +161,36 @@ global_variable const struct NativePerfBucketInfo s_bucketInfo[NATIVE_PERF_BUCKE
     /* Main-thread disc read; a dominant candidate -- it IS the thing we want to
      * see win "dominant" on a stalled frame. Appended to match the enum. */
     {"disc_read_main_ms", 1},
+    /* dominantCandidate 0: it only runs in time the frame would have slept,
+     * so it never makes a frame late -- see the enum comment. */
+    {"voice_cache_fill_ms", 0},
+    /* dominantCandidate 0: the four nest inside mainframe_level_geometry_ms. */
+    {"level_animate_ms", 0},
+    {"level_renderlists_ms", 0},
+    {"level_track_record_ms", 0},
+    {"level_sky_ms", 0},
+    /* dominantCandidate 0: the three nest inside render_submit_ms. */
+    {"submit_flip_ms", 0},
+    {"submit_envs_ms", 0},
+    {"submit_drawotag_ms", 0},
+    /* dominantCandidate 0: the four nest inside mainframe_setup_ms. */
+    {"setup_vismem_ms", 0},
+    {"setup_cycletex_ms", 0},
+    {"setup_menu_ms", 0},
+    {"setup_misc_ms", 0},
+    {"str_read_ms", 0},
+    {"str_decode_ms", 0},
+    {"str_upload_ms", 0},
+    {"vbl_emit_ms", 0},
+    {"vbl_rcnt_ms", 0},
+    {"vbl_callback_ms", 0},
+    {"vbl_howl_ms", 0},
+    {"vbl_pollinput_ms", 0},
+    {"poll_apt_ms", 0},
+    {"poll_hid_ms", 0},
+    {"poll_touch_ms", 0},
+    {"poll_beat_ms", 0},
+    {"poll_inputupd_ms", 0},
 };
 
 global_variable FILE *s_csvFile;
@@ -240,6 +270,20 @@ struct NativePerfSpike
 	f32 walkPatchMs;
 	f32 walkParseMs;
 	f32 walkSplitsMs;
+	f32 vsyncWaitMs;  /* VSYNC_WAIT, RENDER_VSYNC_DRAWSYNC, VOICE_CACHE_FILL for this frame */
+	f32 drawSyncMs;
+	f32 voiceFillMs;
+	f32 audioVblankMs;
+	f32 vblEmitMs;
+	f32 vblRcntMs;
+	f32 vblCallbackMs;
+	f32 vblHowlMs;
+	f32 vblPollMs;
+	f32 pollAptMs;
+	f32 pollHidMs;
+	f32 pollTouchMs;
+	f32 pollBeatMs;
+	f32 pollInputUpdMs;
 	s32 levelID;
 	u32 gameMode1;
 	enum NativePerfBucket dominantBucket;
@@ -522,6 +566,217 @@ internal void NativePerf_InsertWorstFrame(const struct NativePerfWorstFrame *fra
 }
 
 #if defined(__3DS__)
+/* [INSTPROF] / [GTEPROF]: see the block comment in native_perf.h. */
+struct NativeInstProf g_instProf;
+int g_gteProfPhase;
+u32 g_gteProfOps[NATIVE_GTEPROF_PHASES][64];
+
+/* Phases nest (the instance scopes sit inside render_frame), so the phase a
+ * scope replaces is restored when it closes. Main thread only: the worker
+ * never runs the GTE. */
+#define NATIVE_GTEPROF_STACK 8
+global_variable int s_gteProfStack[NATIVE_GTEPROF_STACK];
+global_variable int s_gteProfDepth;
+
+u32 NativeInstProf_Tick(void)
+{
+	return (u32)N3DS_GetTickCount();
+}
+
+internal int NativePerf_GteProfPhaseOf(enum NativePerfBucket bucket)
+{
+	/* An if chain, not a switch: -Wswitch-enum wants every bucket named. */
+	if (bucket == NATIVE_PERF_BUCKET_GAME_LOGIC)
+	{
+		return NATIVE_GTEPROF_LOGIC;
+	}
+	if (bucket == NATIVE_PERF_BUCKET_MAINFRAME_QUEUE_INSTANCES)
+	{
+		return NATIVE_GTEPROF_QUEUE;
+	}
+	if (bucket == NATIVE_PERF_BUCKET_MAINFRAME_EXECUTE_INSTANCES)
+	{
+		return NATIVE_GTEPROF_EXEC;
+	}
+	if (bucket == NATIVE_PERF_BUCKET_MAINFRAME_LEVEL_GEOMETRY)
+	{
+		return NATIVE_GTEPROF_LEVEL;
+	}
+	if ((bucket == NATIVE_PERF_BUCKET_MAINFRAME_EFFECTS) || (bucket == NATIVE_PERF_BUCKET_MAINFRAME_HUD))
+	{
+		return NATIVE_GTEPROF_EFFECTS;
+	}
+	if (bucket == NATIVE_PERF_BUCKET_MAINFRAME_UI)
+	{
+		return NATIVE_GTEPROF_UI;
+	}
+	return -1;
+}
+
+internal void NativePerf_GteProfEnter(enum NativePerfBucket bucket)
+{
+	const int phase = NativePerf_GteProfPhaseOf(bucket);
+
+	if (phase < 0)
+	{
+		return;
+	}
+	if (s_gteProfDepth < NATIVE_GTEPROF_STACK)
+	{
+		s_gteProfStack[s_gteProfDepth] = g_gteProfPhase;
+	}
+	s_gteProfDepth++;
+	g_gteProfPhase = phase;
+}
+
+internal void NativePerf_GteProfLeave(enum NativePerfBucket bucket)
+{
+	if ((NativePerf_GteProfPhaseOf(bucket) < 0) || (s_gteProfDepth <= 0))
+	{
+		return;
+	}
+	s_gteProfDepth--;
+	g_gteProfPhase = (s_gteProfDepth < NATIVE_GTEPROF_STACK) ? s_gteProfStack[s_gteProfDepth] : NATIVE_GTEPROF_OTHER;
+}
+
+/* PsyQ mnemonics of the software GTE's function codes (native_gte_core.c's
+ * switch); unnamed codes print as their hex. */
+internal const char *NativePerf_GteOpName(int funct)
+{
+	switch (funct)
+	{
+	case 0x01: return "rtps";
+	case 0x06: return "nclip";
+	case 0x0c: return "op";
+	case 0x10: return "dpcs";
+	case 0x11: return "intpl";
+	case 0x12: return "mvmva";
+	case 0x13: return "ncds";
+	case 0x14: return "cdp";
+	case 0x16: return "ncdt";
+	case 0x1b: return "nccs";
+	case 0x1c: return "cc";
+	case 0x1e: return "ncs";
+	case 0x20: return "nct";
+	case 0x28: return "sqr";
+	case 0x29: return "dcpl";
+	case 0x2a: return "dpct";
+	case 0x2d: return "avsz3";
+	case 0x2e: return "avsz4";
+	case 0x30: return "rtpt";
+	case 0x3d: return "gpf";
+	case 0x3e: return "gpl";
+	case 0x3f: return "ncct";
+	default: return NULL;
+	}
+}
+
+internal void NativePerf_ReportInstProf(u32 frames)
+{
+	static const char *const funcNames[NATIVE_INSTPROF_FUNCS] = {"normal", "alt", "split", "special", "refl", "other"};
+	static const char *const phaseNames[NATIVE_GTEPROF_PHASES] = {"other", "logic", "queue", "exec", "level", "effects", "ui"};
+	const double usPerTick = 1000000.0 / (double)N3DS_GetTickFrequency();
+	struct NativeInstProf *ip = &g_instProf;
+	char line[400];
+	int off;
+	int k;
+
+	if (frames == 0)
+	{
+		return;
+	}
+
+	/* Per draw-func kind: drawn instances per frame and their whole cost. */
+	off = snprintf(line, sizeof(line), "[INSTPROF] f=%lu", (unsigned long)frames);
+	for (k = 0; k < NATIVE_INSTPROF_FUNCS; k++)
+	{
+		if ((ip->instCount[k] != 0) && (off > 0) && ((size_t)off < sizeof(line)))
+		{
+			off += snprintf(line + off, sizeof(line) - (size_t)off, " %s n/f=%lu us=%lu cyc/inst=%lu", funcNames[k], (unsigned long)(ip->instCount[k] / frames),
+			                (unsigned long)((double)ip->instTicks[k] * usPerTick / (double)frames),
+			                (unsigned long)(ip->instTicks[k] / ip->instCount[k]));
+		}
+	}
+	N3DS_DebugLog(line);
+
+	/* DrawFunc_Normal: per-command work and the sampled phase costs. A phase's
+	 * frame estimate is its sampled mean times the commands that reach it. */
+	if (ip->cmds != 0)
+	{
+		const u32 reach[NATIVE_INSTPROF_PHASES] = {ip->cmds, ip->rtpt + ip->rtps, ip->accepted, ip->packets};
+		u32 cyc[NATIVE_INSTPROF_PHASES];
+		u32 estUs[NATIVE_INSTPROF_PHASES];
+
+		for (k = 0; k < NATIVE_INSTPROF_PHASES; k++)
+		{
+			const double mean = ip->samples[k] ? ((double)ip->ticks[k] / (double)ip->samples[k]) : 0.0;
+
+			cyc[k] = (u32)mean;
+			estUs[k] = (u32)(mean * (double)reach[k] * usPerTick / (double)frames);
+		}
+		snprintf(line, sizeof(line),
+		         "[INSTPROF] normal/f cmd=%lu dec=%lu cached=%lu rtpt=%lu rtps=%lu gate=%lu acc=%lu claim=%lu pkt=%lu | cyc dec=%lu proj=%lu cap=%lu pkt=%lu | us dec=%lu proj=%lu cap=%lu pkt=%lu",
+		         (unsigned long)(ip->cmds / frames), (unsigned long)(ip->decodes / frames), (unsigned long)(ip->cached / frames),
+		         (unsigned long)(ip->rtpt / frames), (unsigned long)(ip->rtps / frames), (unsigned long)(ip->gated / frames), (unsigned long)(ip->accepted / frames),
+		         (unsigned long)(ip->claimed / frames), (unsigned long)(ip->packets / frames), (unsigned long)cyc[0], (unsigned long)cyc[1],
+		         (unsigned long)cyc[2], (unsigned long)cyc[3], (unsigned long)estUs[0], (unsigned long)estUs[1], (unsigned long)estUs[2],
+		         (unsigned long)estUs[3]);
+		N3DS_DebugLog(line);
+	}
+
+	/* GTE ops per frame, per phase: the total and the six most frequent. */
+	for (k = 0; k < NATIVE_GTEPROF_PHASES; k++)
+	{
+		u32 total = 0;
+		u8 taken[64];
+		int r;
+		int f;
+
+		for (f = 0; f < 64; f++)
+		{
+			total += g_gteProfOps[k][f];
+		}
+		if (total == 0)
+		{
+			continue;
+		}
+
+		memset(taken, 0, sizeof(taken));
+		off = snprintf(line, sizeof(line), "[GTEPROF] %s ops/f=%lu", phaseNames[k], (unsigned long)(total / frames));
+		for (r = 0; r < 6; r++)
+		{
+			int best = -1;
+			const char *name;
+
+			for (f = 0; f < 64; f++)
+			{
+				if (!taken[f] && (g_gteProfOps[k][f] != 0) && ((best < 0) || (g_gteProfOps[k][f] > g_gteProfOps[k][best])))
+				{
+					best = f;
+				}
+			}
+			if ((best < 0) || (off <= 0) || ((size_t)off >= sizeof(line)))
+			{
+				break;
+			}
+			taken[best] = 1;
+			name = NativePerf_GteOpName(best);
+			if (name != NULL)
+			{
+				off += snprintf(line + off, sizeof(line) - (size_t)off, " %s=%lu", name, (unsigned long)(g_gteProfOps[k][best] / frames));
+			}
+			else
+			{
+				off += snprintf(line + off, sizeof(line) - (size_t)off, " 0x%02x=%lu", best, (unsigned long)(g_gteProfOps[k][best] / frames));
+			}
+		}
+		N3DS_DebugLog(line);
+	}
+
+	memset(&g_instProf, 0, sizeof(g_instProf));
+	memset(g_gteProfOps, 0, sizeof(g_gteProfOps));
+}
+
 /*
  * Integer microseconds throughout, never %f: devkitARM's newlib only links
  * float formatting when explicitly asked to, and a silently-blank %f would
@@ -655,6 +910,57 @@ internal void NativePerf_Report3DSWindow(void)
 		N3DS_DebugLog(out);
 	}
 
+	NativePerf_ReportInstProf(s_windowFrames);
+	/* platform_end_scene_ms phase by phase, the frame-begin wait and the
+	 * right eye's journal shape (n3ds_backend.h's end-of-scene profile). */
+	{
+		char endProf[384]; /* 26 fields: wider than `out` when values grow */
+
+		N3DS_EndProfFormat(endProf, (int)sizeof(endProf));
+		N3DS_DebugLog(endProf);
+	}
+	/* mainframe_level_geometry_ms by phase (1P), avg us per frame. */
+	snprintf(out, sizeof(out), "[LVLPROF] total=%d anim=%d bsp=%d rec=%d sky=%d",
+	         (int)(s_windowBucketMs[NATIVE_PERF_BUCKET_MAINFRAME_LEVEL_GEOMETRY] * toAvgUs),
+	         (int)(s_windowBucketMs[NATIVE_PERF_BUCKET_LEVEL_ANIMATE] * toAvgUs), (int)(s_windowBucketMs[NATIVE_PERF_BUCKET_LEVEL_RENDERLISTS] * toAvgUs),
+	         (int)(s_windowBucketMs[NATIVE_PERF_BUCKET_LEVEL_TRACK_RECORD] * toAvgUs), (int)(s_windowBucketMs[NATIVE_PERF_BUCKET_LEVEL_SKY] * toAvgUs));
+	N3DS_DebugLog(out);
+	/* render_submit_ms by phase, avg us per frame. */
+	snprintf(out, sizeof(out), "[SUBPROF] total=%d flip=%d envs=%d drawotag=%d otag=%d parse=%d beginscene=%d endscene=%d",
+	         (int)(s_windowBucketMs[NATIVE_PERF_BUCKET_RENDER_SUBMIT] * toAvgUs), (int)(s_windowBucketMs[NATIVE_PERF_BUCKET_SUBMIT_FLIP] * toAvgUs),
+	         (int)(s_windowBucketMs[NATIVE_PERF_BUCKET_SUBMIT_ENVS] * toAvgUs), (int)(s_windowBucketMs[NATIVE_PERF_BUCKET_SUBMIT_DRAWOTAG] * toAvgUs),
+	         (int)(s_windowBucketMs[NATIVE_PERF_BUCKET_DRAW_OTAG] * toAvgUs), (int)(s_windowBucketMs[NATIVE_PERF_BUCKET_DRAW_OTAG_PARSE] * toAvgUs),
+	         (int)(s_windowBucketMs[NATIVE_PERF_BUCKET_PLATFORM_BEGIN_SCENE] * toAvgUs), (int)(s_windowBucketMs[NATIVE_PERF_BUCKET_PLATFORM_END_SCENE] * toAvgUs));
+	N3DS_DebugLog(out);
+	/* mainframe_setup_ms by part, avg us per frame. */
+	snprintf(out, sizeof(out), "[SETUPPROF] total=%d vismem=%d cycletex=%d menu=%d misc=%d strRead=%d strDec=%d strUp=%d",
+	         (int)(s_windowBucketMs[NATIVE_PERF_BUCKET_MAINFRAME_SETUP] * toAvgUs), (int)(s_windowBucketMs[NATIVE_PERF_BUCKET_SETUP_VISMEM] * toAvgUs),
+	         (int)(s_windowBucketMs[NATIVE_PERF_BUCKET_SETUP_CYCLETEX] * toAvgUs), (int)(s_windowBucketMs[NATIVE_PERF_BUCKET_SETUP_MENU] * toAvgUs),
+	         (int)(s_windowBucketMs[NATIVE_PERF_BUCKET_SETUP_MISC] * toAvgUs),
+	         (int)(s_windowBucketMs[NATIVE_PERF_BUCKET_STR_READ] * toAvgUs), (int)(s_windowBucketMs[NATIVE_PERF_BUCKET_STR_DECODE] * toAvgUs),
+	         (int)(s_windowBucketMs[NATIVE_PERF_BUCKET_STR_UPLOAD] * toAvgUs));
+	N3DS_DebugLog(out);
+	/* Frame cap / AUTO 3D state and the frame WORK the policy sees
+	 * (n3ds_backend.h's frame-pace block). */
+	{
+		char pace[384]; /* the 60 fps speed fields made it wider than `out` */
+
+		N3DS_FramePaceFormat(pace, (int)sizeof(pace));
+		N3DS_DebugLog(pace);
+	}
+	/* Background voice-cache fill in the pacer's waits (native_platform.c):
+	 * only in windows that ran or deferred a step. */
+	{
+		extern void Native_VoiceFillFormat(char *out, int outSize);
+		char vfill[160];
+
+		Native_VoiceFillFormat(vfill, (int)sizeof(vfill));
+		if (vfill[0] != '\0')
+		{
+			N3DS_DebugLog(vfill);
+		}
+	}
+
 	/* Only when the effect was live: quiet windows would otherwise pay an SD
 	 * log line each to report zeros, and the absence of the line IS the null
 	 * reading. avgUs is torch_main_ms (the CPU emit walk only); the effect's
@@ -680,8 +986,17 @@ internal void NativePerf_Report3DSWindow(void)
 		unsigned lfTotal = 0;
 		unsigned lfCount = 0;
 
+		int lfAsync = 0;
+		unsigned lfSync = 0;
+		unsigned lfSyncWorst = 0;
+
 		N3DS_LogFlushStats(&lfWorst, &lfTotal, &lfCount);
-		snprintf(out, sizeof(out), "[LOGFLUSH] worstUs=%u totalUs=%u n=%u", lfWorst, lfTotal, lfCount);
+		N3DS_LogAsyncStats(&lfAsync, &lfSync, &lfSyncWorst);
+		/* async=1: worstUs/totalUs are the writer thread's flushes, off the
+		 * game thread; sync/syncWorstUs are full-buffer drains on a logging
+		 * thread (what still lands in a frame). */
+		snprintf(out, sizeof(out), "[LOGFLUSH] worstUs=%u totalUs=%u n=%u async=%d sync=%u syncWorstUs=%u", lfWorst, lfTotal, lfCount, lfAsync, lfSync,
+		         lfSyncWorst);
 		N3DS_DebugLog(out);
 	}
 
@@ -966,10 +1281,10 @@ internal void NativePerf_SpikeFlush(void)
 		{
 			const struct NativePerfSpike *s = &s_spikeRing[i];
 
-			fprintf(f, "[SPIKE] f=%lu total=%.1f work=%.1f dom=%s domMs=%.1f raw1=%s/%.1f raw2=%s/%.1f walk(p/pa/sp)=%.1f/%.1f/%.1f lvl=%ld mode=%08lx\n",
+			fprintf(f, "[SPIKE] f=%lu total=%.1f work=%.1f dom=%s domMs=%.1f raw1=%s/%.1f raw2=%s/%.1f walk(p/pa/sp)=%.1f/%.1f/%.1f vsyncWait=%.1f drawSync=%.1f voiceFill=%.1f audioVbl=%.1f emit=%.1f rcnt=%.1f cb=%.1f howl=%.1f poll=%.1f apt=%.1f hid=%.1f touch=%.1f beat=%.1f inupd=%.1f lvl=%ld mode=%08lx\n",
 			        (unsigned long)s->frameCounter, (double)s->totalMs, (double)s->workMs, NativePerf_BucketName(s->dominantBucket), (double)s->dominantMs,
 			        NativePerf_BucketName(s->rawTop1), (double)s->rawTop1Ms, NativePerf_BucketName(s->rawTop2), (double)s->rawTop2Ms, (double)s->walkPatchMs,
-			        (double)s->walkParseMs, (double)s->walkSplitsMs, (long)s->levelID, (unsigned long)s->gameMode1);
+			        (double)s->walkParseMs, (double)s->walkSplitsMs, (double)s->vsyncWaitMs, (double)s->drawSyncMs, (double)s->voiceFillMs, (double)s->audioVblankMs, (double)s->vblEmitMs, (double)s->vblRcntMs, (double)s->vblCallbackMs, (double)s->vblHowlMs, (double)s->vblPollMs, (double)s->pollAptMs, (double)s->pollHidMs, (double)s->pollTouchMs, (double)s->pollBeatMs, (double)s->pollInputUpdMs, (long)s->levelID, (unsigned long)s->gameMode1);
 		}
 		fclose(f);
 	}
@@ -1067,6 +1382,20 @@ internal void NativePerf_SpikeRecord(f64 totalMs, f64 workMs, enum NativePerfBuc
 	s->walkPatchMs = s_spikeWalkPatchMs;
 	s->walkParseMs = s_spikeWalkParseMs;
 	s->walkSplitsMs = s_spikeWalkSplitsMs;
+	s->vsyncWaitMs = (f32)s_frameBucketMs[NATIVE_PERF_BUCKET_VSYNC_WAIT];
+	s->drawSyncMs = (f32)s_frameBucketMs[NATIVE_PERF_BUCKET_RENDER_VSYNC_DRAWSYNC];
+	s->voiceFillMs = (f32)s_frameBucketMs[NATIVE_PERF_BUCKET_VOICE_CACHE_FILL];
+	s->audioVblankMs = (f32)s_frameBucketMs[NATIVE_PERF_BUCKET_AUDIO_VBLANK];
+	s->vblEmitMs = (f32)s_frameBucketMs[NATIVE_PERF_BUCKET_VBL_EMIT];
+	s->vblRcntMs = (f32)s_frameBucketMs[NATIVE_PERF_BUCKET_VBL_RCNT];
+	s->vblCallbackMs = (f32)s_frameBucketMs[NATIVE_PERF_BUCKET_VBL_CALLBACK];
+	s->vblHowlMs = (f32)s_frameBucketMs[NATIVE_PERF_BUCKET_VBL_HOWL];
+	s->vblPollMs = (f32)s_frameBucketMs[NATIVE_PERF_BUCKET_VBL_POLLINPUT];
+	s->pollAptMs = (f32)s_frameBucketMs[NATIVE_PERF_BUCKET_POLL_APT];
+	s->pollHidMs = (f32)s_frameBucketMs[NATIVE_PERF_BUCKET_POLL_HID];
+	s->pollTouchMs = (f32)s_frameBucketMs[NATIVE_PERF_BUCKET_POLL_TOUCH];
+	s->pollBeatMs = (f32)s_frameBucketMs[NATIVE_PERF_BUCKET_POLL_BEAT];
+	s->pollInputUpdMs = (f32)s_frameBucketMs[NATIVE_PERF_BUCKET_POLL_INPUTUPD];
 	s_spikeSeenTotal++;
 }
 #endif
@@ -1283,9 +1612,28 @@ void NativePerf_BeginScope(enum NativePerfBucket bucket)
 		return;
 	}
 
+#if defined(__3DS__)
+	NativePerf_GteProfEnter(bucket);
+#endif
 	if (s_scopeDepth[bucket]++ == 0)
 	{
 		s_scopeStartCounter[bucket] = SDL_GetPerformanceCounter();
+	}
+}
+
+/* Plain-int entry for TUs built with -fshort-enums (n3ds_backend.c): adds `us`
+ * to a bucket of the frame in progress. Buckets are the NATIVE_PERF_BUCKET_*
+ * values; only the three POLL_* ones are used this way. */
+void NativePerf_AddPollUs(int which, unsigned us)
+{
+	const enum NativePerfBucket b = (which == 0)   ? NATIVE_PERF_BUCKET_POLL_APT
+	                                : (which == 1) ? NATIVE_PERF_BUCKET_POLL_HID
+	                                : (which == 2) ? NATIVE_PERF_BUCKET_POLL_TOUCH
+	                                               : NATIVE_PERF_BUCKET_POLL_BEAT;
+
+	if (s_enabled && s_frameOpen)
+	{
+		s_frameBucketMs[b] += (f64)us / 1000.0;
 	}
 }
 
@@ -1321,6 +1669,9 @@ void NativePerf_EndScope(enum NativePerfBucket bucket)
 		return;
 	}
 
+#if defined(__3DS__)
+	NativePerf_GteProfLeave(bucket);
+#endif
 	s_scopeDepth[bucket]--;
 	if (s_scopeDepth[bucket] == 0)
 	{

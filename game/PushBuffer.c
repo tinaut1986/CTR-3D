@@ -955,7 +955,8 @@ void PushBuffer_FadeOneWindow(struct PushBuffer *pb)
 	}
 
 	// alter the fade value by the fade velocity
-	currValue += pb->fade_step;
+	// 60fps: half the step per frame (ModSDK PushBuffer_07_FadeOneWindow)
+	currValue += FPS_HALF(pb->fade_step);
 
 	// if fade velocity is negative
 	if (pb->fade_step < 1)
