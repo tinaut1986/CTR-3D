@@ -1482,6 +1482,8 @@ global_variable int s_uipicNodeActive;
  * quads, which retail links into the player's OT. Read by the resolver and by
  * the direct-emit fast path's UI stand-aside, beside the suppress latch. */
 global_variable int s_hudshineNodeActive;
+/* 1P race HUD group of the node being walked (0 = none); see NativeGpu_MarkUiHudRange. */
+global_variable int s_uihudNodeGroup;
 /* Menu-backdrop span (character-select diorama strips). Read by
  * PacketDepth_ResolveXY, which sees screen coordinates, not packet addresses. */
 global_variable int s_menubdNodeActive;
@@ -1912,6 +1914,11 @@ global_variable uintptr_t s_uipicRangeEnd[2];
 global_variable uintptr_t s_hudshineRangeStart[2][HUDSHINE_SPANS_MAX];
 global_variable uintptr_t s_hudshineRangeEnd[2][HUDSHINE_SPANS_MAX];
 global_variable int s_hudshineRangeCount[2];
+#define UIHUD_SPANS_MAX 24
+global_variable uintptr_t s_uihudRangeStart[2][UIHUD_SPANS_MAX];
+global_variable uintptr_t s_uihudRangeEnd[2][UIHUD_SPANS_MAX];
+global_variable u8 s_uihudRangeGroup[2][UIHUD_SPANS_MAX];
+global_variable int s_uihudRangeCount[2];
 
 void NativeGpu_MarkSkyRange(uintptr_t start, uintptr_t end)
 {
@@ -2057,6 +2064,20 @@ void NativeGpu_MarkHudShineRange(uintptr_t start, uintptr_t end)
 	s_hudshineRangeCount[s_skyRangeWriteIdx] = n + 1;
 }
 
+void NativeGpu_MarkUiHudRange(uintptr_t start, uintptr_t end, int group)
+{
+	int n = s_uihudRangeCount[s_skyRangeWriteIdx];
+
+	if ((end <= start) || (n >= UIHUD_SPANS_MAX) || (group <= 0) || (group >= (int)PKTDEPTH_UI_HUD_GROUPS))
+	{
+		return;
+	}
+	s_uihudRangeStart[s_skyRangeWriteIdx][n] = start;
+	s_uihudRangeEnd[s_skyRangeWriteIdx][n] = end;
+	s_uihudRangeGroup[s_skyRangeWriteIdx][n] = (u8)group;
+	s_uihudRangeCount[s_skyRangeWriteIdx] = n + 1;
+}
+
 void NativeGpu_PublishSkyRange(void)
 {
 	s_skyRangeReadIdx = s_skyRangeWriteIdx;
@@ -2081,6 +2102,7 @@ void NativeGpu_ClearSkyRange(void)
 	s_uipicRangeStart[s_skyRangeWriteIdx] = 0;
 	s_uipicRangeEnd[s_skyRangeWriteIdx] = 0;
 	s_hudshineRangeCount[s_skyRangeWriteIdx] = 0;
+	s_uihudRangeCount[s_skyRangeWriteIdx] = 0;
 }
 
 internal int NativeGpu_IsSkyPacket(uintptr_t addr)
@@ -2116,6 +2138,20 @@ internal int NativeGpu_IsUiFpsPacket(uintptr_t addr)
 internal int NativeGpu_IsUiPicPacket(uintptr_t addr)
 {
 	return (addr >= s_uipicRangeStart[s_skyRangeReadIdx]) && (addr < s_uipicRangeEnd[s_skyRangeReadIdx]);
+}
+
+internal int NativeGpu_UiHudGroupOf(uintptr_t addr)
+{
+	int i;
+
+	for (i = 0; i < s_uihudRangeCount[s_skyRangeReadIdx]; i++)
+	{
+		if ((addr >= s_uihudRangeStart[s_skyRangeReadIdx][i]) && (addr < s_uihudRangeEnd[s_skyRangeReadIdx][i]))
+		{
+			return (int)s_uihudRangeGroup[s_skyRangeReadIdx][i];
+		}
+	}
+	return 0;
 }
 
 internal int NativeGpu_IsHudShinePacket(uintptr_t addr)
@@ -2178,6 +2214,10 @@ internal void NativeGpu_RebuildTagEnvelope(void)
 	{
 		NativeGpu_TagEnvelopeAdd(s_hudshineRangeStart[idx][i], s_hudshineRangeEnd[idx][i]);
 	}
+	for (i = 0; i < s_uihudRangeCount[idx]; i++)
+	{
+		NativeGpu_TagEnvelopeAdd(s_uihudRangeStart[idx][i], s_uihudRangeEnd[idx][i]);
+	}
 	s_tagEnvelopeIdx = idx;
 }
 
@@ -2203,7 +2243,7 @@ internal int NativeGpu_InAnyTagRange(uintptr_t addr)
 {
 	return NativeGpu_InTagEnvelope(addr) &&
 	       (NativeGpu_IsSkyPacket(addr) || NativeGpu_IsStarPacket(addr) || NativeGpu_IsMenuBackdropPacket(addr) || NativeGpu_IsGlowPacket(addr) ||
-	        NativeGpu_IsUiMapPacket(addr) || NativeGpu_IsUiFpsPacket(addr) || NativeGpu_IsUiPicPacket(addr) || NativeGpu_IsHudShinePacket(addr));
+	        NativeGpu_IsUiMapPacket(addr) || NativeGpu_IsUiFpsPacket(addr) || NativeGpu_IsUiPicPacket(addr) || NativeGpu_IsHudShinePacket(addr) || (NativeGpu_UiHudGroupOf(addr) != 0));
 }
 
 /* The walk's per-node tag flags (s_skyNodeActive and its siblings) for the
@@ -2219,6 +2259,7 @@ force_inline void NativeGpu_TagWalkNode(uintptr_t addr)
 		s_uifpsNodeActive = NativeGpu_IsUiFpsPacket(addr);
 		s_uipicNodeActive = NativeGpu_IsUiPicPacket(addr);
 		s_hudshineNodeActive = NativeGpu_IsHudShinePacket(addr);
+		s_uihudNodeGroup = NativeGpu_UiHudGroupOf(addr);
 	}
 	else
 	{
@@ -2230,6 +2271,7 @@ force_inline void NativeGpu_TagWalkNode(uintptr_t addr)
 		s_uifpsNodeActive = 0;
 		s_uipicNodeActive = 0;
 		s_hudshineNodeActive = 0;
+		s_uihudNodeGroup = 0;
 	}
 }
 
@@ -2619,9 +2661,14 @@ internal int PacketDepth_ResolveXY(const s16 *xs, const s16 *ys, int n, u16 *out
 
 				if (*out == 0xFFFFu)
 				{
+					/* Race HUD groups: one stamp per group, routed below beside the map. */
+					if (g_dbg_btmMap && (s_uihudNodeGroup != 0))
+					{
+						*out = (u16)(PKTDEPTH_UI_STAMP_BTMHUD_BASE + (u32)s_uihudNodeGroup);
+					}
 					/* FPS glyphs route only, so they keep the bottom-screen
 					 * gate: unrouted they stay ordinary pinned UI. */
-					if (g_dbg_btmMap && s_uifpsNodeActive)
+					else if (g_dbg_btmMap && s_uifpsNodeActive)
 					{
 						*out = PKTDEPTH_UI_STAMP_BTMFPS;
 					}

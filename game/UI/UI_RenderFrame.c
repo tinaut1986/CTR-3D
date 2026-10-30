@@ -11,6 +11,28 @@ extern void NativeGpu_MarkUiMapRange(uintptr_t start, uintptr_t end, int retailT
 // The juiced-wumpa shine (UI_Weapon_DrawBG) draws into the player's OT, not the
 // UI OT, so nothing downstream classifies it as UI without this span mark.
 extern void NativeGpu_MarkHudShineRange(uintptr_t start, uintptr_t end);
+// One piece of the 1P race HUD for the bottom-screen HUD (groups below). The draw calls
+// allocate sequentially from primMem, so [cursor-before, cursor-after) is exactly the piece.
+extern void NativeGpu_MarkUiHudRange(uintptr_t start, uintptr_t end, int group);
+// Group 1 (position) is reserved: the big rank number is a 3D instance (instBigNum) that cannot be
+// routed yet, so the whole position stays on the top screen rather than split across two.
+#define HUD_GROUP_LAP 2
+#define HUD_GROUP_CLOCK 3
+#define HUD_GROUP_WUMPA 4
+#define HUD_GROUP_SPEED 5
+#define HUD_GROUP_WEAPON 6
+#define HUD_GROUP(group, ...)                                                                               \
+	do                                                                                                      \
+	{                                                                                                       \
+		uintptr_t hudPrimStart_ = (uintptr_t)gGT->backBuffer->primMem.cursor;                               \
+		__VA_ARGS__;                                                                                        \
+		if (numPlyr == 1)                                                                                   \
+		{                                                                                                   \
+			NativeGpu_MarkUiHudRange(hudPrimStart_, (uintptr_t)gGT->backBuffer->primMem.cursor, (group));   \
+		}                                                                                                   \
+	} while (0)
+#else
+#define HUD_GROUP(group, ...) __VA_ARGS__
 #endif
 #ifdef CTR_NATIVE
 // Bottom-screen map hook (platform/native_gpu.c). RouteActive lets the map
@@ -205,10 +227,10 @@ void UI_RenderFrame_Racing()
 			    // if want to draw speedometer
 			    ((sdata->HudAndDebugFlags & 8) != 0))
 			{
-				UI_DrawSpeedNeedle(hudStructPtr[UI_HUD_SLOT_SPEEDOMETER].x + offset, hudStructPtr[UI_HUD_SLOT_SPEEDOMETER].y, playerStruct);
-				UI_JumpMeter_Draw(hudStructPtr[UI_HUD_SLOT_JUMP_METER].x, hudStructPtr[UI_HUD_SLOT_JUMP_METER].y, playerStruct);
-				UI_DrawSlideMeter(hudStructPtr[UI_HUD_SLOT_SLIDE_METER].x + offset, hudStructPtr[UI_HUD_SLOT_SLIDE_METER].y, playerStruct);
-				UI_DrawSpeedBG();
+				HUD_GROUP(HUD_GROUP_SPEED, UI_DrawSpeedNeedle(hudStructPtr[UI_HUD_SLOT_SPEEDOMETER].x + offset, hudStructPtr[UI_HUD_SLOT_SPEEDOMETER].y, playerStruct));
+				HUD_GROUP(HUD_GROUP_SPEED, UI_JumpMeter_Draw(hudStructPtr[UI_HUD_SLOT_JUMP_METER].x, hudStructPtr[UI_HUD_SLOT_JUMP_METER].y, playerStruct));
+				HUD_GROUP(HUD_GROUP_SPEED, UI_DrawSlideMeter(hudStructPtr[UI_HUD_SLOT_SLIDE_METER].x + offset, hudStructPtr[UI_HUD_SLOT_SLIDE_METER].y, playerStruct));
+				HUD_GROUP(HUD_GROUP_SPEED, UI_DrawSpeedBG());
 			}
 
 			if ((playerStruct->actionsFlagSet & ACTION_RACE_FINISHED) == 0)
@@ -217,12 +239,12 @@ void UI_RenderFrame_Racing()
 				if ((gameMode1 & BATTLE_MODE) == 0)
 				{
 					// Draw powerslide meter
-					UI_DrawSlideMeter(hudStructPtr[UI_HUD_SLOT_SLIDE_METER].x + offset, hudStructPtr[UI_HUD_SLOT_SLIDE_METER].y, playerStruct);
+					HUD_GROUP(HUD_GROUP_SPEED, UI_DrawSlideMeter(hudStructPtr[UI_HUD_SLOT_SLIDE_METER].x + offset, hudStructPtr[UI_HUD_SLOT_SLIDE_METER].y, playerStruct));
 
 #if defined(CTR_NATIVE)
 					if (g_reservesMeter)
 					{
-						UI_DrawReservesMeter(hudStructPtr[UI_HUD_SLOT_SLIDE_METER].x + offset, hudStructPtr[UI_HUD_SLOT_SLIDE_METER].y, playerStruct);
+						HUD_GROUP(HUD_GROUP_SPEED, UI_DrawReservesMeter(hudStructPtr[UI_HUD_SLOT_SLIDE_METER].x + offset, hudStructPtr[UI_HUD_SLOT_SLIDE_METER].y, playerStruct));
 					}
 #endif
 				}
@@ -230,7 +252,7 @@ void UI_RenderFrame_Racing()
 				// If you are not in Time Trial or Relic Race
 				if ((gameMode1 & (TIME_TRIAL | RELIC_RACE)) == 0)
 				{
-					UI_DrawNumWumpa(hudStructPtr[UI_HUD_SLOT_WUMPA_COUNT].x, hudStructPtr[UI_HUD_SLOT_WUMPA_COUNT].y, playerStruct);
+					HUD_GROUP(HUD_GROUP_WUMPA, UI_DrawNumWumpa(hudStructPtr[UI_HUD_SLOT_WUMPA_COUNT].x, hudStructPtr[UI_HUD_SLOT_WUMPA_COUNT].y, playerStruct));
 				}
 			}
 
@@ -357,8 +379,7 @@ void UI_RenderFrame_Racing()
 				if ((playerStruct->actionsFlagSet & ACTION_RACE_FINISHED) == 0)
 				{
 					// Draw weapon and number of wumpa fruit in HUD
-					UI_Weapon_DrawSelf(hudStructPtr[UI_HUD_SLOT_WEAPON].x, hudStructPtr[UI_HUD_SLOT_WEAPON].y, hudStructPtr[UI_HUD_SLOT_WEAPON].scale,
-					                   playerStruct);
+					HUD_GROUP(HUD_GROUP_WEAPON, UI_Weapon_DrawSelf(hudStructPtr[UI_HUD_SLOT_WEAPON].x, hudStructPtr[UI_HUD_SLOT_WEAPON].y, hudStructPtr[UI_HUD_SLOT_WEAPON].scale, playerStruct));
 				}
 			}
 
@@ -457,8 +478,7 @@ void UI_RenderFrame_Racing()
 			{
 				if ((playerStruct->actionsFlagSet & ACTION_RACE_FINISHED) == 0)
 				{
-					UI_DrawLapCount(hudStructPtr[UI_HUD_SLOT_LAP_COUNT].x, hudStructPtr[UI_HUD_SLOT_LAP_COUNT].y,
-					                (u32)hudStructPtr[UI_HUD_SLOT_LAP_COUNT].scale, playerStruct);
+					HUD_GROUP(HUD_GROUP_LAP, UI_DrawLapCount(hudStructPtr[UI_HUD_SLOT_LAP_COUNT].x, hudStructPtr[UI_HUD_SLOT_LAP_COUNT].y, (u32)hudStructPtr[UI_HUD_SLOT_LAP_COUNT].scale, playerStruct));
 				}
 			}
 			else
@@ -616,7 +636,7 @@ void UI_RenderFrame_Racing()
 	{
 		playerStruct = gGT->drivers[0];
 
-		UI_DrawRaceClock(0x14, 8, UI_RACE_CLOCK_SHOW_CURRENT_TIME, playerStruct);
+		HUD_GROUP(HUD_GROUP_CLOCK, UI_DrawRaceClock(0x14, 8, UI_RACE_CLOCK_SHOW_CURRENT_TIME, playerStruct));
 
 		turboThread = 0;
 		turboThreadObject = 0;

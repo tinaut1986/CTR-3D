@@ -73,6 +73,8 @@ void N3DS_BottomUi_NoteGpuOwned(void);
 
 /* MAPA is the selected tab: the minimap (and the FPS overlay) is drawn. */
 int N3DS_BottomUi_MapTabActive(void);
+int N3DS_BottomUi_GpuOwned(void); /* the GPU draws the bottom screen: its pixels are only in the framebuffer */
+int N3DS_BottomUi_HudBelow(void); /* HUD AUTO-HIDE on, MAPA tab up and a race map live */
 /* The pass tells whether it drew a live minimap this frame (else the MAPA tab
  * says there is none); also auto-selects MAPA when a race map first appears. */
 void N3DS_BottomUi_MapLive(int live);
