@@ -1,4 +1,7 @@
 #include <common.h>
+#ifdef CTR_NATIVE
+#include <platform/native_perf.h>
+#endif
 
 // NOTE(aalhendi): ASM-verified NTSC-U 926 0x80034a80-0x80034aa4.
 void MainDrawCb_DrawSync()
@@ -40,13 +43,21 @@ void MainDrawCb_Vsync()
 	if (sdata->criticalSectionCount == 0)
 #endif
 	{
+#ifdef CTR_NATIVE
+		NativePerf_BeginScope(NATIVE_PERF_BUCKET_VBL_HOWL);
+#endif
 		howl_PlayAudio_Update();
+#ifdef CTR_NATIVE
+		NativePerf_EndScope(NATIVE_PERF_BUCKET_VBL_HOWL);
+#endif
 	}
 
 #ifdef CTR_NATIVE
 	// NOTE(aalhendi): Native owns host input and writes PSX-shaped pad
 	// snapshots before retail GAMEPAD_PollVsync consumes them.
+	NativePerf_BeginScope(NATIVE_PERF_BUCKET_VBL_POLLINPUT);
 	Platform_PollInput();
+	NativePerf_EndScope(NATIVE_PERF_BUCKET_VBL_POLLINPUT);
 #endif
 
 	GAMEPAD_PollVsync(sdata->gGamepads);

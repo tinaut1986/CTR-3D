@@ -1157,11 +1157,16 @@ internal void Native_WaitUntilVBlankTargetBody(void)
 
 internal void Native_EmitVBlank(void)
 {
+	NativePerf_BeginScope(NATIVE_PERF_BUCKET_VBL_EMIT);
+	NativePerf_BeginScope(NATIVE_PERF_BUCKET_VBL_RCNT);
 	NativeRCnt_EmitVBlank();
+	NativePerf_EndScope(NATIVE_PERF_BUCKET_VBL_RCNT);
 
 	if (vsync_callback != NULL)
 	{
+		NativePerf_BeginScope(NATIVE_PERF_BUCKET_VBL_CALLBACK);
 		vsync_callback();
+		NativePerf_EndScope(NATIVE_PERF_BUCKET_VBL_CALLBACK);
 	}
 
 	NativeAudio_StepVBlank();
@@ -1178,6 +1183,7 @@ internal void Native_EmitVBlank(void)
 		N3DS_DebugLog(line);
 	}
 #endif
+	NativePerf_EndScope(NATIVE_PERF_BUCKET_VBL_EMIT);
 }
 
 internal int Native_CatchUpDueVBlanks(void)
