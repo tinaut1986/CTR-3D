@@ -1280,6 +1280,29 @@ static int s_modelULocTint = -1;
 int g_dbg_uiPopPx = 4;
 static float s_uiPsxPerPx = 1.6f; /* game units per panel pixel across the top screen, from the projection */
 static float s_uiShiftPsx = 0.0f; /* this frame's UI shift per eye, game units (0 in mono) */
+static float s_uiWinL = 0.0f, s_uiWinR = 512.0f; /* the top screen's X window in game units (N3DS_C3DSetProjection) */
+
+/* A UI quad that reaches the edge of the window (letterbox bars, full-width backdrops) would show a gap
+ * the width of the eye's parallax on one side; push its edge vertices out by the shift (plus a margin) so
+ * both eyes see it fill the panel. Identity in mono. */
+int N3DS_UiEdgeExtend(int x)
+{
+	const int pad = (s_uiShiftPsx > 0.0f) ? ((int)s_uiShiftPsx + 2) : 0;
+
+	if (pad == 0)
+	{
+		return x;
+	}
+	if ((float)x <= (s_uiWinL + 1.0f))
+	{
+		return x - pad;
+	}
+	if ((float)x >= (s_uiWinR - 1.0f))
+	{
+		return x + pad;
+	}
+	return x;
+}
 /* Debug view (DEBUG > ACTIONS > DEPTH TINT, dumpreq 'depthtint', not saved): the vertex shaders colour
  * every vertex by its distance, one blue tone, bright near and dark far (K over the stereo depth, so planes the 3D merges share a tone), so the layers
  * the 3D effect separates can be seen. Independent of the slider. */
@@ -2096,6 +2119,8 @@ void N3DS_C3DSetProjection(float left, float right, float bottom)
 	 */
 	Mtx_OrthoTilt(&s_projection, left, right, bottom, 0.0f, -32769.0f, 32769.0f, true);
 	s_uiPsxPerPx = (right - left) / (g_dbg_widescreen ? 400.0f : (float)N3DS_TOP_CONTENT_W);
+	s_uiWinL = left;
+	s_uiWinR = right;
 }
 
 /*
