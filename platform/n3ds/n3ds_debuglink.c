@@ -12,6 +12,7 @@
 
 #include "n3ds_backend.h"
 #include "n3ds_bottomui.h"
+#include "ctr_version.h"
 
 int Platform_GetVBlankCount(void);
 
@@ -510,11 +511,135 @@ static void DoState(void)
 	         Platform_GetVBlankCount(), avgUs, (avgUs > 0) ? (10000000u / avgUs) : 0u, level, mode, main, load, N3DS_LinearFreeBytes() / 1024ul);
 }
 
+/*
+ * CAPTURE (Debug tab > ACTIONS): what the owner wants to show, kept together. Like ../zelda-tmc-3ds'
+ * numbered debug files: each capture takes the number after the last one, which capture-last.txt
+ * remembers, so nothing is overwritten. debug/capture-NNNN-*: top.bmp, top-right.bmp (3D slider up),
+ * bottom.bmp, vram.bin (PSX VRAM, 1024x512 16-bit), models.txt (the next model-path frame: every
+ * instance and triangle with its true depth) and info.txt (build, game state, 3D settings).
+ */
+extern int g_dbg_mdlDump;
+extern FILE *g_dbg_mdlDumpFile;
+static volatile int s_captureReq;
+
+void N3DS_DebugLinkRequestCapture(void)
+{
+	s_captureReq = 1;
+}
+
+static int CaptureNext(char *base, unsigned cap)
+{
+	FILE *f;
+	int n = 0;
+
+	mkdir("sdmc:/3ds", 0777);
+	mkdir("sdmc:/3ds/ctr_native", 0777);
+	mkdir(LINK_DIR, 0777);
+	f = fopen(LINK_DIR "/capture-last.txt", "r");
+	if (f != NULL)
+	{
+		if (fscanf(f, "%d", &n) != 1)
+		{
+			n = 0;
+		}
+		fclose(f);
+	}
+	n++;
+	f = fopen(LINK_DIR "/capture-last.txt", "w");
+	if (f == NULL)
+	{
+		return -1;
+	}
+	fprintf(f, "%d\n", n);
+	fclose(f);
+	snprintf(base, cap, LINK_DIR "/capture-%04d", n);
+	return n;
+}
+
+static void DoCapture(void)
+{
+	char base[64], path[96], line[160];
+	u16 fw = 0, fh = 0;
+	u8 *fb;
+	int n, level = 0, main = 0, load = 0, top = 0, right = 0, vram;
+	unsigned mode = 0;
+	FILE *f;
+
+	n = CaptureNext(base, sizeof(base));
+	if (n < 0)
+	{
+		N3DS_BottomUi_SetMessage("CAPTURE FAILED: NO DEBUG FOLDER");
+		return;
+	}
+	fb = gfxGetFramebuffer(GFX_TOP, GFX_LEFT, &fw, &fh);
+	if (fb != NULL)
+	{
+		GSPGPU_InvalidateDataCache(fb, 400u * 240u * 3u);
+		snprintf(path, sizeof(path), "%s-top.bmp", base);
+		top = WriteBmp(path, 400, 240, TopRow, fb);
+	}
+	if (gfxIs3D() && ((fb = gfxGetFramebuffer(GFX_TOP, GFX_RIGHT, &fw, &fh)) != NULL))
+	{
+		GSPGPU_InvalidateDataCache(fb, 400u * 240u * 3u);
+		snprintf(path, sizeof(path), "%s-top-right.bmp", base);
+		right = WriteBmp(path, 400, 240, TopRow, fb);
+	}
+	snprintf(path, sizeof(path), "%s-bottom.bmp", base);
+	if (N3DS_BottomUi_GpuOwned() && ((fb = gfxGetFramebuffer(GFX_BOTTOM, GFX_LEFT, &fw, &fh)) != NULL))
+	{
+		GSPGPU_InvalidateDataCache(fb, 320u * 240u * 3u);
+		WriteBmp(path, 320, 240, BottomFbRow, fb);
+	}
+	else
+	{
+		unsigned char *bottom = (unsigned char *)malloc(320u * 240u * 3u); /* same split as DoShot */
+
+		if ((bottom != NULL) && N3DS_BottomUi_Snapshot(bottom))
+		{
+			WriteBmp(path, 320, 240, BottomRow, bottom);
+		}
+		free(bottom);
+	}
+	snprintf(path, sizeof(path), "%s-vram.bin", base);
+	vram = N3DS_DebugWriteVramTo(path);
+	snprintf(path, sizeof(path), "%s-models.txt", base);
+	if ((g_dbg_mdlDumpFile == NULL) && ((g_dbg_mdlDumpFile = fopen(path, "w")) != NULL))
+	{
+		g_dbg_mdlDump = 1; /* the next model-path frame writes it and closes it */
+	}
+
+	N3DS_DebugGameState(&level, &mode, &main, &load);
+	snprintf(path, sizeof(path), "%s-info.txt", base);
+	f = fopen(path, "w");
+	if (f != NULL)
+	{
+		fprintf(f, "CTR 3D v%s capture %04d\n", CTR_PORT_VERSION_LABEL, n);
+		fprintf(f, "frame=%u vblank=%d avgUs=%u linearFree=%luK\n", s_frames, Platform_GetVBlankCount(), N3DS_BottomUi_AvgFrameUs(),
+		        N3DS_LinearFreeBytes() / 1024ul);
+		fprintf(f, "level=%d gameMode1=%08x mainState=%d loadStage=%d\n", level, mode, main, load);
+		N3DS_StereoDescribe(line, sizeof(line));
+		fprintf(f, "%s\n", line);
+		fprintf(f, "files: top.bmp%s bottom.bmp%s%s\n", right ? " top-right.bmp" : "", vram ? " vram.bin" : "",
+		        g_dbg_mdlDump ? " models.txt" : "");
+		fclose(f);
+	}
+
+	snprintf(line, sizeof(line), "[CAPTURE] %04d top=%d right=%d vram=%d level=%d mode=%08x", n, top, right, vram, level, mode);
+	N3DS_DebugLog(line);
+	snprintf(line, sizeof(line), "CAPTURE %04d SAVED (DEBUG FOLDER)", n);
+	N3DS_BottomUi_SetMessage(line);
+}
+
 void N3DS_DebugLinkPoll(void)
 {
 	const int op = __atomic_load_n(&s_op, __ATOMIC_ACQUIRE);
 
 	s_frames++;
+	if (s_captureReq)
+	{
+		s_captureReq = 0;
+		DoCapture();
+	}
 	if (op == LINK_OP_NONE)
 	{
 		return;

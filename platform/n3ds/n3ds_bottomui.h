@@ -58,6 +58,8 @@ void N3DS_BottomUi_Touch(void);
  * there is no picture yet. And the mean frame time of the last 120 frames. */
 int N3DS_BottomUi_Snapshot(unsigned char *bgr);
 unsigned N3DS_BottomUi_AvgFrameUs(void);
+/* The Debug tab's one-line status message (the CAPTURE result). */
+void N3DS_BottomUi_SetMessage(const char *msg);
 
 /* Main thread, once per presented frame (renderer SwapWindow): frame-time
  * history, live-number refresh scheduling, FTP reaping. */
