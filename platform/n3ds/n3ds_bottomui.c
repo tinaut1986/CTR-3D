@@ -1933,6 +1933,14 @@ int N3DS_BottomUi_HudBelow(void)
 	return g_dbg_hudAutoHide && s_mapLive && (s_tab == TAB_MAP);
 }
 
+/* The same decision without waiting for the map to be reported live: a routed HUD triangle proves the race
+ * HUD exists, and the map is only reported at the END of the frame, so the first HUD frame of a race would
+ * otherwise leave a copy on the top screen for one frame. */
+int N3DS_BottomUi_HudBelowWanted(void)
+{
+	return g_dbg_hudAutoHide && (s_tab == TAB_MAP);
+}
+
 void N3DS_BottomUi_MapLive(int live)
 {
 	if (!live)
