@@ -1540,7 +1540,7 @@ int g_dbg_stereo = 1; /* master enable: 0 off, 1 on, 2 AUTO (Old-3DS default, fr
  * band keeps its own fixed pop-out everywhere. dumpreq `stereowindow` A/Bs.
  */
 int g_dbg_stereoWindow = 1;
-static float s_stereoConvWorld = 650.0f; /* window-mode screen plane: the nearest race ground in view (demo race, New 3DS: ~1 px) */
+static float s_stereoConvWorld = 180.0f; /* window-mode screen plane: the player kart (chase camera: Crash + kart at 129..215) */
 static int s_stereoTrackSeen = 0;       /* the track renderer drew since the last latch */
 static int s_stereoWorldScene = 0;      /* latched per frame from s_stereoTrackSeen */
 static C3D_RenderTarget *s_renderTargetRight = NULL;
@@ -6300,7 +6300,7 @@ unsigned int N3DS_ReadButtons(void)
 					}
 					else
 					{
-						s_stereoConvWorld = 650.0f;
+						s_stereoConvWorld = 180.0f;
 					}
 					snprintf(msg, sizeof(msg), "[CTR-3DS] stereo world convergence: %d view.z units", (int)s_stereoConvWorld);
 					N3DS_DebugLog(msg);
