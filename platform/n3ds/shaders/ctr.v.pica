@@ -98,6 +98,9 @@
 .alias  colorScale    vertexScale.yyyy
 .alias  farPinEdge    vertexScale.zzzz
 
+.fvec tint ; x = depth tint on, y = K, z = 1/(k*(1+pop)): see s_tintVecPkt in n3ds_backend.c
+.constf tintHi(0.24, 0.47, 0.8, 0.16) ; far colour (0, 0, w), near colour (x, y, z + w)
+
 ; Outputs
 .out outpos position
 .out outtc0 texcoord0
@@ -151,6 +154,21 @@
 	mul r1.y, stereoUi.xxxx, r1.y       ; UI pop-out, 0 for world
 	add r1.w, r1.w, r1.y                ; p = world p, or the UI pop-out
 	add r0.x, r0.x, r1.w                ; shifted screen X (both temps)
+
+	; ---- DEPTH TINT (debug view, tint.x = 1) ------------------------------
+	; One blue tone, bright near and dark far, from the parallax p the shader just applied (K / depth when mono). Built
+	; here into r11 (r10..r13 are free in this program) and blended over the
+	; vertex colour at the end; tint.x = 0 leaves outclr exactly as it was.
+	rcp r10.x, r1.x
+	mul r10.x, tint.yyyy, r10.x         ; K / depth, only when this eye has no parallax (tint.y = 0 else)
+	mul r10.y, negOnes, r1.w
+	add r10.y, stereo.xxxx, r10.y       ; k - p: the shift this vertex really got, from the far asymptote
+	mul r10.y, tint.zzzz, r10.y         ; / (k * (1 + pop-out)); tint.z = 0 when this eye has no parallax
+	add r10.x, r10.x, r10.y
+	max r10.x, zeros, r10.x
+	min r10.x, ones, r10.x              ; n = 1 nearest (pop-out bound), 0 far
+	mul r11.xyz, tintHi, r10.xxxx       ; one blue tone: dark far, bright near
+	add r11.z, tintHi.wwww, r11.z
 
 	; ---- PERSPECTIVE-CORRECT DEPTH SUBSTRATE ------------------------------
 	; The rasterizer interpolates z/w linearly in screen space, which is only
@@ -211,7 +229,11 @@
 	; which is why Azahar rendered fine all along. outclr below already gets
 	; the same full-write treatment (.xyz + .w); outtc0 was the one gap.
 	mov outtc0.zw, zeros
-	mul outclr.xyz, colorScale, inclr.xyz
+	mul r12.xyz, colorScale, inclr.xyz
+	mul r13.xyz, negOnes, r12
+	add r13.xyz, r11, r13               ; tint colour - vertex colour
+	mul r13.xyz, tint.xxxx, r13
+	add outclr.xyz, r12, r13            ; depth tint: vertex colour, or the tint when tint.x = 1
 	mov outclr.w, ones
 
 	end

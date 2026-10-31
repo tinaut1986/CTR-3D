@@ -226,6 +226,9 @@
 ; native_track_mesh.c's encode comment. Change one, change the other.
 .alias  atlasScale    depthConst2.yyyy
 
+.fvec tint ; x = depth tint on, y = K, z = 1/(k*(1+pop)): see s_tintVecWorld in n3ds_backend.c; re-uploaded per bracket
+.constf tintHi(0.24, 0.47, 0.8, 0.16) ; far colour (0, 0, w), near colour (x, y, z + w)
+
 ; Outputs
 .out outpos position
 .out outtc0 texcoord0
@@ -422,6 +425,21 @@
 	mul r9.z, r1.z, r9.y                ; w*p (both temps, order-free)
 	add r1.x, r1.x, r9.z                ; a += w*p
 
+	; ---- DEPTH TINT (debug view, tint.x = 1) ------------------------------
+	; One blue tone, bright near and dark far, from the parallax p the shader just applied (K / depth when mono). Built
+	; here into r11 (r10..r13 are free in this program) and blended over the
+	; vertex colour at the end; tint.x = 0 leaves outclr exactly as it was.
+	rcp r10.x, r7.x
+	mul r10.x, tint.yyyy, r10.x         ; K / depth, only when this eye has no parallax (tint.y = 0 else)
+	mul r10.y, negOne, r9.y
+	add r10.y, stereo.xxxx, r10.y       ; k - p: the shift this vertex really got, from the far asymptote
+	mul r10.y, tint.zzzz, r10.y         ; / (k * (1 + pop-out)); tint.z = 0 when this eye has no parallax
+	add r10.x, r10.x, r10.y
+	max r10.x, zeros, r10.x
+	min r10.x, ones, r10.x              ; n = 1 nearest (pop-out bound), 0 far
+	mul r11.xyz, tintHi, r10.xxxx       ; one blue tone: dark far, bright near
+	add r11.z, tintHi.wwww, r11.z
+
 	; ---- PERSPECTIVE-CORRECT DEPTH SUBSTRATE ------------------------------
 	; The rasterizer interpolates z/w LINEARLY IN SCREEN SPACE, which is only
 	; correct for a value affine in 1/viewZ. zOrd = 32767 - depth is affine in
@@ -544,7 +562,11 @@
 	; outclr: colorScale rescales the raw GPU_UNSIGNED_BYTE fetch back to
 	; 0..1 (same convention as ctr.v.pica). Alpha is a constant 1.0 -- inclr.w
 	; is NOT alpha here, it already fed drawOrder above.
-	mul outclr.xyz, colorScale, inclr.xyz
+	mul r12.xyz, colorScale, inclr.xyz
+	mul r13.xyz, negOne, r12
+	add r13.xyz, r11, r13               ; tint colour - vertex colour
+	mul r13.xyz, tint.xxxx, r13
+	add outclr.xyz, r12, r13            ; depth tint: vertex colour, or the tint when tint.x = 1
 	mov outclr.w, ones
 
 	end

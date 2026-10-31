@@ -54,6 +54,7 @@
 extern int g_dbg_sdLog;
 extern int g_dbg_stereo;
 extern int g_dbg_btmMap;
+extern int g_dbg_depthTint;
 
 /* HUD AUTO-HIDE (OPTIONS): while the MAPA tab is up, the race HUD is drawn below beside the
  * map and left off the top screen. Saved as "hudhide" in ctr3d.cfg. */
@@ -527,6 +528,8 @@ enum
 	ACT_FTP,
 	ACT_O3DSSIM,
 	ACT_SDLOG,
+	ACT_DEPTHTINT,
+	ACT_CAPTURE,
 	ACT_COUNT
 };
 
@@ -545,9 +548,9 @@ static void ui_sub_rect(int i, int *x, int *y, int *w, int *h)
 static void ui_act_rect(int i, int *x, int *y, int *w, int *h)
 {
 	*x = (i & 1) ? 162 : 4;
-	*y = CONTENT_Y + 30 + ((i >> 1) * 48);
+	*y = CONTENT_Y + 30 + ((i >> 1) * 38);
 	*w = 154;
-	*h = 44;
+	*h = 34;
 }
 #endif
 
@@ -1143,6 +1146,8 @@ static void ui_act_label(int i, const char **name, const char **state, u16 *col)
 	case ACT_RTHREAD: *name = "RENDER THREAD"; on = g_dbg_renderThread; break;
 	case ACT_FLUSH: *name = "LOG"; *state = "FLUSH"; return;
 	case ACT_SDLOG: *name = TR("LOG TO SD", "LOG A LA SD"); on = g_dbg_sdLog; break;
+	case ACT_DEPTHTINT: *name = TR("DEPTH TINT", "TINTE PROFUNDIDAD"); on = g_dbg_depthTint; break;
+	case ACT_CAPTURE: *name = TR("CAPTURE", "CAPTURA"); *state = TR("SCREEN + DATA", "PANTALLA + DATOS"); return;
 	case ACT_O3DSSIM:
 		*name = "OLD 3DS SIM";
 		on = (N3DS_O3dsSimActive() != 0);
@@ -1173,20 +1178,20 @@ static void ui_draw_dbg_actions(void)
 		ui_act_rect(i, &x, &y, &w, &h);
 		ui_act_label(i, &name, &state, &col);
 		ui_button(x, y, w, h, col, (100 + i == s_pressBtn));
-		ui_text(x + 6, y + 5, 1, COL_TEXT, name);
-		ui_text(x + 6, y + 22, 1, COL_TEXT, state);
+		ui_text(x + 6, y + 4, 1, COL_TEXT, name);
+		ui_text(x + 6, y + 19, 1, COL_TEXT, state);
 	}
-	ui_text(6, CONTENT_Y + 174, 1, COL_LABEL, TR("SAME SWITCHES AS SITE DUMPREQ", "LOS MISMOS INTERRUPTORES QUE SITE DUMPREQ"));
+	ui_text(6, CONTENT_Y + 150 + 36, 1, COL_LABEL, TR("SAME SWITCHES AS SITE DUMPREQ", "LOS MISMOS INTERRUPTORES QUE SITE DUMPREQ"));
 	if (N3DS_FtpStatus() == N3DS_FTP_STATUS_LISTENING)
 	{
 		char c[48];
 
 		ui_ftp_address(c, sizeof(c));
-		ui_text(6, CONTENT_Y + 184, 1, COL_GOOD, c);
+		ui_text(6, CONTENT_Y + 150 + 46, 1, COL_GOOD, c);
 	}
 	if (s_msg[0] != '\0')
 	{
-		ui_text(6, CONTENT_Y + 194, 1, COL_GOOD, s_msg);
+		ui_text(6, CONTENT_Y + 150 + 56, 1, COL_GOOD, s_msg);
 	}
 }
 
@@ -1403,6 +1408,11 @@ static void ui_set_msg(const char *m)
 	snprintf(s_msg, sizeof(s_msg), "%s", m);
 }
 
+void N3DS_BottomUi_SetMessage(const char *msg)
+{
+	ui_set_msg(msg);
+}
+
 static void ui_press_option(int i)
 {
 	s_optSel = i;
@@ -1511,6 +1521,14 @@ static void ui_press_action(int i)
 	case ACT_SDLOG:
 		N3DS_SetSdLogEnabled(!g_dbg_sdLog);
 		ui_set_msg(g_dbg_sdLog ? TR("SD LOG ON (CAN CAUSE HITCHES)", "LOG EN SD ACTIVO (PUEDE DAR TIRONES)") : TR("SD LOG OFF", "LOG EN SD APAGADO"));
+		break;
+	case ACT_CAPTURE:
+		N3DS_DebugLinkRequestCapture();
+		ui_set_msg(TR("CAPTURING...", "CAPTURANDO..."));
+		break;
+	case ACT_DEPTHTINT:
+		N3DS_QueueDumpReq("depthtint");
+		ui_set_msg(TR("DEPTH TINT TOGGLED", "TINTE PROFUNDIDAD CAMBIADO"));
 		break;
 	case ACT_O3DSSIM:
 		if (N3DS_O3dsSimToggleFile() == 2)

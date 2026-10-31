@@ -22,6 +22,9 @@
  * in `reply` when the verb is ours, 0 otherwise. */
 int N3DS_DebugLinkCommand(const char *verb, const char *args, char *reply, unsigned cap);
 
+/* Debug tab CAPTURE button: debug/capture-NNNN-* on the next presented frame (n3ds_debuglink.c). */
+void N3DS_DebugLinkRequestCapture(void);
+
 /* Main thread, once per presented frame: runs the queued request, if any. */
 void N3DS_DebugLinkPoll(void);
 

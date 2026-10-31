@@ -880,6 +880,22 @@ static void N3DS_DebugWriteVRAMDump(void)
 }
 #endif
 
+#ifdef CTR_INTERNAL
+/* The CAPTURE button's VRAM file (n3ds_debuglink.c): the same bytes as the dumpreq set's vramdump. */
+int N3DS_DebugWriteVramTo(const char *path)
+{
+	FILE *f;
+	size_t n;
+
+	if ((s_dumpVramPtr == NULL) || (s_dumpVramBytes == 0) || ((f = fopen(path, "wb")) == NULL))
+	{
+		return 0;
+	}
+	n = fwrite(s_dumpVramPtr, 1, s_dumpVramBytes, f);
+	return (fclose(f) == 0) && (n == s_dumpVramBytes);
+}
+#endif
+
 unsigned long long N3DS_GetTickCount(void)
 {
 	return (unsigned long long)svcGetSystemTick();
@@ -1247,6 +1263,9 @@ static shaderProgram_s s_shaderProgram;
 static int s_uLocProjection = -1;
 static int s_uLocStereo = -1;
 static int s_uLocStereoUi = -1;
+static int s_uLocTint = -1;
+static int s_trackULocTint = -1;
+static int s_modelULocTint = -1;
 /*
  * UI pop-out amount, as a percent of this eye's at-infinity shift k --
  * explicitly not at the screen plane, and less than the character-select
@@ -1260,6 +1279,33 @@ static int s_uLocStereoUi = -1;
  * by eye, on hardware.
  */
 int g_dbg_uiPopPct = 35;
+/* Debug view (DEBUG > ACTIONS > DEPTH TINT, dumpreq 'depthtint', not saved): the vertex shaders colour
+ * every vertex by its distance, one blue tone, bright near and dark far (K over the stereo depth, so planes the 3D merges share a tone), so the layers
+ * the 3D effect separates can be seen. Independent of the slider. */
+int g_dbg_depthTint = 0;
+static int s_depthTintBottom = 0; /* inside the bottom pass: that screen has no depth, never tinted */
+static float s_depthTintK = 0.0f; /* convergence / (1 + pop-out): the mono fallback tint is K / depth, clamped to 1 */
+
+static int N3DS_DepthTintOn(void)
+{
+	return g_dbg_depthTint && !s_depthTintBottom;
+}
+
+/* Stage 0 RGB of a textured draw: texel * vertex colour, or under the depth tint the vertex colour alone (the
+ * shaders put the tint there), so brown and green textures read the same blue. Alpha is set by the caller. */
+static void N3DS_TexEnvTexturedRGB(C3D_TexEnv *env)
+{
+	if (N3DS_DepthTintOn())
+	{
+		C3D_TexEnvSrc(env, C3D_RGB, GPU_PRIMARY_COLOR, GPU_PRIMARY_COLOR, 0);
+		C3D_TexEnvFunc(env, C3D_RGB, GPU_REPLACE);
+	}
+	else
+	{
+		C3D_TexEnvSrc(env, C3D_RGB, GPU_TEXTURE0, GPU_PRIMARY_COLOR, 0);
+		C3D_TexEnvFunc(env, C3D_RGB, GPU_MODULATE);
+	}
+}
 static float s_stereoVecUi[2][4];
 static C3D_RenderTarget *s_renderTarget = NULL;
 
@@ -1472,7 +1518,7 @@ static int s_trackDrawActive = 0;
  */
 int g_dbg_stereo = 1; /* master enable: 0 off, 1 on, 2 AUTO (Old-3DS default, frame-pace block); the slider still gates frame by frame */
 /*
- * WINDOW MODE: with pop-out allowed, the
+ * WINDOW MODE (world scenes): with pop-out allowed, the
  * clamp band turns the near ground into a constant-disparity sheet -- a
  * horizontal crease where graded road meets clamped road, which the owner
  * perceived as the ground "folding down" as it passes the kart. Window mode
@@ -1482,11 +1528,21 @@ int g_dbg_stereo = 1; /* master enable: 0 off, 1 on, 2 AUTO (Old-3DS default, fr
  * eye accepts as "the window frame" -- the standard comfortable-3DS
  * convention.
  *
- * Default OFF (owner ruling, same night he asked for it: "it's less cool").
- * Pop-out wins; the fold is the accepted price until a softer clamp knee
- * exists. dumpreq `stereowindow` turns the tame mode on.
+ * Was OFF by default (owner ruling: "it's less cool"); ON since 2026-10-31,
+ * owner ruling again after living with it: the nearest part of the race
+ * "sticking out" of the screen looked wrong, and a track cut by the screen
+ * edge cannot pop out convincingly anyway. So it now applies to WORLD
+ * scenes only (a frame after the track renderer drew: races, the hub, the
+ * intro's sets), with its own nearer convergence (s_stereoConvWorld) so the
+ * flat zone is only the ground right under the camera. Scenes without a
+ * track (the main menu's logo, character select) keep the pop-out: there a
+ * whole object fits inside the screen and can float in front of it. The UI
+ * band keeps its own fixed pop-out everywhere. dumpreq `stereowindow` A/Bs.
  */
-int g_dbg_stereoWindow = 0;
+int g_dbg_stereoWindow = 1;
+static float s_stereoConvWorld = 650.0f; /* window-mode screen plane: the nearest race ground in view (demo race, New 3DS: ~1 px) */
+static int s_stereoTrackSeen = 0;       /* the track renderer drew since the last latch */
+static int s_stereoWorldScene = 0;      /* latched per frame from s_stereoTrackSeen */
 static C3D_RenderTarget *s_renderTargetRight = NULL;
 static float s_stereoSep = 12.0f;    /* k*2 at full slider: total left/right disparity at infinite depth, PSX px */
 static float s_stereoConv = 1200.0f; /* view.z units at screen depth (just beyond the player kart's ~256..2278 band) */
@@ -1502,6 +1558,11 @@ static int s_stereoRecording = 0;    /* journal writes enabled: active frame, an
                                       * the replay so re-entered functions cannot re-record */
 static int s_stereoEye = 0; /* 0 = left (and mono), 1 = right */
 static float s_stereoVecWorld[2][4]; /* [eye][k, k*conv, clampLo, clampHi] -- track/model programs */
+/* Depth tint per program and eye: x = on, y = K when the eye has no parallax (the tint is K / depth then),
+ * z = 1 / (k * (1 + pop-out)) when it has (the tint is (k - p) * z: the shift the shader really applies, so it
+ * agrees with the 3D whatever path put the vertex there), w unused. */
+static float s_tintVecPkt[2][4];
+static float s_tintVecWorld[2][4];
 static float s_stereoVecPkt[2][4];   /* packet program: zeroed unless packet depth stamping is live */
 
 /*
@@ -1602,16 +1663,32 @@ static int N3DS_StereoPacketDepthActive(void)
  * failure of layered stereo. The into-screen bound stays at absK because
  * p = k*(1 - C/d) approaches k from below: that side is the curve's own
  * asymptote and never engages. */
+/* This frame's 3D in window mode (a world scene, see g_dbg_stereoWindow). */
+static int N3DS_StereoWindowNow(void)
+{
+	return g_dbg_stereoWindow && s_stereoWorldScene;
+}
+
+static float N3DS_StereoConvNow(void)
+{
+	return N3DS_StereoWindowNow() ? s_stereoConvWorld : s_stereoConv;
+}
+
+static float N3DS_StereoPopNow(void)
+{
+	return N3DS_StereoWindowNow() ? 0.0f : s_stereoPopMul;
+}
+
 static void N3DS_StereoEyeVec(float k, float *out4)
 {
 	const float absK = (k < 0.0f) ? -k : k;
 	/* Window mode zeroes the crossed-disparity (pop-out) side of the clamp
 	 * band; content nearer than the convergence depth pins to the screen
 	 * plane instead of popping out and folding (see g_dbg_stereoWindow). */
-	const float popOut = g_dbg_stereoWindow ? 0.0f : (s_stereoPopMul * absK);
+	const float popOut = N3DS_StereoPopNow() * absK;
 
 	out4[0] = k;
-	out4[1] = k * s_stereoConv;
+	out4[1] = k * N3DS_StereoConvNow();
 	if (k >= 0.0f)
 	{
 		out4[2] = -popOut; /* right eye: near content shifts left */
@@ -1622,6 +1699,24 @@ static void N3DS_StereoEyeVec(float k, float *out4)
 		out4[2] = -absK;
 		out4[3] = popOut;
 	}
+}
+
+void N3DS_StereoDescribe(char *out, unsigned cap)
+{
+	snprintf(out, cap, "3d: active=%d slider=%d%% sep=%d conv=%d (menu %d, world %d) pop=%dx window=%d worldScene=%d tint=%d", s_stereoFrameActive,
+	         (int)(osGet3DSliderState() * 100.0f), (int)s_stereoSep, (int)N3DS_StereoConvNow(), (int)s_stereoConv, (int)s_stereoConvWorld,
+	         (int)N3DS_StereoPopNow(), g_dbg_stereoWindow, s_stereoWorldScene, g_dbg_depthTint);
+}
+
+/* One eye's depth tint vector from its parallax k (see s_tintVecPkt). */
+static void N3DS_TintEyeVec(float k, float *out4)
+{
+	const float pop = N3DS_StereoPopNow();
+
+	out4[0] = g_dbg_depthTint ? 1.0f : 0.0f;
+	out4[1] = (k != 0.0f) ? 0.0f : s_depthTintK;
+	out4[2] = (k != 0.0f) ? 1.0f / (k * (1.0f + pop)) : 0.0f;
+	out4[3] = 0.0f;
 }
 
 /* Widest horizontal shift stereo can apply to far-pinned content, in PSX
@@ -1652,6 +1747,11 @@ static void N3DS_StereoLatchFrame(void)
 	s_stereoOpCount = 0;
 	s_stereoOverflow = 0;
 	s_stereoEye = 0;
+	/* The tint follows the stereo response, not the raw distance: p = k - kC/d is clamped at the pop-out bound,
+	 * so everything nearer than that sits on one plane and must read as one tone. K/d reaches 1 exactly there. */
+	s_stereoWorldScene = s_stereoTrackSeen;
+	s_stereoTrackSeen = 0;
+	s_depthTintK = N3DS_StereoConvNow() / (1.0f + N3DS_StereoPopNow());
 	s_stereoFrameActive = 0;
 
 	if (g_dbg_stereo && (s_renderTargetRight != NULL) && !N3DS_FramePaceStereoSuppressed())
@@ -1675,6 +1775,8 @@ static void N3DS_StereoLatchFrame(void)
 
 			N3DS_StereoEyeVec(k, s_stereoVecWorld[eye]);
 			N3DS_StereoEyeVec(pktLive ? k : 0.0f, s_stereoVecPkt[eye]);
+			N3DS_TintEyeVec(s_stereoVecWorld[eye][0], s_tintVecWorld[eye]);
+			N3DS_TintEyeVec(s_stereoVecPkt[eye][0], s_tintVecPkt[eye]);
 
 			/*
 			 * UI pop-out. NEGATIVE k: pop-out is CROSSED disparity, i.e. the
@@ -1699,7 +1801,7 @@ static void N3DS_StereoLatchFrame(void)
 		         s_stereoFrameActive                ? "[CTR-3DS] stereo: ACTIVE (slider=%d%% sep=%d conv=%d pktdepth=%d)"
 		         : N3DS_FramePaceStereoSuppressed() ? "[CTR-3DS] stereo: inactive (AUTO 3D: right eye off, frame over its cap)"
 		                                            : "[CTR-3DS] stereo: inactive (slider down)",
-		         (int)(slider * 100.0f), (int)s_stereoSep, (int)s_stereoConv, N3DS_StereoPacketDepthActive());
+		         (int)(slider * 100.0f), (int)s_stereoSep, (int)N3DS_StereoConvNow(), N3DS_StereoPacketDepthActive());
 		N3DS_DebugLog(msg);
 		s_wasActive = s_stereoFrameActive;
 	}
@@ -1715,6 +1817,17 @@ static void N3DS_StereoUploadUniform(int uLoc, const float (*table)[4])
 		const float *v = table[s_stereoEye];
 
 		C3D_FVUnifSet(GPU_VERTEX_SHADER, uLoc, v[0], v[1], v[2], v[3]);
+	}
+}
+
+/* The depth tint uniform of one program; never on inside the bottom pass. */
+static void N3DS_TintUploadUniform(int uLoc, const float (*table)[4])
+{
+	if (uLoc >= 0)
+	{
+		const float *v = table[s_stereoEye];
+
+		C3D_FVUnifSet(GPU_VERTEX_SHADER, uLoc, N3DS_DepthTintOn() ? v[0] : 0.0f, v[1], v[2], v[3]);
 	}
 }
 
@@ -2015,8 +2128,9 @@ static void N3DS_BindPacketDrawState(void)
 	 */
 	env = C3D_GetTexEnv(0);
 	C3D_TexEnvInit(env);
-	C3D_TexEnvSrc(env, C3D_Both, GPU_TEXTURE0, GPU_PRIMARY_COLOR, 0);
-	C3D_TexEnvFunc(env, C3D_Both, GPU_MODULATE);
+	C3D_TexEnvSrc(env, C3D_Alpha, GPU_TEXTURE0, GPU_PRIMARY_COLOR, 0);
+	C3D_TexEnvFunc(env, C3D_Alpha, GPU_MODULATE);
+	N3DS_TexEnvTexturedRGB(env);
 	C3D_DirtyTexEnv(env);
 
 	/*
@@ -2047,6 +2161,7 @@ static void N3DS_BindPacketDrawState(void)
 	 * program uses for qy, so it must be re-asserted on every return to packet
 	 * state exactly as the stereo vector is. */
 	N3DS_StereoUploadUniform(s_uLocStereoUi, (const float(*)[4])s_stereoVecUi);
+	N3DS_TintUploadUniform(s_uLocTint, (const float(*)[4])s_tintVecPkt);
 }
 
 /*
@@ -2353,6 +2468,7 @@ int N3DS_C3DInit(void)
 	s_uLocProjection = shaderInstanceGetUniformLocation(s_shaderProgram.vertexShader, "projection");
 	s_uLocStereo = shaderInstanceGetUniformLocation(s_shaderProgram.vertexShader, "stereo");
 	s_uLocStereoUi = shaderInstanceGetUniformLocation(s_shaderProgram.vertexShader, "stereoUi");
+	s_uLocTint = shaderInstanceGetUniformLocation(s_shaderProgram.vertexShader, "tint");
 
 	/*
 	 * Placeholder until the first N3DS_C3DSetProjection call, which derives
@@ -2520,6 +2636,7 @@ int N3DS_C3DInit(void)
 	s_trackULocDepthRange = shaderInstanceGetUniformLocation(s_trackShaderProgram.vertexShader, "depthRange");
 	s_trackULocUvOffset = shaderInstanceGetUniformLocation(s_trackShaderProgram.vertexShader, "uvOffset");
 	s_trackULocStereo = shaderInstanceGetUniformLocation(s_trackShaderProgram.vertexShader, "stereo");
+	s_trackULocTint = shaderInstanceGetUniformLocation(s_trackShaderProgram.vertexShader, "tint");
 
 	/* Fixed attribute layout for N3DS_TrackVertex -- does not depend on any
 	 * per-level allocation (unlike s_trackBufInfo, built in
@@ -2557,6 +2674,7 @@ int N3DS_C3DInit(void)
 	s_modelULocQw = shaderInstanceGetUniformLocation(s_modelShaderProgram.vertexShader, "qw");
 	s_modelULocH = shaderInstanceGetUniformLocation(s_modelShaderProgram.vertexShader, "hParam");
 	s_modelULocStereo = shaderInstanceGetUniformLocation(s_modelShaderProgram.vertexShader, "stereo");
+	s_modelULocTint = shaderInstanceGetUniformLocation(s_modelShaderProgram.vertexShader, "tint");
 #endif /* CTR_NATIVE_MODEL_RENDERER */
 
 	return 1;
@@ -2975,6 +3093,7 @@ void N3DS_C3DBeginFrame(void)
 	 * program uses for qy, so it must be re-asserted on every return to packet
 	 * state exactly as the stereo vector is. */
 	N3DS_StereoUploadUniform(s_uLocStereoUi, (const float(*)[4])s_stereoVecUi);
+	N3DS_TintUploadUniform(s_uLocTint, (const float(*)[4])s_tintVecPkt);
 
 	/* Every draw this frame appends into the SAME persistent buffer at a
 	 * fresh offset (see the header comment on N3DS_C3DAppendVertices) --
@@ -3283,6 +3402,12 @@ void N3DS_C3DSetColorDoubling(int enable)
 	 */
 	C3D_TexEnv *env = C3D_GetTexEnv(0);
 
+	/* Under the depth tint the stage outputs the tint itself, not texel * vertex colour: doubling it
+	 * would paint every textured face twice as near as an untextured one at the same depth. */
+	if (N3DS_DepthTintOn())
+	{
+		enable = 0;
+	}
 	C3D_TexEnvScale(env, C3D_RGB, enable ? GPU_TEVSCALE_2 : GPU_TEVSCALE_1);
 	/* Explicit, not redundant-by-inspection: C3D_TexEnvScale is a plain
 	 * inline struct write, and citro3d exposes C3D_DirtyTexEnv precisely
@@ -3695,6 +3820,8 @@ void N3DS_TrackDraw_Begin(const float *qx, const float *qy, const float *qw, flo
 {
 	C3D_TexEnv *env;
 
+	s_stereoTrackSeen = 1; /* a world scene: next frame's 3D is a window (g_dbg_stereoWindow) */
+
 	/* Stereo journal: recorded at the TOP, mirroring the call itself rather
 	 * than its effect -- the replay re-invokes this function, whose own
 	 * guards and global reads (geomReady, selTrueDepth, depthTest state)
@@ -3863,6 +3990,7 @@ void N3DS_TrackDraw_Begin(const float *qx, const float *qy, const float *qw, flo
 	/* Current eye's parallax (zero in mono). Per bracket, not per frame:
 	 * the right-eye replay re-enters this function with s_stereoEye = 1. */
 	N3DS_StereoUploadUniform(s_trackULocStereo, (const float(*)[4])s_stereoVecWorld);
+	N3DS_TintUploadUniform(s_trackULocTint, (const float(*)[4])s_tintVecWorld);
 
 	/*
 	 * Vertex-color-only output: 3a is untextured (color_hi is already baked
@@ -3941,15 +4069,15 @@ static void N3DS_TrackDraw_SetTextured(int mode)
 		 * takes the crisp mask from unit 1 (nearest), still modulated by the
 		 * vertex alpha exactly as the single path did. C3D_RGB and C3D_Alpha are
 		 * independent env slots, so these four calls fully define the stage. */
-		C3D_TexEnvSrc(env, C3D_RGB, GPU_TEXTURE0, GPU_PRIMARY_COLOR, 0);
-		C3D_TexEnvFunc(env, C3D_RGB, GPU_MODULATE);
+		N3DS_TexEnvTexturedRGB(env);
 		C3D_TexEnvSrc(env, C3D_Alpha, GPU_TEXTURE1, GPU_PRIMARY_COLOR, 0);
 		C3D_TexEnvFunc(env, C3D_Alpha, GPU_MODULATE);
 	}
 	else
 	{
-		C3D_TexEnvSrc(env, C3D_Both, GPU_TEXTURE0, GPU_PRIMARY_COLOR, 0);
-		C3D_TexEnvFunc(env, C3D_Both, GPU_MODULATE);
+		C3D_TexEnvSrc(env, C3D_Alpha, GPU_TEXTURE0, GPU_PRIMARY_COLOR, 0);
+		C3D_TexEnvFunc(env, C3D_Alpha, GPU_MODULATE);
+		N3DS_TexEnvTexturedRGB(env);
 	}
 	C3D_DirtyTexEnv(env);
 	N3DS_C3DSetColorDoubling((mode != 0) ? 1 : 0);
@@ -4259,6 +4387,7 @@ void N3DS_ModelDraw_Begin(void)
 	 * this bracket always opens after the track bracket closed, so this
 	 * per-bracket upload is exactly what makes that safe. */
 	N3DS_StereoUploadUniform(s_modelULocStereo, (const float(*)[4])s_stereoVecWorld);
+	N3DS_TintUploadUniform(s_modelULocTint, (const float(*)[4])s_tintVecWorld);
 
 	/*
 	 * Assert opaque blending, for the reason spelled out at length in
@@ -4330,8 +4459,9 @@ static void N3DS_ModelDraw_SetTextured(int textured)
 	env = C3D_GetTexEnv(0);
 	if (textured)
 	{
-		C3D_TexEnvSrc(env, C3D_Both, GPU_TEXTURE0, GPU_PRIMARY_COLOR, 0);
-		C3D_TexEnvFunc(env, C3D_Both, GPU_MODULATE);
+		C3D_TexEnvSrc(env, C3D_Alpha, GPU_TEXTURE0, GPU_PRIMARY_COLOR, 0);
+		C3D_TexEnvFunc(env, C3D_Alpha, GPU_MODULATE);
+		N3DS_TexEnvTexturedRGB(env);
 	}
 	else
 	{
@@ -4595,6 +4725,7 @@ int N3DS_BottomPass_Begin(void)
 	 * FrameEnd's command list, after this fill -- the same ordering
 	 * N3DS_C3DBeginFrame's own clears rely on. Depth clears to far
 	 * (LEQUAL + clear-to-max polarity, see BeginFrame). */
+	s_depthTintBottom = 1;
 	C3D_RenderTargetClear(s_renderTargetBottom, C3D_CLEAR_ALL, 0x000000FF, 0x00FFFFFF);
 	C3D_FrameDrawOn(s_renderTargetBottom);
 	/* Viewport does not follow the framebuffer binding (same note as the right
@@ -4614,6 +4745,7 @@ int N3DS_BottomPass_Begin(void)
 	 * are re-uploaded by the next frame's BeginFrame. */
 	N3DS_StereoUploadUniform(s_uLocStereo, zeroVec);
 	N3DS_StereoUploadUniform(s_uLocStereoUi, zeroVec);
+	N3DS_StereoUploadUniform(s_uLocTint, zeroVec);
 
 	/* The window is saved/restored around the pass because BeginFrame
 	 * re-uploads the STORED matrix every frame while SetProjection only
@@ -4690,6 +4822,7 @@ void N3DS_BottomMapDraw_SetWindow(float left, float right, float top, float bott
 /* Ends the bottom frame: restores the stored top-screen projection. */
 void N3DS_BottomPass_End(void)
 {
+	s_depthTintBottom = 0;
 	Mtx_Copy(&s_projection, &s_bottomSavedProjection);
 	if (s_uLocProjection >= 0)
 	{
@@ -4903,6 +5036,12 @@ void N3DS_C3DSetBlendMode(int blendMode)
 {
 	static int lastMode = -1;
 
+	/* Depth tint: a blended face shows its own depth tone like any other, not a shadow subtracted to
+	 * black or smoke added to white. Its texels' alpha still cuts its shape. */
+	if (N3DS_DepthTintOn())
+	{
+		blendMode = 0;
+	}
 	if (blendMode == lastMode)
 	{
 		return;
@@ -5823,6 +5962,18 @@ unsigned int N3DS_ReadButtons(void)
 					N3DS_DebugLog(g_dbg_statsConsole ? "[CTR-3DS] stats console: ON (bottom panel shows stats + log echo)"
 					                                 : "[CTR-3DS] stats console: off (bottom panel quiet outside the map)");
 				}
+				else if (strncmp(word, "mdldump", 7) == 0)
+				{
+					extern int g_dbg_mdlDump;
+
+					g_dbg_mdlDump = 1; /* next model draw: [MDLDUMP] lines, every instance and triangle */
+					N3DS_DebugLog("[CTR-3DS] mdldump: armed (next frame's model path)");
+				}
+				else if (strncmp(word, "depthtint", 9) == 0)
+				{
+					g_dbg_depthTint ^= 1;
+					N3DS_DebugLog(g_dbg_depthTint ? "[CTR-3DS] depthtint: ON (bright blue near, dark far)" : "[CTR-3DS] depthtint: off");
+				}
 				else if (strncmp(word, "btmmap", 6) == 0)
 				{
 					extern int g_dbg_btmMap;
@@ -6132,8 +6283,27 @@ unsigned int N3DS_ReadButtons(void)
 				else if (strncmp(word, "stereowindow", 12) == 0)
 				{
 					g_dbg_stereoWindow ^= 1;
-					N3DS_DebugLog(g_dbg_stereoWindow ? "[CTR-3DS] stereo window mode: ON (no pop-out, world starts at the screen)"
-					                                 : "[CTR-3DS] stereo window mode: off (pop-out allowed, clamped)");
+					N3DS_DebugLog(g_dbg_stereoWindow ? "[CTR-3DS] stereo window mode: ON (world scenes start at the screen, no pop-out)"
+					                                 : "[CTR-3DS] stereo window mode: off (world scenes pop out too, clamped)");
+				}
+				else if (strncmp(word, "stereoworldconv", 15) == 0)
+				{
+					char msg[72];
+
+					/* 'stereoworldconv N': the screen-plane depth of world scenes in
+					 * window mode; nearer content pins to the screen. Bare token resets. */
+					if (word[15] == ' ')
+					{
+						int n = atoi(&word[16]);
+
+						s_stereoConvWorld = (float)((n < 64) ? 64 : (n > 60000) ? 60000 : n);
+					}
+					else
+					{
+						s_stereoConvWorld = 650.0f;
+					}
+					snprintf(msg, sizeof(msg), "[CTR-3DS] stereo world convergence: %d view.z units", (int)s_stereoConvWorld);
+					N3DS_DebugLog(msg);
 				}
 				else if (strncmp(word, "stereopop", 9) == 0)
 				{

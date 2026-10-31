@@ -745,6 +745,10 @@ void N3DS_SetSdLogEnabled(int enabled);
  * CTR_INTERNAL-only diagnostic (texture-corruption investigation);
  * no-op otherwise. */
 void N3DS_DebugSetVRAMForDump(const void *vram, unsigned int bytes, const unsigned int *frameCounter);
+/* CTR_INTERNAL: the registered PSX VRAM to `path`; 1 on success. */
+int N3DS_DebugWriteVramTo(const char *path);
+/* One line of the 3D settings in force (slider, separation, convergence, pop-out, scene), for captures. */
+void N3DS_StereoDescribe(char *out, unsigned cap);
 
 /* ---------------------------------------------------------------- memory --- */
 /* Bytes currently handed out by malloc, and free space in the linear heap.
