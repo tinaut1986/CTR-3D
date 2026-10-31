@@ -1914,7 +1914,7 @@ global_variable uintptr_t s_uipicRangeEnd[2];
 global_variable uintptr_t s_hudshineRangeStart[2][HUDSHINE_SPANS_MAX];
 global_variable uintptr_t s_hudshineRangeEnd[2][HUDSHINE_SPANS_MAX];
 global_variable int s_hudshineRangeCount[2];
-#define UIHUD_SPANS_MAX 24
+#define UIHUD_SPANS_MAX 64
 global_variable uintptr_t s_uihudRangeStart[2][UIHUD_SPANS_MAX];
 global_variable uintptr_t s_uihudRangeEnd[2][UIHUD_SPANS_MAX];
 global_variable u8 s_uihudRangeGroup[2][UIHUD_SPANS_MAX];
@@ -6624,6 +6624,13 @@ int NativeUiMap_RouteActive(void)
 #else
 	return 0;
 #endif
+}
+
+/* Nonzero when the race HUD is routed to the bottom screen, which is the only place the full
+ * ranking (HUD group 8, UI_Rank.c) is drawn: those prims never reach the top screen. */
+int NativeUiHud_ExtrasWanted(void)
+{
+	return NativeUiMap_RouteActive();
 }
 
 /* HudAndDebugFlags bits OR'd in once at boot (MainMain). Bit 8 = speedometer

@@ -408,7 +408,7 @@ OPTIONS > AUTO-HIDE HUD is on and the MAPA tab is up (otherwise the top keeps it
 - Stamps: the resolver (`PacketDepth_ResolveXY`) takes marked nodes down the 2D UI leg and stamps them
   `PKTDEPTH_UI_STAMP_BTMHUD_BASE + group` (0xFFF1..0xFFF7) while the ordered-UI pin owns the band.
 - Renderer (`native_renderer_3ds.c`): `N3DS_BtmHudAppend` peels them into one list, each segment tagged with
-  its group, plus a latched grow-only source box per group (reset after 90 frames without the group).
+  its group, plus the source box of the last frame that drew each group (kept while it blinks off, reset after 90 frames without it; never grow-only, animated pieces would shrink the common scale), with the scale quantised to 1/32 steps.
   `N3DS_DrawBottomMapPass` draws each group through its own ortho window (`N3DS_BtmFitWindow`) into the rect
   `N3DS_BtmHudLayout` gives it; unless AUTO-HIDE is on with the MAPA tab up, a pinned copy goes to the
   ordinary ordered-UI list for the top screen.
