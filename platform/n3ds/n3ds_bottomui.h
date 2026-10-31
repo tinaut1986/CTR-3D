@@ -77,6 +77,7 @@ void N3DS_BottomUi_NoteGpuOwned(void);
 int N3DS_BottomUi_MapTabActive(void);
 int N3DS_BottomUi_GpuOwned(void); /* the GPU draws the bottom screen: its pixels are only in the framebuffer */
 int N3DS_BottomUi_HudBelow(void); /* HUD AUTO-HIDE on, MAPA tab up and a race map live */
+int N3DS_BottomUi_HudBelowWanted(void); /* HUD AUTO-HIDE on and the MAPA tab up (a routed HUD triangle proves the HUD exists) */
 /* The pass tells whether it drew a live minimap this frame (else the MAPA tab
  * says there is none); also auto-selects MAPA when a race map first appears. */
 void N3DS_BottomUi_MapLive(int live);

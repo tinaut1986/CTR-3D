@@ -7201,7 +7201,7 @@ void NativeRenderer_DrawTriangles(int startVertex, int triangles)
 				 * the MAPA tab up (N3DS_BottomUi_HudBelow), the top screen keeps its own HUD too. */
 				if (g_dbg_btmMap && PKTDEPTH_UI_STAMP_IS_BTMHUD(triVerts[0].emitOrdinal) && (triVerts[0].emitOrdinal != (PKTDEPTH_UI_STAMP_BTMHUD_BASE + N3DS_BTMH_G_LISTX)) &&
 				    (triVerts[0].emitOrdinal != (PKTDEPTH_UI_STAMP_BTMHUD_BASE + N3DS_BTMH_G_LISTBAR)) &&
-				    !N3DS_BottomUi_HudBelow())
+				    !N3DS_BottomUi_HudBelowWanted())
 				{
 					N3DS_Vertex *topDst = N3DS_UiOrderAppend(s_currentBlendMode, untextured ? 0 : 1, atlasIdx);
 
