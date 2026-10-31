@@ -4300,7 +4300,9 @@ internal void N3DS_ConvertTriangleVerts(N3DS_Vertex *dst3, const GrVertex *triVe
 
 			if (g_dbg_packetDepth && (src->emitOrdinal >= 0xFFC0u))
 			{
-				sx = (s16)NativeWide_UiShiftX((int)sx);
+				extern int N3DS_UiEdgeExtend(int x);
+
+				sx = (s16)N3DS_UiEdgeExtend(NativeWide_UiShiftX((int)sx));
 			}
 			dst->x = sx;
 		}
