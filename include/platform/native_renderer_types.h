@@ -114,7 +114,7 @@ typedef struct
  * (NativeGpu_MarkUiHudRange, UI_RenderFrame.c). Same band rules as BTMMAP: only stamped
  * while the ordered-UI pin owns the band, re-pinned to 0xFFFF for the top-screen copy. */
 #define PKTDEPTH_UI_STAMP_BTMHUD_BASE 0xFFF0u
-#define PKTDEPTH_UI_HUD_GROUPS 8u
+#define PKTDEPTH_UI_HUD_GROUPS 11u /* 1..7 retail pieces; 8, 9 = the ranking's big digits + icons and the player's highlight (bottom screen only); 10 = retail's small digits (top screen only) */
 #define PKTDEPTH_UI_STAMP_IS_BTMHUD(s) (((s) > PKTDEPTH_UI_STAMP_BTMHUD_BASE) && ((s) < (PKTDEPTH_UI_STAMP_BTMHUD_BASE + PKTDEPTH_UI_HUD_GROUPS)))
 
 typedef enum

@@ -298,6 +298,9 @@ void UI_TrackerBG(struct Icon *targetIcon, s16 centerX, s16 centerY, struct Prim
 }
 
 // NOTE(aalhendi): ASM-verified NTSC-U 926 0x8004e8d8-0x8004eaa8.
+/* The 3DS bottom-screen HUD draws the ranking's rows 5..8 below retail's clip line (UI_Rank.c sets this around its calls). */
+int g_uiDriverIconNoClip = 0;
+
 void UI_DrawDriverIcon(struct Icon *icon, s16 posX, s16 posY, struct PrimMem *primMem, uint32_t *ot, char transparency, s16 scale, u32 color)
 {
 	PolyFT4 *p = primMem->cursor;
@@ -312,11 +315,11 @@ void UI_DrawDriverIcon(struct Icon *icon, s16 posX, s16 posY, struct PrimMem *pr
 	int topX = posX;
 	int bottomX = topX + scaledWidth;
 #if BUILD != EurRetail
-	int topY = (posY < UI_DRIVER_ICON_NTSC_CLIP_LIMIT) ? posY : UI_DRIVER_ICON_NTSC_CLIP_MAX;
-	int bottomY = ((posY + scaledHeight) < UI_DRIVER_ICON_NTSC_CLIP_LIMIT) ? (posY + scaledHeight) : UI_DRIVER_ICON_NTSC_CLIP_MAX;
+	int topY = (g_uiDriverIconNoClip || (posY < UI_DRIVER_ICON_NTSC_CLIP_LIMIT)) ? posY : UI_DRIVER_ICON_NTSC_CLIP_MAX;
+	int bottomY = (g_uiDriverIconNoClip || ((posY + scaledHeight) < UI_DRIVER_ICON_NTSC_CLIP_LIMIT)) ? (posY + scaledHeight) : UI_DRIVER_ICON_NTSC_CLIP_MAX;
 #else
-	int topY = (posY < UI_DRIVER_ICON_EUR_CLIP_LIMIT) ? posY : UI_DRIVER_ICON_EUR_CLIP_MAX;
-	int bottomY = ((posY + scaledHeight) < UI_DRIVER_ICON_EUR_CLIP_LIMIT) ? (posY + scaledHeight) : UI_DRIVER_ICON_EUR_CLIP_MAX;
+	int topY = (g_uiDriverIconNoClip || (posY < UI_DRIVER_ICON_EUR_CLIP_LIMIT)) ? posY : UI_DRIVER_ICON_EUR_CLIP_MAX;
+	int bottomY = (g_uiDriverIconNoClip || ((posY + scaledHeight) < UI_DRIVER_ICON_EUR_CLIP_LIMIT)) ? (posY + scaledHeight) : UI_DRIVER_ICON_EUR_CLIP_MAX;
 #endif
 
 	p->tag.size = (sizeof(*p) - sizeof(p->tag)) / sizeof(u32);

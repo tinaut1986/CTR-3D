@@ -1267,18 +1267,19 @@ static int s_uLocTint = -1;
 static int s_trackULocTint = -1;
 static int s_modelULocTint = -1;
 /*
- * UI pop-out amount, as a percent of this eye's at-infinity shift k --
- * explicitly not at the screen plane, and less than the character-select
- * rotating character.
+ * UI pop-out: how far the HUD and every menu piece come out of the screen, in WHOLE PANEL PIXELS per
+ * eye at the full 3D slider (so the left/right disparity is twice that). Whole pixels on purpose: a
+ * fractional shift lands each glyph on different sub-pixel phases in the two eyes and the text stops
+ * fusing; the shift is rounded to an integer after the slider scales it and only then converted to
+ * the game's own units (s_uiPsxPerPx, see N3DS_C3DSetProjection). It is also the nearest thing on
+ * screen: the world's pop-out is clamped half a pixel below it (N3DS_StereoEyeVec). 0 when the
+ * slider is down, mono safe by construction.
  *
- * A percent of k rather than an absolute pixel count tracks the 3D slider for
- * free and is identically 0 when the slider is down -- mono safety by
- * construction, the same property the flag depth/parallax split relies on.
- *
- * Runtime-tunable (dumpreq 'uipop N') because this is a comfort value judged
- * by eye, on hardware.
+ * Runtime-tunable (dumpreq 'uipop N', pixels) because this is a comfort value judged by eye.
  */
-int g_dbg_uiPopPct = 35;
+int g_dbg_uiPopPx = 4;
+static float s_uiPsxPerPx = 1.6f; /* game units per panel pixel across the top screen, from the projection */
+static float s_uiShiftPsx = 0.0f; /* this frame's UI shift per eye, game units (0 in mono) */
 /* Debug view (DEBUG > ACTIONS > DEPTH TINT, dumpreq 'depthtint', not saved): the vertex shaders colour
  * every vertex by its distance, one blue tone, bright near and dark far (K over the stereo depth, so planes the 3D merges share a tone), so the layers
  * the 3D effect separates can be seen. Independent of the slider. */
@@ -1685,7 +1686,17 @@ static void N3DS_StereoEyeVec(float k, float *out4)
 	/* Window mode zeroes the crossed-disparity (pop-out) side of the clamp
 	 * band; content nearer than the convergence depth pins to the screen
 	 * plane instead of popping out and folding (see g_dbg_stereoWindow). */
-	const float popOut = N3DS_StereoPopNow() * absK;
+	float popOut = N3DS_StereoPopNow() * absK;
+
+	/* The UI is the nearest thing on screen: the world never pops out past half a pixel short of it. */
+	if (popOut > (s_uiShiftPsx - (0.5f * s_uiPsxPerPx)))
+	{
+		popOut = s_uiShiftPsx - (0.5f * s_uiPsxPerPx);
+		if (popOut < 0.0f)
+		{
+			popOut = 0.0f;
+		}
+	}
 
 	out4[0] = k;
 	out4[1] = k * N3DS_StereoConvNow();
@@ -1766,9 +1777,11 @@ static void N3DS_StereoLatchFrame(void)
 
 	{
 		const float mag = s_stereoFrameActive ? (slider * s_stereoSep * 0.5f) : 0.0f;
+		const int uiPx = s_stereoFrameActive ? (int)((slider * (float)g_dbg_uiPopPx) + 0.5f) : 0;
 		const int pktLive = s_stereoFrameActive && N3DS_StereoPacketDepthActive();
 		int eye;
 
+		s_uiShiftPsx = (float)uiPx * s_uiPsxPerPx; /* before the eye vectors: they clamp the world to it */
 		for (eye = 0; eye < 2; eye++)
 		{
 			const float k = (eye == 1) ? mag : -mag;
@@ -1786,7 +1799,7 @@ static void N3DS_StereoLatchFrame(void)
 			 * sign. Rides the packet vector's liveness so UI never pops out on a
 			 * frame where packet depth is off and the band test is meaningless.
 			 */
-			s_stereoVecUi[eye][0] = (pktLive ? -k : 0.0f) * ((float)g_dbg_uiPopPct * 0.01f);
+			s_stereoVecUi[eye][0] = pktLive ? ((eye == 1) ? -s_uiShiftPsx : s_uiShiftPsx) : 0.0f;
 			s_stereoVecUi[eye][1] = 0.0f;
 			s_stereoVecUi[eye][2] = 0.0f;
 			s_stereoVecUi[eye][3] = 0.0f;
@@ -2082,6 +2095,7 @@ void N3DS_C3DSetProjection(float left, float right, float bottom)
 	 * it.
 	 */
 	Mtx_OrthoTilt(&s_projection, left, right, bottom, 0.0f, -32769.0f, 32769.0f, true);
+	s_uiPsxPerPx = (right - left) / (g_dbg_widescreen ? 400.0f : (float)N3DS_TOP_CONTENT_W);
 }
 
 /*
@@ -6038,8 +6052,8 @@ unsigned int N3DS_ReadButtons(void)
 				}
 				else if (strncmp(word, "uipop", 5) == 0)
 				{
-					/* How far UI pops out of the screen, as a percent of this
-					 * eye's at-infinity shift. 0 = the old flat-at-screen-plane
+					/* How far UI pops out of the screen, in whole panel pixels per
+					 * eye at the full slider. 0 = the old flat-at-screen-plane
 					 * behaviour. 'uipop N' sets it directly -- a comfort value only
 					 * its owner's eyes can judge, so it is dialled at runtime on
 					 * hardware rather than rebuilt. Only visible with the 3D slider
@@ -6052,16 +6066,16 @@ unsigned int N3DS_ReadButtons(void)
 					}
 					if ((*arg >= '0') && (*arg <= '9'))
 					{
-						g_dbg_uiPopPct = atoi(arg);
-						if (g_dbg_uiPopPct > 200)
+						g_dbg_uiPopPx = atoi(arg);
+						if (g_dbg_uiPopPx > 12)
 						{
-							g_dbg_uiPopPct = 200;
+							g_dbg_uiPopPx = 12;
 						}
 					}
 					{
 						char msg[96];
 
-						snprintf(msg, sizeof(msg), "[CTR-3DS] ui pop-out: %d%% of k", g_dbg_uiPopPct);
+						snprintf(msg, sizeof(msg), "[CTR-3DS] ui pop-out: %d px per eye at full slider", g_dbg_uiPopPx);
 						N3DS_DebugLog(msg);
 					}
 				}
