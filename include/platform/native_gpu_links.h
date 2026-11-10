@@ -17,6 +17,7 @@ uint32_t NativeGpuLinks_FromHostPointer(const void *hostPtr);
 void *NativeGpuLinks_ToHostPointer(uint32_t token);
 int NativeGpuLinks_IsTerminator(uint32_t token);
 int NativeGpuLinks_IsRegisteredHostPointer(const void *hostPtr);
+int NativeGpuLinks_TokenRange(uint32_t token, uintptr_t *hostStart, uint32_t *tokenStart, uint32_t *tokenEnd);
 int NativeGpuLinks_IsRegisteredHostRange(const void *hostPtr, size_t size);
 int NativeGpuLinks_RegisterRange(const void *hostStart, size_t size, uint32_t *tokenStartOut);
 void NativeGpuLinks_RegisterRangeChecked(const char *label, const void *hostStart, size_t size);

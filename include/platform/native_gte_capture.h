@@ -213,6 +213,7 @@ void GTECapture_PublishForWalk(void);
 void GTECapture_SetUIBand(const void *start, const void *end);
 void GTECapture_BeginOTWalk(void);
 void GTECapture_MarkOTNode(const void *node);
+void GTECapture_MarkOTRun(const void *lo, const void *hi, const void *last);
 int GTECapture_LookupSuppressed(void);
 
 // DEPTHLESS-GEOMETRY suppression. Bracket any producer whose GTE

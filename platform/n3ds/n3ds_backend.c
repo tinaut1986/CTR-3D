@@ -397,12 +397,62 @@ int N3DS_O3dsSimFtpAllowed(void)
 }
 
 /* Cores 2 and 3 usable: a real New 3DS that is not pretending to be an old one. */
+/* CPU -> GPU visibility of a range the CPU wrote: the kernel's own cache
+ * maintenance on the calling core (svcFlushProcessDataCache), not
+ * GSPGPU_FlushDataCache, which is an IPC request that GSP serves on core 1 --
+ * on an Old 3DS the core the render worker shares with the system, where every
+ * such request waited behind it. Same operation (GSP makes this very call for
+ * us); GSP's path stays the fallback should the kernel refuse it. */
+void N3DS_FlushDcache(const void *addr, unsigned size)
+{
+	if ((addr == NULL) || (size == 0))
+	{
+		return;
+	}
+	if (R_FAILED(svcFlushProcessDataCache(CUR_PROCESS_HANDLE, (u32)(uintptr_t)addr, (u32)size)))
+	{
+		GSPGPU_FlushDataCache(addr, (u32)size);
+	}
+}
+
 int N3DS_ExtraCoresUsable(void)
 {
 	bool isNew3DS = false;
 
 	APT_CheckNew3DS(&isNew3DS);
 	return isNew3DS && !s_o3dsSim;
+}
+
+/* cfg `core1`: the share of core 1 the Old-3DS render worker reserves
+ * (n3ds_render_thread.c), 0 = no worker (everything on core 0, the old way).
+ * The exheader's MaxCpu (ctr3d.rsf) is the ceiling; a refused value falls back
+ * to the next lower step there. */
+int N3DS_Core1Percent(void)
+{
+	int pct = N3DS_ConfigGet("core1", 0);
+	FILE *f = fopen(N3DS_APP_DIR "/core1.txt", "rb");
+
+	/* Test override: a core1.txt holding the percentage wins over the cfg
+	 * (the cfg is rewritten from memory at every relaunch). */
+	if (f != NULL)
+	{
+		int v = 0;
+
+		if (fscanf(f, "%d", &v) == 1)
+		{
+			pct = v;
+		}
+		fclose(f);
+	}
+	if (pct < 0)
+	{
+		pct = 0;
+	}
+	if (pct > 80)
+	{
+		pct = 80;
+	}
+	return pct;
 }
 
 /* DEBUG > ACTIONS: create/remove the flag file. Takes effect at the next start
@@ -471,7 +521,13 @@ void N3DS_EarlyInit(void)
 		 * choice wins either way. */
 		if (N3DS_FramePaceOldClass())
 		{
+			extern int g_dbg_c3dFlush;
+
 			g_dbg_stereo = 2;
+			/* Frame-end flush of the frame's vertex range only: the whole-heap
+			 * flush is a GSP request, and GSP runs on core 1 beside the render
+			 * worker, where it cost the worker ~7 ms a frame ([ENDPROF] fend). */
+			g_dbg_c3dFlush = 1;
 		}
 		g_dbg_stereo = N3DS_ConfigGet("stereo", g_dbg_stereo);
 		/* FRAME SKIP (cfg `fpsmode`: 0 AUTO, 1 30, 2 OFF) replaced FRAME CAP
@@ -1511,7 +1567,7 @@ void N3DS_TrackGeom_FlushPatched(void)
 		return;
 	}
 
-	GSPGPU_FlushDataCache((u8 *)s_trackGeomMem + s_trackPatchLoByte, (u32)(s_trackPatchHiByte - s_trackPatchLoByte));
+	N3DS_FlushDcache((u8 *)s_trackGeomMem + s_trackPatchLoByte, (u32)(s_trackPatchHiByte - s_trackPatchLoByte));
 	s_trackPatchTouched = 0;
 }
 /* Set by Begin only when geometry is actually ready; End always clears it
@@ -3170,7 +3226,7 @@ void N3DS_C3DEndFrame(void)
 
 		if (s_vertexCursor > 0)
 		{
-			GSPGPU_FlushDataCache(s_vertexBufferMem, (u32)((size_t)s_vertexCursor * sizeof(N3DS_Vertex)));
+			N3DS_FlushDcache(s_vertexBufferMem, (u32)((size_t)s_vertexCursor * sizeof(N3DS_Vertex)));
 		}
 		(void)N3DS_EndProfMark(N3DS_ENDPROF_FLUSH, flushT);
 		C3D_FrameEnd(GX_CMDLIST_FLUSH);
@@ -3348,7 +3404,7 @@ static void N3DS_C3DUploadTileBlock(C3D_Tex *tex, int tilesPerRow, int baseTileC
 		u8 *flushStart = texData + (size_t)((baseTileRow * tilesPerRow) + baseTileCol) * N3DS_TILE_BYTES;
 		size_t flushBytes = (size_t)(((tilesHigh - 1) * tilesPerRow) + tilesWide) * N3DS_TILE_BYTES;
 
-		GSPGPU_FlushDataCache(flushStart, (u32)flushBytes);
+		N3DS_FlushDcache(flushStart, (u32)flushBytes);
 	}
 }
 
@@ -3653,7 +3709,7 @@ int N3DS_TrackGeom_Upload(const void *verts, int vertCount, int vertStride, cons
 	/* Once per level load. Covered by C3D_FrameEnd(0)'s whole-heap flush
 	 * anyway; required under `c3dflush 1`, which flushes only the frame's
 	 * vertex range. */
-	GSPGPU_FlushDataCache(block, (u32)totalBytes);
+	N3DS_FlushDcache(block, (u32)totalBytes);
 
 	s_trackGeomMem = block;
 	s_trackIndexPtr = block + indexOffset;
@@ -4757,7 +4813,7 @@ int N3DS_BottomPass_Begin(void)
 		const size_t bytes = (size_t)N3DS_BOTTOM_UI_TEX_W * (firstUpload ? (size_t)N3DS_BOTTOM_UI_TEX_H : 240U) * 2U;
 
 		memcpy(s_bottomUiTex.data, tiled, bytes);
-		GSPGPU_FlushDataCache(s_bottomUiTex.data, (u32)bytes);
+		N3DS_FlushDcache(s_bottomUiTex.data, (u32)bytes);
 	}
 
 	/* Queued clear before any bottom draw; every draw this frame executes at
@@ -5129,7 +5185,7 @@ void N3DS_C3DUploadVramDisplayChunk(int slotIndex, const void *tiled256)
 	/* C3D_TexUpload is a plain memcpy into linear memory. Covered by
 	 * C3D_FrameEnd(0)'s whole-heap flush anyway; required under
 	 * `c3dflush 1` (see g_dbg_c3dFlush). */
-	GSPGPU_FlushDataCache(s_vramDisplayTex[slotIndex].data, s_vramDisplayTex[slotIndex].size);
+	N3DS_FlushDcache(s_vramDisplayTex[slotIndex].data, s_vramDisplayTex[slotIndex].size);
 }
 
 void N3DS_C3DBindVramDisplayTex(int slotIndex)
@@ -5506,6 +5562,13 @@ unsigned int N3DS_ReadButtons(void)
 
 					N3DS_AudioThreadStopAndJoin();
 					N3DS_DebugLog("[CTR-3DS] audiothread: STOPPED (main-thread fallback)");
+				}
+				else if (strcmp(word, "xaprefetch") == 0)
+				{
+					extern int g_dbg_xaPrefetch;
+
+					g_dbg_xaPrefetch = !g_dbg_xaPrefetch;
+					N3DS_DebugLog(g_dbg_xaPrefetch ? "[CTR-3DS] xaprefetch: ON (XA spans read ahead on the io thread)" : "[CTR-3DS] xaprefetch: OFF");
 				}
 				else if (strncmp(word, "cpulimit", 8) == 0)
 				{
@@ -7310,9 +7373,17 @@ static void N3DS_BeatMainTick(void)
 			snprintf(msg, sizeof(msg), "[BEAT] THAW gapMs=%u vb0=%lu vb1=%lu", (unsigned)gapMs, (unsigned long)C3D_FrameCounter(0),
 			         (unsigned long)C3D_FrameCounter(1));
 			N3DS_DebugLog(msg);
-			s_frameTraceBudget = 64;
-			s_beatPostThawFrames = 600;
-			N3DS_LogFlushNow();
+			/* The freeze trail (frame trace, ALIVE lines, synchronous SD
+			 * flushes) only for a real system freeze (Rosalina, HOME, lid).
+			 * A level load's end or a slow frame passes 500 ms too, and on an
+			 * Old 3DS each synchronous flush here was a 100-250 ms (up to
+			 * 1.5 s) game-thread stall: one long frame became 10 s of hitches. */
+			if (gapMs > 5000)
+			{
+				s_frameTraceBudget = 64;
+				s_beatPostThawFrames = 600;
+				N3DS_LogFlushNow();
+			}
 			if (g_dbg_rosaFix && (gapMs > 2000))
 			{
 				Result rc;

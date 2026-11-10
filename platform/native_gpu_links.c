@@ -259,6 +259,25 @@ void *NativeGpuLinks_ToHostPointer(uint32_t token)
 	return NULL;
 }
 
+/* The registered range holding `token`, for a caller that follows many links
+ * through the same range (the OT walk's empty-slot run): host = *hostStart +
+ * (token - *tokenStart) for every token in [*tokenStart, *tokenEnd), each one
+ * a registered host pointer -- what ToHostPointer + IsRegisteredHostPointer
+ * would say, without the two lookups per link. 0 = no range. */
+int NativeGpuLinks_TokenRange(uint32_t token, uintptr_t *hostStart, uint32_t *tokenStart, uint32_t *tokenEnd)
+{
+	const struct NativeGpuLinkRange *range = NativeGpuLinks_FindTokenRange(token & 0x00ffffffu);
+
+	if (range == NULL)
+	{
+		return 0;
+	}
+	*hostStart = range->hostStart;
+	*tokenStart = range->tokenStart;
+	*tokenEnd = range->tokenEnd;
+	return 1;
+}
+
 int NativeGpuLinks_IsRegisteredHostPointer(const void *hostPtr)
 {
 	return NativeGpuLinks_FindHostRange((uintptr_t)hostPtr) != NULL;

@@ -1502,7 +1502,7 @@ static void ui_blit_to_panel(void)
 			dst -= 3;
 		}
 	}
-	GSPGPU_FlushDataCache(fb, (u32)w * h * 3U);
+	N3DS_FlushDcache(fb, (u32)w * h * 3U);
 	gfxScreenSwapBuffers(GFX_BOTTOM, false);
 }
 

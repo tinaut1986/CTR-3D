@@ -5469,19 +5469,60 @@ void ParsePrimitivesLinkedList(u32 *p, int singlePrimitive)
 				 * unchanged. (Off in OTPROF builds, which record every node.)
 				 */
 				{
+					/* Links are followed through the registered range of the
+					 * first one (host = hostStart + token - tokenStart: what
+					 * nextPrim + NativeGpu_IsValidOTLink give, without their
+					 * two range lookups per slot); a token outside it looks
+					 * its range up once. GTECapture_MarkOTNode is applied per
+					 * contiguous stretch of slots (GTECapture_MarkOTRun: the
+					 * sticky band latch over the stretch, the per-node state of
+					 * its last slot), which is the state the per-slot calls
+					 * left: nothing reads it until a node with content. */
 					u32 emptyRun = 0;
+					uintptr_t rHost = 0;
+					u32 rTok0 = 1;
+					u32 rTok1 = 0;
+#if defined(CTR_NATIVE) && CTR_NATIVE_GTE_CAPTURE
+					u8 *segHi = NULL;
+					u8 *segLo = NULL;
+#endif
 
-					while (!isendprim(basePacket))
+					for (;;)
 					{
-						u8 *next = nextPrim(basePacket);
+						const u32 token = CTR_GPU_ReadTagWord(basePacket) & 0x00ffffffu;
+						u8 *next;
 
-						if (!NativeGpu_IsValidOTLink((uintptr_t)next) || (getlen(next) != 0) || (otWalkIterations >= 65536))
+						if (NativeGpuLinks_IsTerminator(token))
+						{
+							break;
+						}
+						if ((token < rTok0) || (token >= rTok1))
+						{
+							if (!NativeGpuLinks_TokenRange(token, &rHost, &rTok0, &rTok1))
+							{
+								break;
+							}
+						}
+						next = (u8 *)(rHost + (uintptr_t)(token - rTok0));
+						if ((((uintptr_t)next & 3u) != 0) || (getlen(next) != 0) || (otWalkIterations >= 65536))
 						{
 							break;
 						}
 						otWalkIterations++;
 #if defined(CTR_NATIVE) && CTR_NATIVE_GTE_CAPTURE
-						GTECapture_MarkOTNode(next);
+						if ((segLo != NULL) && (next + 4 == segLo))
+						{
+							segLo = next;
+						}
+						else
+						{
+							if (segLo != NULL)
+							{
+								GTECapture_MarkOTRun(segLo, segHi, segLo);
+							}
+							segLo = next;
+							segHi = next;
+						}
 #endif
 						basePacket = next;
 						NativeGpu_WalkCrossEmptyNode((uintptr_t)basePacket);
@@ -5490,6 +5531,7 @@ void ParsePrimitivesLinkedList(u32 *p, int singlePrimitive)
 					if (emptyRun > 0)
 					{
 #if defined(CTR_NATIVE) && CTR_NATIVE_GTE_CAPTURE
+						GTECapture_MarkOTRun(segLo, segHi, basePacket);
 						NativeGpu_TagWalkNode((uintptr_t)basePacket);
 #endif
 #if defined(CTR_INTERNAL) && defined(__3DS__)
