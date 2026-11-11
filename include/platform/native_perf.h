@@ -349,6 +349,7 @@ struct NativeInstProf
 };
 
 extern struct NativeInstProf g_instProf;
+extern int g_dbg_deepProf;
 extern int g_gteProfPhase;
 extern u32 g_gteProfOps[NATIVE_GTEPROF_PHASES][64];
 

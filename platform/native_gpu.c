@@ -5311,14 +5311,14 @@ void ParsePrimitivesLinkedList(u32 *p, int singlePrimitive)
 		}
 
 #if defined(CTR_INTERNAL) && defined(__3DS__)
-		const u64 profWalkStart = PARSEPROF_TICK();
+		const u64 profWalkStart = g_dbg_deepProf ? PARSEPROF_TICK() : 0;
 #endif
 
 		while (true)
 		{
 			otWalkIterations++;
 #if defined(CTR_INTERNAL) && defined(__3DS__)
-			const int profSample = ((otWalkIterations % PARSEPROF_SAMPLE_EVERY) == 0);
+			const int profSample = g_dbg_deepProf && ((otWalkIterations % PARSEPROF_SAMPLE_EVERY) == 0);
 			u64 profNodeStart = profSample ? PARSEPROF_TICK() : 0;
 			int profClass = PARSEPROF_EMPTY;
 
@@ -5394,11 +5394,11 @@ void ParsePrimitivesLinkedList(u32 *p, int singlePrimitive)
 					{
 						u32 runNodes;
 #if defined(CTR_INTERNAL)
-						const u64 runStart = PARSEPROF_TICK();
+						const u64 runStart = g_dbg_deepProf ? PARSEPROF_TICK() : 0;
 #endif
 						basePacket = NativeDirectEmit_G4Run(basePacket, (u32)tagLength, &otWalkIterations, &runNodes);
 #if defined(CTR_INTERNAL)
-						if (runNodes > 0)
+						if (g_dbg_deepProf && (runNodes > 0))
 						{
 							const u64 runTicks = PARSEPROF_TICK() - runStart;
 
@@ -5582,8 +5582,11 @@ void ParsePrimitivesLinkedList(u32 *p, int singlePrimitive)
 
 #if defined(CTR_INTERNAL) && defined(__3DS__)
 		s_parseProfSampleNode = 0;
-		s_parseProf.walkTicks += PARSEPROF_TICK() - profWalkStart;
-		ParseProf_FoldWalk();
+		if (g_dbg_deepProf)
+		{
+			s_parseProf.walkTicks += PARSEPROF_TICK() - profWalkStart;
+			ParseProf_FoldWalk();
+		}
 #endif
 	}
 

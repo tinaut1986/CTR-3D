@@ -568,6 +568,12 @@ internal void NativePerf_InsertWorstFrame(const struct NativePerfWorstFrame *fra
 #if defined(__3DS__)
 /* [INSTPROF] / [GTEPROF]: see the block comment in native_perf.h. */
 struct NativeInstProf g_instProf;
+/* dumpreq `deepprof` (default off): the per-op and per-node instruments --
+ * [INSTPROF] counts and sampled phase ticks, [GTEPROF] op counts, [PARSEPROF]
+ * samples. Their SVC tick reads cost an Old 3DS a frame-rate step in a race,
+ * and a beta (CTR_INTERNAL) build is what players run. [PERF], [PACE] and
+ * [ENDPROF] stay on. */
+int g_dbg_deepProf = 0;
 int g_gteProfPhase;
 u32 g_gteProfOps[NATIVE_GTEPROF_PHASES][64];
 

@@ -26,8 +26,8 @@
 #if defined(CTR_NATIVE) && defined(CTR_INTERNAL) && defined(__3DS__)
 #include <platform/native_perf.h>
 #define RB_INSTPROF                   1
-#define RB_INSTPROF_COUNT(field)      (g_instProf.field++)
-#define RB_INSTPROF_SAMPLE()          (((++g_instProf.clock) & (NATIVE_INSTPROF_SAMPLE_EVERY - 1)) == 0)
+#define RB_INSTPROF_COUNT(field)      (g_dbg_deepProf ? (void)(g_instProf.field++) : (void)0)
+#define RB_INSTPROF_SAMPLE()          (g_dbg_deepProf && ((((++g_instProf.clock) & (NATIVE_INSTPROF_SAMPLE_EVERY - 1)) == 0)))
 #define RB_INSTPROF_TICK()            NativeInstProf_Tick()
 #define RB_INSTPROF_PHASE(phase, t0)  (g_instProf.samples[(phase)]++, g_instProf.ticks[(phase)] += NativeInstProf_Tick() - (t0))
 #else

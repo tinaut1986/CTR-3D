@@ -5563,6 +5563,13 @@ unsigned int N3DS_ReadButtons(void)
 					N3DS_AudioThreadStopAndJoin();
 					N3DS_DebugLog("[CTR-3DS] audiothread: STOPPED (main-thread fallback)");
 				}
+				else if (strcmp(word, "deepprof") == 0)
+				{
+					extern int g_dbg_deepProf;
+
+					g_dbg_deepProf = !g_dbg_deepProf;
+					N3DS_DebugLog(g_dbg_deepProf ? "[CTR-3DS] deepprof: ON ([INSTPROF] [GTEPROF] [PARSEPROF] sampling)" : "[CTR-3DS] deepprof: OFF");
+				}
 				else if (strcmp(word, "xaprefetch") == 0)
 				{
 					extern int g_dbg_xaPrefetch;
