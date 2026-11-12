@@ -59,9 +59,9 @@ AccessControlInfo:
   MemoryType                    : Application # Application/System/Base
   SystemMode                    : $(APP_SYSTEM_MODE) # legacy mode (Old 3DS/2DS); package-cia.sh default 80MB (96MB crashed the 2DS HOME menu in the author's other ports); a New 3DS uses SystemModeExt below
   IdealProcessor                : 0
-  AffinityMask                  : 3 # cores 0 and 1 (as the author's other ports); no thread of this port runs on core 1 (Rosalina hang, n3ds_audio_thread.c)
+  AffinityMask                  : 3 # cores 0 and 1; nothing runs on core 1 by default (Rosalina hang, n3ds_audio_thread.c; the Old-3DS core-1 render worker is an off-by-default experiment)
   Priority                      : 16
-  MaxCpu                        : 0x9E # core 1 share ceiling = MaxCpu & 0x7F = 30 % (the audio thread's; more starves the system)
+  MaxCpu                        : 0x9E # core 1 share ceiling = MaxCpu & 0x7F = 30 % (more starves GSP, which runs there: measured with the Old-3DS core-1 render worker, n3ds_render_thread.c)
   HandleTableSize               : 0x200
   DisableDebug                  : false
   EnableForceDebug              : false
@@ -107,6 +107,7 @@ AccessControlInfo:
     DuplicateHandle: 39
     ExitProcess: 3
     ExitThread: 9
+    FlushProcessDataCache: 84
     GetCurrentProcessorNumber: 17
     GetHandleInfo: 41
     GetProcessId: 53
@@ -137,6 +138,7 @@ AccessControlInfo:
     SetTimer: 27
     SignalEvent: 24
     SleepThread: 10
+    StoreProcessDataCache: 83
     UnmapMemoryBlock: 32
     WaitSynchronization1: 36
     WaitSynchronizationN: 37

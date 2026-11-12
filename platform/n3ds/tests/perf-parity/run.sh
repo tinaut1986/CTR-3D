@@ -37,3 +37,7 @@ build_pair rb_tu.c rb "-m32 -DCTR_NATIVE_MODEL_RENDERER=1 -D__3DS__"
 gcc -m32 -O2 -fno-pie -no-pie -w -DCTR_NATIVE -DBUILD=926 -fno-short-enums -I"$root/include" -I"$root" "$here/rb_main.c" \
 	"$work/rb-base.o" "$work/rb-test.o" -o "$work/rb"
 "$work/rb" "$rb_scenes" t
+
+echo "== Sky RTPT: NativeModelGate_RtptFlags vs the software GTE (working tree)"
+gcc -O2 -w -DCTR_NATIVE -DBUILD=926 -DCTR_NATIVE_GTE_CAPTURE=1 -fno-short-enums -I"$root/include" -I"$root" "$here/sky_rtpt_test.c" -o "$work/sky"
+"$work/sky" 2000000

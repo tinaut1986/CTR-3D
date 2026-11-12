@@ -8,6 +8,7 @@
 #include <SDL3/SDL.h>
 #else
 #include "n3ds/n3ds_audio_thread.h"
+#include "n3ds/n3ds_iothread.h"
 #endif
 #include <limits.h>
 #include <stdarg.h> /* NativeAudio_XAVoiceCacheLog (3DS SD-log sink) */
@@ -3577,6 +3578,102 @@ internal int NativeAudio_XASourceReadSectors(struct NativeAudioXaSource *source,
 
 #if defined(__3DS__)
 /*
+ * Background read-ahead of the next span (n3ds_iothread.c). On an Old 3DS
+ * there is no audio worker: the stream is refilled on the game thread, and
+ * every span miss was a 64-sector SD read (~28 ms) inside a race frame. Now,
+ * once a span is filled, the I/O thread reads the following one into a spare
+ * buffer; the next miss swaps the buffers instead of reading. The job works on
+ * a copy of the file's location and its own buffer and fd (owner PREFETCH),
+ * so it shares nothing with the stream; a take checks the file and the first
+ * sector, so a stream that was closed, reopened or seeked meanwhile simply
+ * misses and reads as before. One request at a time; a busy thread = no
+ * request (the stream then reads synchronously, the old behaviour).
+ */
+/* dumpreq `xaprefetch` (default on); [XAPF] takes= counts the swapped spans. */
+int g_dbg_xaPrefetch = 1;
+global_variable u32 s_xaPrefetchTakes;
+global_variable u8 s_xaPrefetchBufA[NATIVE_AUDIO_XA_SPAN_SECTORS * XA_FULL_SECTOR_SIZE];
+global_variable struct NativeDiscImageScratch s_xaPrefetchScratch = {NATIVE_DISC_IMAGE_OWNER_PREFETCH, {0}};
+global_variable struct
+{
+	u8 *buf;                       /* owned by the job while busy, else by whoever swaps it */
+	struct NativeDiscImageFile file; /* copy: the job never reads the stream */
+	int start;
+	int count;
+	volatile int state; /* 0 empty, 1 reading, 2 ready, 3 failed */
+} s_xaPrefetch = {s_xaPrefetchBufA, {0, 0}, 0, 0, 0};
+
+internal void NativeAudio_XAPrefetchJob(void *arg)
+{
+	(void)arg;
+	s_xaPrefetch.state = NativeDiscImage_ReadRawSectorsScratch(&s_xaPrefetch.file, (u32)s_xaPrefetch.start, (u32)s_xaPrefetch.count, s_xaPrefetch.buf,
+	                                                           &s_xaPrefetchScratch)
+	                         ? 2
+	                         : 3;
+}
+
+internal void NativeAudio_XAPrefetchRequest(struct NativeAudioXaStream *stream, int start)
+{
+	const struct NativeAudioXaSource *source = &stream->source;
+	int count = NATIVE_AUDIO_XA_SPAN_SECTORS;
+
+	if (!g_dbg_xaPrefetch || !source->useDiscImage || (source->ramSectors != NULL) || (source->sectorSize != XA_FORM2_SECTOR_SIZE) ||
+	    (start >= source->totalSectors) || N3DS_IoJobBusy())
+	{
+		return;
+	}
+	if (count > source->totalSectors - start)
+	{
+		count = source->totalSectors - start;
+	}
+	s_xaPrefetch.file = source->discFile;
+	s_xaPrefetch.start = start;
+	s_xaPrefetch.count = count;
+	s_xaPrefetch.state = 1;
+	if (!N3DS_IoJobSubmit(NativeAudio_XAPrefetchJob, NULL))
+	{
+		s_xaPrefetch.state = 0;
+	}
+}
+
+/* 1 when the background span for [start, start + count) is in stream->spanBuf. */
+internal int NativeAudio_XAPrefetchTake(struct NativeAudioXaStream *stream, int start, int count)
+{
+	const struct NativeAudioXaSource *source = &stream->source;
+	u8 *swap;
+
+	if ((s_xaPrefetch.state == 0) || !source->useDiscImage || (source->ramSectors != NULL) || (s_xaPrefetch.start != start) ||
+	    (s_xaPrefetch.count != count) || (s_xaPrefetch.file.lba != source->discFile.lba) || (s_xaPrefetch.file.size != source->discFile.size))
+	{
+		return 0;
+	}
+	if (s_xaPrefetch.state == 1)
+	{
+		/* Still reading: the rest of that read is cheaper than a new one. */
+		N3DS_IoJobWait();
+	}
+	__sync_synchronize();
+	if (s_xaPrefetch.state != 2)
+	{
+		s_xaPrefetch.state = 0;
+		return 0;
+	}
+	swap = stream->spanBuf;
+	stream->spanBuf = s_xaPrefetch.buf;
+	s_xaPrefetch.buf = swap;
+	s_xaPrefetch.state = 0;
+	s_xaPrefetchTakes++;
+	if ((s_xaPrefetchTakes & 31u) == 1u)
+	{
+		char line[64];
+
+		snprintf(line, sizeof(line), "[XAPF] takes=%lu", (unsigned long)s_xaPrefetchTakes);
+		N3DS_DebugLog(line);
+	}
+	return 1;
+}
+
+/*
  * Read one physical sector through the stream's span cache: a miss fetches
  * NATIVE_AUDIO_XA_SPAN_SECTORS sectors ahead in one bulk call, then this and
  * the following ~31 requests are memcpys. "Bulk" is now literal -- the call
@@ -3620,13 +3717,19 @@ internal int NativeAudio_XAStreamReadSectorBuffered(struct NativeAudioXaStream *
 		{
 			fill = source->totalSectors - sectorIndex;
 		}
-		if ((fill <= 0) || !NativeAudio_XASourceReadSectors(source, sectorIndex, fill, stream->spanBuf, stream->discScratch))
+		if ((fill > 0) && NativeAudio_XAPrefetchTake(stream, sectorIndex, fill))
+		{
+			/* The background read already brought this span in. */
+		}
+		else if ((fill <= 0) || !NativeAudio_XASourceReadSectors(source, sectorIndex, fill, stream->spanBuf, stream->discScratch))
 		{
 			stream->spanSectorCount = 0;
 			return NativeAudio_XASourceReadSector(source, sectorIndex, dst, stream->discScratch);
 		}
 		stream->spanStartSector = sectorIndex;
 		stream->spanSectorCount = fill;
+		/* Ask for the span after this one while this one is consumed. */
+		NativeAudio_XAPrefetchRequest(stream, sectorIndex + fill);
 	}
 
 	memcpy(dst, stream->spanBuf + (size_t)(sectorIndex - stream->spanStartSector) * (size_t)source->sectorSize, (size_t)source->sectorSize);

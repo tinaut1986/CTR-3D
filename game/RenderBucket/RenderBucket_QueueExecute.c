@@ -26,16 +26,20 @@
 #if defined(CTR_NATIVE) && defined(CTR_INTERNAL) && defined(__3DS__)
 #include <platform/native_perf.h>
 #define RB_INSTPROF                   1
-#define RB_INSTPROF_COUNT(field)      (g_instProf.field++)
-#define RB_INSTPROF_SAMPLE()          (((++g_instProf.clock) & (NATIVE_INSTPROF_SAMPLE_EVERY - 1)) == 0)
+#define RB_INSTPROF_COUNT(field)      (g_dbg_deepProf ? (void)(g_instProf.field++) : (void)0)
+#define RB_INSTPROF_SAMPLE()          (g_dbg_deepProf && ((((++g_instProf.clock) & (NATIVE_INSTPROF_SAMPLE_EVERY - 1)) == 0)))
 #define RB_INSTPROF_TICK()            NativeInstProf_Tick()
 #define RB_INSTPROF_PHASE(phase, t0)  (g_instProf.samples[(phase)]++, g_instProf.ticks[(phase)] += NativeInstProf_Tick() - (t0))
+#define RB_PROFLOC(loc)               (g_profLoc = (u8)(loc))
+#define RB_PROFLOC_SAVE()             g_profLoc
 #else
 #define RB_INSTPROF                   0
 #define RB_INSTPROF_COUNT(field)      ((void)0)
 #define RB_INSTPROF_SAMPLE()          0
 #define RB_INSTPROF_TICK()            0u
 #define RB_INSTPROF_PHASE(phase, t0)  ((void)(t0))
+#define RB_PROFLOC(loc)               ((void)0)
+#define RB_PROFLOC_SAVE()             0
 #endif
 
 #if defined(CTR_NATIVE) && defined(CTR_NATIVE_MODEL_RENDERER) && CTR_NATIVE_MODEL_RENDERER
@@ -3017,6 +3021,42 @@ static int RenderBucket_ProjectGatedPrim(struct RenderBucketDrawContext *ctx, st
 
 	return RenderBucket_TriangleInScreenWindowXY(ctx, gate->fifo.sxy[0], gate->fifo.sxy[1], gate->fifo.sxy[2]);
 }
+
+/* The fast form of the test above (NativeModelGate_CameraTest): depth range and
+ * the NCLIP side test from camera space, no projection, no screen window. The
+ * gate's FIFO is not advanced; a declined triangle re-projects its three
+ * vertices with RTPT (see the packet write). */
+static int RenderBucket_FastGatedPrim(struct RenderBucketDrawContext *ctx, const struct NativeModelGate *gate, struct NativeModelGateCamFifo *cam, u32 command, int useRtps,
+                                      int reuseFirstVertex)
+{
+	const u32 xy3[3] = {ctx->tempPacked[1].xy, ctx->tempPacked[2].xy, ctx->tempPacked[3].xy};
+	const u32 z3[3] = {ctx->tempPacked[1].z, ctx->tempPacked[2].z, ctx->tempPacked[3].z};
+	s32 side;
+
+	if (!NativeModelGate_CameraTestFifo(gate, cam, useRtps, reuseFirstVertex, xy3, z3, &side))
+	{
+		return 0;
+	}
+
+	if ((s32)(command << 3) < 0)
+	{
+		int cullXor;
+		s16 cullFlags = (s16)(u16)ctx->idpp->instFlags;
+
+		if (side == 0)
+		{
+			return 0;
+		}
+
+		cullXor = (s32)cullFlags ^ (s32)(command << 2);
+		if ((s32)((u32)side ^ (u32)cullXor) <= 0)
+		{
+			return 0;
+		}
+	}
+
+	return 1;
+}
 #endif
 
 static void RenderBucket_InitSplitVertex(struct RenderBucketDrawContext *ctx, int slot, u32 packedXY, u32 packedZ, int color)
@@ -4646,6 +4686,9 @@ static int RenderBucket_DrawWaterSplitClipped(struct RenderBucketDrawContext *ct
 
 void RenderBucket_DrawFunc_Normal(struct RenderBucketDrawContext *ctx)
 {
+	const u8 profLocPrev = (u8)RB_PROFLOC_SAVE();
+	const int profLocSetup = (RB_PROFLOC(NATIVE_PROFLOC_MDL_SETUP), 0);
+
 	u32 *pCmd;
 
 #if defined(CTR_NATIVE) && defined(CTR_NATIVE_MODEL_RENDERER) && CTR_NATIVE_MODEL_RENDERER
@@ -4694,10 +4737,15 @@ void RenderBucket_DrawFunc_Normal(struct RenderBucketDrawContext *ctx)
 	 * CPU only has to decide which ones it hands over. Only in state 1 -- in
 	 * states 0 and 2 the packet path consumes the full projection anyway. */
 	struct NativeModelGate mdlGate;
+	struct NativeModelGateCamFifo mdlCam;
 	int mdlGated;
+	int mdlFast;
 
 	memset(&mdlGate, 0, sizeof(mdlGate));
 	mdlGated = mdlReplaces && NativeModelGate_Begin(&mdlGate);
+	/* Specular instances keep the projected gate: their writer's colour reads
+	 * NCLIP from the FIFO. */
+	mdlFast = mdlGated && g_dbg_modelFast && !mdlSpecular;
 #endif
 
 	// NOTE(aalhendi): ASM-verified NTSC-U 926 0x8006a52c-0x8006a8e0;
@@ -4728,7 +4776,9 @@ void RenderBucket_DrawFunc_Normal(struct RenderBucketDrawContext *ctx)
 
 		ipSample = RB_INSTPROF_SAMPLE();
 		ipT0 = ipSample ? RB_INSTPROF_TICK() : 0u;
+		RB_PROFLOC(NATIVE_PROFLOC_MDL_DECODE);
 		decoded = RenderBucket_DispatchUncompressAnimationFrame(ctx, command, stackIndex);
+		RB_PROFLOC(NATIVE_PROFLOC_MDL_LOOP);
 		if (ipSample)
 		{
 			RB_INSTPROF_PHASE(NATIVE_INSTPROF_DECODE, ipT0);
@@ -4804,7 +4854,14 @@ void RenderBucket_DrawFunc_Normal(struct RenderBucketDrawContext *ctx)
 
 			ipT0 = ipSample ? RB_INSTPROF_TICK() : 0u;
 #if defined(CTR_NATIVE) && defined(CTR_NATIVE_MODEL_RENDERER) && CTR_NATIVE_MODEL_RENDERER
-			if (mdlGated)
+			RB_PROFLOC(NATIVE_PROFLOC_MDL_ACCEPT);
+			if (mdlFast)
+			{
+				depthMac0 = 0;
+				shouldDraw = RenderBucket_FastGatedPrim(ctx, &mdlGate, &mdlCam, drawCommand, useRtps, reuseFirstVertex);
+				RB_INSTPROF_COUNT(gated);
+			}
+			else if (mdlGated)
 			{
 				depthMac0 = 0;
 				shouldDraw = RenderBucket_ProjectGatedPrim(ctx, &mdlGate, drawCommand, useRtps, reuseFirstVertex);
@@ -4834,6 +4891,7 @@ void RenderBucket_DrawFunc_Normal(struct RenderBucketDrawContext *ctx)
 			}
 			RB_INSTPROF_COUNT(accepted);
 
+			RB_PROFLOC(NATIVE_PROFLOC_MDL_TEX);
 			tex = RenderBucket_GetCommandTexture(ctx, drawCommand, &isValidTexture);
 			if (isValidTexture == 0)
 			{
@@ -4868,6 +4926,7 @@ void RenderBucket_DrawFunc_Normal(struct RenderBucketDrawContext *ctx)
 			 * must decline it too -- claiming it would draw geometry retail
 			 * never shows. Declined = mdlClaimed stays 0, and the writer's own
 			 * no-op handles the rest. */
+			RB_PROFLOC(NATIVE_PROFLOC_MDL_CAPTURE);
 			if (mdlCapture && !((mdlSpecular || mdlDepthFade) && tex == 0))
 			{
 				const u32 mdlXY[3] = {ctx->tempPacked[1].xy, ctx->tempPacked[2].xy, ctx->tempPacked[3].xy};
@@ -4934,6 +4993,7 @@ void RenderBucket_DrawFunc_Normal(struct RenderBucketDrawContext *ctx)
 				int drawResult;
 
 				RB_INSTPROF_COUNT(packets);
+				RB_PROFLOC(NATIVE_PROFLOC_MDL_PACKET);
 				ipT0 = ipSample ? RB_INSTPROF_TICK() : 0u;
 #if defined(CTR_NATIVE) && defined(CTR_NATIVE_MODEL_RENDERER) && CTR_NATIVE_MODEL_RENDERER
 				if (mdlGated)
@@ -4943,8 +5003,17 @@ void RenderBucket_DrawFunc_Normal(struct RenderBucketDrawContext *ctx)
 					 * registers and AVSZ3's MAC0. Re-run the retail projection
 					 * from the FIFO this triangle started with; it accepts
 					 * (same arithmetic), and the writer runs as in state 0. */
-					NativeModelGate_ToGte(&mdlFifoBefore);
-					drawResult = RenderBucket_ProjectPrim_Normal(ctx, drawCommand, useRtps, reuseFirstVertex, &depthMac0) ? RenderBucket_DispatchDrawInstPrim(ctx, drawCommand, tex, depthMac0) : 0;
+					if (mdlFast)
+					{
+						/* The FIFO was not kept: RTPT of the triangle's own three
+						 * vertices leaves SXY0-2 / SZ1-3 as the strip would have. */
+						drawResult = RenderBucket_ProjectPrim_Normal(ctx, drawCommand, 0, 0, &depthMac0) ? RenderBucket_DispatchDrawInstPrim(ctx, drawCommand, tex, depthMac0) : 0;
+					}
+					else
+					{
+						NativeModelGate_ToGte(&mdlFifoBefore);
+						drawResult = RenderBucket_ProjectPrim_Normal(ctx, drawCommand, useRtps, reuseFirstVertex, &depthMac0) ? RenderBucket_DispatchDrawInstPrim(ctx, drawCommand, tex, depthMac0) : 0;
+					}
 					/* A writer may move the FIFO (the GTE state is the truth now). */
 					NativeModelGate_FromGte(&mdlGate.fifo);
 				}
@@ -4969,6 +5038,7 @@ void RenderBucket_DrawFunc_Normal(struct RenderBucketDrawContext *ctx)
 						NativeModelEmit_EndInstance();
 					}
 #endif
+					RB_PROFLOC(profLocPrev);
 					return;
 				}
 			}
@@ -4978,6 +5048,7 @@ void RenderBucket_DrawFunc_Normal(struct RenderBucketDrawContext *ctx)
 	}
 
 #if defined(CTR_NATIVE) && defined(CTR_NATIVE_MODEL_RENDERER) && CTR_NATIVE_MODEL_RENDERER
+	RB_PROFLOC(NATIVE_PROFLOC_MDL_END);
 	if (mdlGated)
 	{
 		/* Leave the SXY/SZ FIFO where the retail walk would have; the gate
@@ -4989,6 +5060,9 @@ void RenderBucket_DrawFunc_Normal(struct RenderBucketDrawContext *ctx)
 		NativeModelEmit_EndInstance();
 	}
 #endif
+	RB_PROFLOC(profLocPrev);
+	(void)profLocPrev;
+	(void)profLocSetup;
 }
 
 static u32 RenderBucket_MirrorSpecialPackedXY(struct RenderBucketDrawContext *ctx, u32 packedXY)

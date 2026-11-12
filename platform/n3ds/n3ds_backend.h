@@ -776,6 +776,8 @@ int N3DS_O3dsSimActive(void);       /* 0 off, 1 o3ds-sim.txt, 2 legacy-mode CIA 
 int N3DS_O3dsSimFtpAllowed(void);
 int N3DS_O3dsSimToggleFile(void);   /* DEBUG > ACTIONS; returns the new state */
 int N3DS_ExtraCoresUsable(void);    /* New 3DS and not simulating an Old one */
+void N3DS_FlushDcache(const void *addr, unsigned size); /* CPU writes -> GPU, on the calling core */
+int N3DS_Core1Percent(void);        /* Old 3DS: core-1 share for the render worker (cfg `core1`), 0 = off */
 
 /*
  * Frame pacing and the Old-3DS stereo policy (n3ds_backend.c, "frame pace").

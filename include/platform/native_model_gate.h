@@ -51,6 +51,7 @@ struct NativeModelGate
 	s32 trx, try_, trz;
 	s32 ofx, ofy;
 	u16 h;
+	s32 dqa, dqb; // depth-cue coefficients: RTPT's final MAC0 (FLAG bit 16)
 };
 
 extern int g_dbg_modelGate;
@@ -67,6 +68,12 @@ void NativeModelGate_Load(struct NativeModelGate *g);
 // op's FLAG, of which only bit 18 is computed -- the only bit the gate tests.
 u32 NativeModelGate_Rtpt(struct NativeModelGate *g, u32 xy0, u32 z0, u32 xy1, u32 z1, u32 xy2, u32 z2);
 u32 NativeModelGate_Rtps(struct NativeModelGate *g, int reuseFirstVertex, u32 xy, u32 z);
+// RTPT whose FLAG carries every bit a sky face test reads (DrawSky_IsVisible:
+// bits 16-18): 18 SZ3 saturation, 17 divide overflow, 16 MAC0 positive overflow
+// (the screen sums and the DQA/DQB depth cue of the last vertex). Same SXY/SZ
+// FIFO as NativeModelGate_Rtpt. dumpreq `skyfast` (game/DrawSky.c).
+u32 NativeModelGate_RtptFlags(struct NativeModelGate *g, u32 xy0, u32 z0, u32 xy1, u32 z1, u32 xy2, u32 z2);
+extern int g_dbg_skyFast;
 // RTPT with the GTE's capture side effects as well (the matrix note and one
 // GTECapture_Store per on-screen vertex, same condition and arguments as
 // GTE_RotTransPers): for a producer whose packets still resolve their depth
@@ -83,6 +90,31 @@ static inline s32 NativeModelGate_Nclip(const struct NativeModelGateFifo *f)
 
 	return (sx0 * sy1) + (sx1 * sy2) + (sx2 * sy0) - (sx0 * sy2) - (sx1 * sy0) - (sx2 * sy1);
 }
+
+// The fast accept test (g_dbg_modelFast, dumpreq `mdlfast`, default on) for a
+// gated instance: the triangle's three vertices in camera space (the gate's
+// MAC sums, no divide, no screen coordinates), rejected when a depth leaves
+// (0, 0xffff] (RTPS/RTPT's FLAG bit 18 range), and its facing as the sign of
+// det[c0; c1; c2]. With every z > 0 that sign IS the sign of NCLIP: screen
+// x/y are the camera x/y over z times one positive scale, and the 2D cross
+// product of the projected points is det / (z0 z1 z2). Not done: the screen
+// window test (the GPU clips what lies outside) and the GTE's screen rounding
+// (a sliver within a pixel of edge-on may flip). Returns 0 = reject; else
+// *sideOut = +/-0x10000 (0 for a degenerate triangle) for the NCLIP-signed tests.
+extern int g_dbg_modelFast;
+int NativeModelGate_CameraTest(const struct NativeModelGate *g, u32 xy0, u32 z0, u32 xy1, u32 z1, u32 xy2, u32 z2, s32 *sideOut);
+
+// The same test on a strip: a FIFO of camera-space vertices mirroring the walk's
+// tempPacked[0..3], so an RTPS-shaped command transforms only its new vertex.
+struct NativeModelGateCamFifo
+{
+	s64 c[4][3];
+	u8 ok[4];
+};
+// useRtps / reuseFirstVertex as for NativeModelGate_Rtps; xy/z = the walk's
+// tempPacked[1..3] (all three for RTPT, only [2] i.e. the new one for RTPS).
+int NativeModelGate_CameraTestFifo(const struct NativeModelGate *g, struct NativeModelGateCamFifo *f, int useRtps, int reuseFirstVertex, const u32 *xy3, const u32 *z3,
+                                   s32 *sideOut);
 
 // FIFO <-> GTE data registers 12-14 and 16-19.
 void NativeModelGate_ToGte(const struct NativeModelGateFifo *f);

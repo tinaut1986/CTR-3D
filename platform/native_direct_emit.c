@@ -950,7 +950,7 @@ internal u8 *NativeDirectEmit_G4Run(u8 *packet, u32 tagLength, u32 *walkIteratio
 		s_demit.frameNodes++;
 		{
 #if defined(CTR_INTERNAL)
-			const int g4Sampled = ((((*runNodes) % PARSEPROF_G4_SAMPLE_EVERY) == 0u));
+			const int g4Sampled = g_dbg_deepProf && ((((*runNodes) % PARSEPROF_G4_SAMPLE_EVERY) == 0u));
 			const u64 g4Start = g4Sampled ? PARSEPROF_TICK() : 0;
 #endif
 			if (DirectEmit_G4FastOk(&fctx))

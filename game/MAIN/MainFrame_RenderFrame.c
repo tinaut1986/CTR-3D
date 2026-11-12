@@ -190,9 +190,11 @@ void MainFrame_RenderFrame(struct GameTracker *gGT, struct GamepadSystem *gGamep
 	MAINFRAME_LOG_CHECKPOINT("EFFECTS_3_particles");
 	CTR_DEBUG_ABLATE(gCtrDebugSkipEffects)
 	{
+		NATIVE_PROFLOC_SET(NATIVE_PROFLOC_FX_PARTICLES);
 		RenderAllNormalParticles(gGT);
 	}
 
+	NATIVE_PROFLOC_SET(NATIVE_PROFLOC_FX_DISPENV);
 	RenderDispEnv_World(gGT); // == RenderDispEnv_World ==
 
 	CTR_DEBUG_ABLATE(gCtrDebugSkipEffects)
@@ -202,6 +204,7 @@ void MainFrame_RenderFrame(struct GameTracker *gGT, struct GamepadSystem *gGamep
 			DecalMP_02(gGT);
 		}
 
+		NATIVE_PROFLOC_SET(NATIVE_PROFLOC_FX_FLAGS);
 		RenderAllFlag0x40(gGT); // I need a better name
 		RenderAllTitleDPP(gGT);
 	}
@@ -219,13 +222,17 @@ void MainFrame_RenderFrame(struct GameTracker *gGT, struct GamepadSystem *gGamep
 	MAINFRAME_LOG_CHECKPOINT("EFFECTS_4_tires");
 	CTR_DEBUG_ABLATE(gCtrDebugSkipEffects)
 	{
+		NATIVE_PROFLOC_SET(NATIVE_PROFLOC_FX_TIRES);
 		RenderAllTires(gGT);
 
+		NATIVE_PROFLOC_SET(NATIVE_PROFLOC_FX_SHADOWS);
 		RenderAllShadows(gGT);
 
+		NATIVE_PROFLOC_SET(NATIVE_PROFLOC_FX_HEAT);
 		RenderAllHeatParticles(gGT);
 	}
 
+	NATIVE_PROFLOC_SET(NATIVE_PROFLOC_FX_FADE);
 	PushBuffer_FadeAllWindows();
 	MAINFRAME_PERF_END(NATIVE_PERF_BUCKET_MAINFRAME_EFFECTS);
 

@@ -349,6 +349,37 @@ struct NativeInstProf
 };
 
 extern struct NativeInstProf g_instProf;
+extern int g_dbg_deepProf;
+
+/* [SAMPLE] locations (native_perf.c): a [PERF] bucket id, or a finer marker. */
+#define NATIVE_PROFLOC_FIRST       200
+#define NATIVE_PROFLOC_MDL_SETUP   200
+#define NATIVE_PROFLOC_MDL_DECODE  201
+#define NATIVE_PROFLOC_MDL_ACCEPT  202
+#define NATIVE_PROFLOC_MDL_TEX     203
+#define NATIVE_PROFLOC_MDL_CAPTURE 204
+#define NATIVE_PROFLOC_MDL_PACKET  205
+#define NATIVE_PROFLOC_MDL_LOOP    206
+#define NATIVE_PROFLOC_MDL_END     207
+#define NATIVE_PROFLOC_FX_PARTICLES 210
+#define NATIVE_PROFLOC_FX_DISPENV   211
+#define NATIVE_PROFLOC_FX_FLAGS     212
+#define NATIVE_PROFLOC_FX_TIRES     213
+#define NATIVE_PROFLOC_FX_SHADOWS   214
+#define NATIVE_PROFLOC_FX_HEAT      215
+#define NATIVE_PROFLOC_FX_FADE      216
+#define NATIVE_PROFLOC_WALK_EMPTY   220
+#define NATIVE_PROFLOC_WALK_DEMIT   221
+#define NATIVE_PROFLOC_WALK_PARSE   222
+#define NATIVE_PROFLOC_DEPTH        223
+#define NATIVE_PROFLOC_TEXRESOLVE   224
+#define NATIVE_PROFLOC_WALK_LINK    225
+#define NATIVE_PROFLOC_TRK_LEAFCPU  226 /* NativeTrackDraw_IssueForWalk's per-leaf math */
+#define NATIVE_PROFLOC_TRK_LEAFGPU  227 /* N3DS_TrackDraw_Leaf: uniforms + C3D_DrawElements */
+#define NATIVE_PROFLOC_NONE        255
+extern volatile u8 g_profLoc;
+extern u32 g_profLocHist[256];
+int N3DS_SamplerActive(void);
 extern int g_gteProfPhase;
 extern u32 g_gteProfOps[NATIVE_GTEPROF_PHASES][64];
 
@@ -412,6 +443,13 @@ static inline void NativePerf_CountTorch(int listed, int emitted)
 	(void)listed;
 	(void)emitted;
 }
+#endif
+
+/* A [SAMPLE] location marker for code outside a [PERF] scope's own label. */
+#if defined(__3DS__) && defined(CTR_INTERNAL)
+#define NATIVE_PROFLOC_SET(loc) (g_profLoc = (u8)(loc))
+#else
+#define NATIVE_PROFLOC_SET(loc) ((void)0)
 #endif
 
 #endif

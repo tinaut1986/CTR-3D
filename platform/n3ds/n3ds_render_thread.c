@@ -6,6 +6,7 @@
  */
 
 #include <3ds.h>
+#include <stdio.h>
 
 #include "n3ds_render_thread.h"
 #include "n3ds_backend.h"
@@ -16,6 +17,7 @@ static LightEvent s_workEvent;
 static LightEvent s_doneEvent;
 static int s_workerUp;
 static int s_workerStuck;
+static int s_workerCore = 2;
 
 static void (*s_workerMainFn)(void);
 
@@ -51,12 +53,60 @@ int N3DS_RenderWorkerStart(void (*workerMain)(void))
 	isNew3DS = N3DS_ExtraCoresUsable(); /* false on an Old 3DS and in the Old-3DS simulation */
 	if (!isNew3DS)
 	{
-		/* Target is New3DS-XL only, but fail safe rather than assume. Core 2
-		 * does not exist on old hardware, and core_id=-1 means "all CPUs"
-		 * (which resolves to core 0), never "any free core" -- same trap the
-		 * audio design doc documents for core 1. */
-		N3DS_DebugLog("[CTR-3DS] render worker: NO (not a New3DS, or Old-3DS simulation) -- sync fallback");
-		return 0;
+		/* Old 3DS / 2DS (and the simulation): core 2 does not exist, so the
+		 * worker goes to the system core, core 1, with a share of its time
+		 * reserved for the application (APT_SetAppCpuTimeLimit; the exheader's
+		 * MaxCpu is the ceiling). Without it the whole frame (game logic, OT
+		 * walk, GPU submission) runs on core 0 and a race frame is ~35 ms
+		 * against the 33.3 ms of 30 fps. The worker runs BELOW the main
+		 * thread's priority: the Rosalina hard-lock bisected on the New 3DS
+		 * was a higher-than-main thread on core 1 (n3ds_audio_thread.c).
+		 * cfg `core1` / core1.txt = the percentage, 0 = off (the default).
+		 * Measured on a 2DS at 80 %: the worker itself keeps up, but GSP and
+		 * the other system services on core 1 starve (C3D_FrameEnd 0.2 ->
+		 * 5-7 ms, GPU 7 -> 15 ms per frame) and core 0 slows on the shared
+		 * memory, so a race ran no faster. Kept as an experiment. */
+		static const int steps[] = {80, 70, 60, 50, 40, 30};
+		int pct = N3DS_Core1Percent();
+		Result rc;
+		char msg[112];
+		unsigned i;
+
+		if (pct <= 0)
+		{
+			N3DS_DebugLog("[CTR-3DS] render worker: NO (Old 3DS, core 1 off) -- sync fallback");
+			return 0;
+		}
+		rc = APT_SetAppCpuTimeLimit((u32)pct);
+		for (i = 0; R_FAILED(rc) && (i < sizeof(steps) / sizeof(steps[0])); i++)
+		{
+			if (steps[i] < pct)
+			{
+				snprintf(msg, sizeof(msg), "[CTR-3DS] core 1 time limit %d%% refused (rc=0x%08lx), trying %d%%", pct, (unsigned long)rc, steps[i]);
+				N3DS_DebugLog(msg);
+				pct = steps[i];
+				rc = APT_SetAppCpuTimeLimit((u32)pct);
+			}
+		}
+		if (R_FAILED(rc))
+		{
+			snprintf(msg, sizeof(msg), "[CTR-3DS] render worker: NO (core 1 time limit %d%% refused, rc=0x%08lx) -- sync fallback", pct, (unsigned long)rc);
+			N3DS_DebugLog(msg);
+			return 0;
+		}
+		mainPriority = 0x30;
+		svcGetThreadPriority(&mainPriority, CUR_THREAD_HANDLE);
+		s_workerMainFn = workerMain;
+		s_renderThread = threadCreate(N3DS_RenderThreadEntry, NULL, 128 * 1024, (mainPriority < 0x3E) ? (mainPriority + 1) : mainPriority, 1, false);
+		s_workerUp = (s_renderThread != NULL);
+		if (!s_workerUp)
+		{
+			APT_SetAppCpuTimeLimit(0);
+		}
+		s_workerCore = 1;
+		snprintf(msg, sizeof(msg), s_workerUp ? "[CTR-3DS] render worker: UP (core 1, %d%% of it)" : "[CTR-3DS] render worker: NO (threadCreate refused core 1 at %d%%) -- sync fallback", pct);
+		N3DS_DebugLog(msg);
+		return s_workerUp;
 	}
 
 	/* Same priority as the main thread: the worker has core 2 to itself, so
@@ -99,6 +149,16 @@ void N3DS_RenderWorkerStopAndJoin(void)
 	}
 	s_renderThread = NULL;
 	s_workerUp = 0;
+	if (s_workerCore == 1)
+	{
+		/* Give the system its core back (HOME menu, the next title). */
+		APT_SetAppCpuTimeLimit(0);
+	}
+}
+
+int N3DS_RenderWorkerCore(void)
+{
+	return s_workerUp ? s_workerCore : -1;
 }
 
 int N3DS_RenderWorkerStuck(void)
