@@ -51,6 +51,7 @@ struct NativeModelGate
 	s32 trx, try_, trz;
 	s32 ofx, ofy;
 	u16 h;
+	s32 dqa, dqb; // depth-cue coefficients: RTPT's final MAC0 (FLAG bit 16)
 };
 
 extern int g_dbg_modelGate;
@@ -67,6 +68,12 @@ void NativeModelGate_Load(struct NativeModelGate *g);
 // op's FLAG, of which only bit 18 is computed -- the only bit the gate tests.
 u32 NativeModelGate_Rtpt(struct NativeModelGate *g, u32 xy0, u32 z0, u32 xy1, u32 z1, u32 xy2, u32 z2);
 u32 NativeModelGate_Rtps(struct NativeModelGate *g, int reuseFirstVertex, u32 xy, u32 z);
+// RTPT whose FLAG carries every bit a sky face test reads (DrawSky_IsVisible:
+// bits 16-18): 18 SZ3 saturation, 17 divide overflow, 16 MAC0 positive overflow
+// (the screen sums and the DQA/DQB depth cue of the last vertex). Same SXY/SZ
+// FIFO as NativeModelGate_Rtpt. dumpreq `skyfast` (game/DrawSky.c).
+u32 NativeModelGate_RtptFlags(struct NativeModelGate *g, u32 xy0, u32 z0, u32 xy1, u32 z1, u32 xy2, u32 z2);
+extern int g_dbg_skyFast;
 // RTPT with the GTE's capture side effects as well (the matrix note and one
 // GTECapture_Store per on-screen vertex, same condition and arguments as
 // GTE_RotTransPers): for a producer whose packets still resolve their depth

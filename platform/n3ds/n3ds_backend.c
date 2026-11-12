@@ -5563,6 +5563,13 @@ unsigned int N3DS_ReadButtons(void)
 					N3DS_AudioThreadStopAndJoin();
 					N3DS_DebugLog("[CTR-3DS] audiothread: STOPPED (main-thread fallback)");
 				}
+				else if (strcmp(word, "skyfast") == 0)
+				{
+					extern int g_dbg_skyFast;
+
+					g_dbg_skyFast = !g_dbg_skyFast;
+					N3DS_DebugLog(g_dbg_skyFast ? "[CTR-3DS] skyfast: ON (sky faces through the gate RTPT)" : "[CTR-3DS] skyfast: OFF (software GTE RTPT)");
+				}
 				else if (strcmp(word, "sampler") == 0)
 				{
 					extern int N3DS_SamplerToggle(void);

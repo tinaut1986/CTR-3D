@@ -17,11 +17,24 @@ extern void GTECapture_SetStoreSuppressed(int suppressed);
 extern void NativeGpu_MarkSkyRange(uintptr_t start, uintptr_t end);
 #endif
 
+#ifdef CTR_NATIVE
+#include <platform/native_model_gate.h>
+#endif
+
 struct DrawSkyContext
 {
 	const struct ShortVertex *verts;
 	uint32_t *ot;
 	u32 screenBounds;
+#ifdef CTR_NATIVE
+	/* g_dbg_skyFast: the faces project through the gate's copy of RTPT
+	 * (platform/native_model_gate.c, the same integer arithmetic and the FLAG
+	 * bits 16-18 the visibility test reads) instead of the software GTE's
+	 * full op. The sky's capture Stores are suppressed anyway, so nothing
+	 * else of the op is consumed. */
+	int fast;
+	struct NativeModelGate gate;
+#endif
 };
 
 struct DrawSkyScratch
@@ -192,6 +205,37 @@ static u32 *DrawSky_Piece(struct Skybox *skybox, struct DrawSkyContext *ctx, int
 		u32 sxy2;
 		u32 gteFlag;
 
+#ifdef CTR_NATIVE
+		if (ctx->fast)
+		{
+			const char *verts = (const char *)ctx->verts;
+			const struct ShortVertex *a = (const struct ShortVertex *)(const void *)(verts + face->A);
+			const struct ShortVertex *b = (const struct ShortVertex *)(const void *)(verts + face->B);
+			const struct ShortVertex *c = (const struct ShortVertex *)(const void *)(verts + face->C);
+
+			gteFlag = NativeModelGate_RtptFlags(&ctx->gate, DrawSky_ReadWord(&a->Position, 0x0), DrawSky_ReadWord(&a->Position, 0x4),
+			                                    DrawSky_ReadWord(&b->Position, 0x0), DrawSky_ReadWord(&b->Position, 0x4), DrawSky_ReadWord(&c->Position, 0x0),
+			                                    DrawSky_ReadWord(&c->Position, 0x4));
+			sxy0 = ctx->gate.fifo.sxy[0];
+			sxy1 = ctx->gate.fifo.sxy[1];
+			sxy2 = ctx->gate.fifo.sxy[2];
+			if (DrawSky_IsVisible(gteFlag, sxy0, sxy1, sxy2, ctx->screenBounds) ||
+			    DrawSky_IsVisibleWideMargin(gteFlag, sxy0, sxy1, sxy2, ctx->screenBounds))
+			{
+				POLY_G3 *poly = (POLY_G3 *)prim;
+
+				CtrGpu_WriteColorCode(&poly->r0, DrawSky_ReadWord(&a->Color, 0x0));
+				CtrGpu_WritePackedXY(&poly->x0, sxy0);
+				CtrGpu_WriteColorCode(&poly->r1, DrawSky_ReadWord(&b->Color, 0x0));
+				CtrGpu_WritePackedXY(&poly->x1, sxy1);
+				CtrGpu_WriteColorCode(&poly->r2, DrawSky_ReadWord(&c->Color, 0x0));
+				CtrGpu_WritePackedXY(&poly->x2, sxy2);
+				CtrGpu_LinkPacket24(ot, &poly->tag, poly, 0x06000000);
+				prim = (u32 *)(poly + 1);
+			}
+			continue;
+		}
+#endif
 		DrawSky_LoadFaceVertices(ctx, face);
 		gte_rtpt_b();
 
@@ -273,6 +317,15 @@ void DrawSky_Full(void *skybox, struct PushBuffer *pb, struct PrimMem *primMem)
 		ctx.verts = sky->ptrVertex;
 		ctx.ot = &pb->ptrOT[0x3ff];
 		ctx.screenBounds = DrawSky_ReadWord(pb, 0x20);
+#ifdef CTR_NATIVE
+		/* After the CTC2s above: the gate reads the matrix, the zero
+		 * translation, OFX/OFY, H and DQA/DQB from the GTE once. */
+		ctx.fast = g_dbg_skyFast;
+		if (ctx.fast)
+		{
+			NativeModelGate_Load(&ctx.gate);
+		}
+#endif
 
 		faceIndex = (int)(baseFaceOffset >> 2);
 		countIndex = (int)(baseCountOffset >> 1);
@@ -320,6 +373,14 @@ void DrawSky_Full(void *skybox, struct PushBuffer *pb, struct PrimMem *primMem)
 			faceIndex = (int)(baseFaceOffset >> 2);
 			countIndex = (int)(baseCountOffset >> 1);
 			prim = DrawSky_Piece(sky, &ctx, faceIndex, countIndex, prim);
+		}
+#endif
+
+#ifdef CTR_NATIVE
+		if (ctx.fast)
+		{
+			/* Leave the SXY/SZ FIFO where the last RTPT would have. */
+			NativeModelGate_ToGte(&ctx.gate.fifo);
 		}
 #endif
 

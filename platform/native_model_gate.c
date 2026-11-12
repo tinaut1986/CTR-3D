@@ -57,6 +57,8 @@ void NativeModelGate_Load(struct NativeModelGate *g)
 	/* C2_H is the s16 view of the register; gte_divide takes it as u16, the
 	 * same conversion the RTPS call site makes. */
 	g->h = (u16)C2_H;
+	g->dqa = C2_DQA;
+	g->dqb = C2_DQB;
 	NativeModelGate_FromGte(&g->fifo);
 }
 
@@ -68,7 +70,7 @@ void NativeModelGate_Load(struct NativeModelGate *g)
  * bit the gate reads, bit 18), h/SZ3 through the UNR divide and Lm_E's 0x1ffff
  * ceiling, then OFX/OFY + IR*q >> 16 clamped to [-0x400, 0x3ff].
  */
-static inline __attribute__((always_inline)) u32 NativeModelGate_Vertex(struct NativeModelGate *g, u32 xy, u32 z, u32 *outSxy, int store)
+static inline __attribute__((always_inline)) u32 NativeModelGate_VertexQ(struct NativeModelGate *g, u32 xy, u32 z, u32 *outSxy, int store, u32 *outQ)
 {
 	const s32 vx = (s16)(xy & 0xffffu);
 	const s32 vy = (s16)(xy >> 16);
@@ -98,6 +100,10 @@ static inline __attribute__((always_inline)) u32 NativeModelGate_Vertex(struct N
 	}
 
 	q = gte_divide(g->h, (u16)sz);
+	if (q == 0xffffffffu)
+	{
+		flag |= 1u << 17; /* Lm_E: divide overflow */
+	}
 	q = (q > 0x1ffffu) ? 0x1ffffu : q; /* Lm_E: the overflow value 0xffffffff lands on the same ceiling */
 
 	{
@@ -106,6 +112,10 @@ static inline __attribute__((always_inline)) u32 NativeModelGate_Vertex(struct N
 
 		sx = (s32)(sxFull >> 16);
 		sy = (s32)(syFull >> 16);
+		if ((sxFull > 0x7fffffffLL) || (syFull > 0x7fffffffLL))
+		{
+			flag |= 1u << 16; /* F() on the screen sums */
+		}
 #if CTR_NATIVE_GTE_CAPTURE
 		/* The capture side effect of GTE_RotTransPers, same condition, same
 		 * arguments: only for a producer whose packets still resolve depth
@@ -126,6 +136,32 @@ static inline __attribute__((always_inline)) u32 NativeModelGate_Vertex(struct N
 	g->fifo.sz[2] = g->fifo.sz[3];
 	g->fifo.sz[3] = (u16)sz;
 	*outSxy = ((u32)(u16)sy << 16) | (u32)(u16)sx;
+	*outQ = q;
+	return flag;
+}
+
+static inline __attribute__((always_inline)) u32 NativeModelGate_Vertex(struct NativeModelGate *g, u32 xy, u32 z, u32 *outSxy, int store)
+{
+	u32 q;
+
+	return NativeModelGate_VertexQ(g, xy, z, outSxy, store, &q);
+}
+
+int g_dbg_skyFast = 1;
+
+u32 NativeModelGate_RtptFlags(struct NativeModelGate *g, u32 xy0, u32 z0, u32 xy1, u32 z1, u32 xy2, u32 z2)
+{
+	u32 flag;
+	u32 q;
+
+	flag = NativeModelGate_VertexQ(g, xy0, z0, &g->fifo.sxy[0], 0, &q);
+	flag |= NativeModelGate_VertexQ(g, xy1, z1, &g->fifo.sxy[1], 0, &q);
+	flag |= NativeModelGate_VertexQ(g, xy2, z2, &g->fifo.sxy[2], 0, &q);
+	/* RTPT's MAC0 = DQB + DQA * (h / SZ3) of the last vertex, through F(). */
+	if (((s64)g->dqb + ((s64)g->dqa * (s64)q)) > 0x7fffffffLL)
+	{
+		flag |= 1u << 16;
+	}
 	return flag;
 }
 
