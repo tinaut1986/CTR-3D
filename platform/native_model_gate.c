@@ -217,7 +217,28 @@ u32 NativeModelGate_Rtps(struct NativeModelGate *g, int reuseFirstVertex, u32 xy
 
 int g_dbg_modelFast = 1;
 
-static inline __attribute__((always_inline)) int NativeModelGate_Camera(const struct NativeModelGate *g, u32 xy, u32 z, s64 *c)
+/* Camera-space x/y clamped to +/-2^30 so they stay s32 (only a vertex absurdly
+ * far off to the side reaches it, where the facing of its triangle is moot). */
+static inline __attribute__((always_inline)) s32 NativeModelGate_Clamp30(s64 v)
+{
+	return (v > 0x3fffffffLL) ? 0x3fffffff : (v < -0x3fffffffLL) ? -0x3fffffff : (s32)v;
+}
+
+/* det[a; b; c]'s sign. The 2x2 minors are exact s64 (one smull each); only the
+ * outer three products go through double (VFP), because an s64 x s64 multiply
+ * is a library call on the ARM11. |det| < 2^58 and the double keeps 53 bits, so
+ * the sign can only differ for a triangle within rounding of edge-on. */
+static inline __attribute__((always_inline)) s32 NativeModelGate_DetSide(const s32 *a, const s32 *b, const s32 *c)
+{
+	const s64 m0 = ((s64)b[1] * c[2]) - ((s64)b[2] * c[1]);
+	const s64 m1 = ((s64)b[0] * c[2]) - ((s64)b[2] * c[0]);
+	const s64 m2 = ((s64)b[0] * c[1]) - ((s64)b[1] * c[0]);
+	const double det = ((double)a[0] * (double)m0) - ((double)a[1] * (double)m1) + ((double)a[2] * (double)m2);
+
+	return (det > 0.0) ? 0x10000 : (det < 0.0) ? -0x10000 : 0;
+}
+
+static inline __attribute__((always_inline)) int NativeModelGate_Camera(const struct NativeModelGate *g, u32 xy, u32 z, s32 *c)
 {
 	const s32 vx = (s16)(xy & 0xffffu);
 	const s32 vy = (s16)(xy >> 16);
@@ -229,38 +250,29 @@ static inline __attribute__((always_inline)) int NativeModelGate_Camera(const st
 	{
 		return 0;
 	}
-	c[0] = ((s64)((s64)g->trx << 12) + (g->r11 * vx) + (g->r12 * vy) + (g->r13 * vz)) >> 12;
-	c[1] = ((s64)((s64)g->try_ << 12) + (g->r21 * vx) + (g->r22 * vy) + (g->r23 * vz)) >> 12;
+	c[0] = NativeModelGate_Clamp30(((s64)((s64)g->trx << 12) + (g->r11 * vx) + (g->r12 * vy) + (g->r13 * vz)) >> 12);
+	c[1] = NativeModelGate_Clamp30(((s64)((s64)g->try_ << 12) + (g->r21 * vx) + (g->r22 * vy) + (g->r23 * vz)) >> 12);
 	c[2] = cz;
 	return 1;
 }
 
 int NativeModelGate_CameraTest(const struct NativeModelGate *g, u32 xy0, u32 z0, u32 xy1, u32 z1, u32 xy2, u32 z2, s32 *sideOut)
 {
-	s64 a[3];
-	s64 b[3];
-	s64 c[3];
-	s64 det;
+	s32 a[3];
+	s32 b[3];
+	s32 c[3];
 
 	if (!NativeModelGate_Camera(g, xy0, z0, a) || !NativeModelGate_Camera(g, xy1, z1, b) || !NativeModelGate_Camera(g, xy2, z2, c))
 	{
 		return 0;
 	}
-	/* |x|,|y| < 2^20 and z <= 2^16 in practice: every product below stays far
-	 * inside s64. */
-	det = a[0] * ((b[1] * c[2]) - (b[2] * c[1])) - a[1] * ((b[0] * c[2]) - (b[2] * c[0])) + a[2] * ((b[0] * c[1]) - (b[1] * c[0]));
-	*sideOut = (det > 0) ? 0x10000 : (det < 0) ? -0x10000 : 0;
+	*sideOut = NativeModelGate_DetSide(a, b, c);
 	return 1;
 }
 
 int NativeModelGate_CameraTestFifo(const struct NativeModelGate *g, struct NativeModelGateCamFifo *f, int useRtps, int reuseFirstVertex, const u32 *xy3, const u32 *z3,
                                    s32 *sideOut)
 {
-	const s64 *a;
-	const s64 *b;
-	const s64 *c;
-	s64 det;
-
 	if (useRtps)
 	{
 		/* The walk shifted tempPacked by one since the last projection (and
@@ -288,11 +300,7 @@ int NativeModelGate_CameraTestFifo(const struct NativeModelGate *g, struct Nativ
 	{
 		return 0;
 	}
-	a = f->c[1];
-	b = f->c[2];
-	c = f->c[3];
-	det = a[0] * ((b[1] * c[2]) - (b[2] * c[1])) - a[1] * ((b[0] * c[2]) - (b[2] * c[0])) + a[2] * ((b[0] * c[1]) - (b[1] * c[0]));
-	*sideOut = (det > 0) ? 0x10000 : (det < 0) ? -0x10000 : 0;
+	*sideOut = NativeModelGate_DetSide(f->c[1], f->c[2], f->c[3]);
 	return 1;
 }
 
