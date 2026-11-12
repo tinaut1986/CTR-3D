@@ -67,7 +67,6 @@ int main(int argc, char **argv)
 			bad++;
 		}
 	}
-	printf("sky RTPT: trials=%ld flagged(16-18)=%ld realistic-unflagged=%ld mismatches=%ld
-", n, flagged, clean, bad);
+	printf("sky RTPT: trials=%ld flagged(16-18)=%ld realistic-unflagged=%ld mismatches=%ld\n", n, flagged, clean, bad);
 	return bad != 0;
 }
