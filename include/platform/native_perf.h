@@ -374,6 +374,8 @@ extern int g_dbg_deepProf;
 #define NATIVE_PROFLOC_DEPTH        223
 #define NATIVE_PROFLOC_TEXRESOLVE   224
 #define NATIVE_PROFLOC_WALK_LINK    225
+#define NATIVE_PROFLOC_TRK_LEAFCPU  226 /* NativeTrackDraw_IssueForWalk's per-leaf math */
+#define NATIVE_PROFLOC_TRK_LEAFGPU  227 /* N3DS_TrackDraw_Leaf: uniforms + C3D_DrawElements */
 #define NATIVE_PROFLOC_NONE        255
 extern volatile u8 g_profLoc;
 extern u32 g_profLocHist[256];

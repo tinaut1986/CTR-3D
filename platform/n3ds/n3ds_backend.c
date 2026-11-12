@@ -1504,6 +1504,12 @@ static int s_trackTexturedState = -1;
  * texture is the same, which re-emits its configuration on the next draw --
  * per leaf, and again per leaf in the right eye's replay. */
 static int s_trackBoundUnit0 = -1;
+/* Direct leaf draws (N3DS_TrackDraw_RawElements). */
+int g_dbg_trackRawDraw = 1;
+static int s_trackRawReady;
+static int s_trackRawKey;
+static int s_trackRawUvDx;
+static int s_trackRawUvDy;
 static int s_trackBoundUnit1 = -1;
 static C3D_AttrInfo s_trackAttrInfo;
 static C3D_BufInfo s_trackBufInfo;
@@ -4117,6 +4123,7 @@ void N3DS_TrackDraw_Begin(const float *qx, const float *qy, const float *qw, flo
 	 * N3DS_TrackDraw_SetTextured last recorded is stale by now. */
 	s_trackTexturedState = 0;
 	s_trackBoundUnit0 = -1;
+	s_trackRawReady = 0;
 	s_trackBoundUnit1 = -1;
 
 	s_trackDrawActive = 1;
@@ -4179,9 +4186,81 @@ static void N3DS_TrackDraw_SetTextured(int mode)
 	s_trackTexturedState = mode;
 }
 
+/*
+ * Direct leaf draws (dumpreq `trkraw`, default on). A track pass is ~100 leaf
+ * draws whose GPU state is identical from one to the next except the
+ * depth-range uniform; C3D_DrawElements still runs C3Di_UpdateContext (every
+ * dirty flag, a scan of all 96 float uniforms per shader stage) for each, ~16
+ * us a draw on an Old 3DS ([SAMPLE] trk.leafc3d). After one draw through
+ * citro3d has flushed the state, a leaf with the same state key and UV offset
+ * uploads its one uniform and issues the draw with C3D_DrawElements' own
+ * command sequence (libcitro3d drawElements.o: PRIMITIVE_CONFIG,
+ * RESTART_PRIMITIVE, INDEXBUFFER_CONFIG, NUMVERTICES, VERTEX_OFFSET, the
+ * GEOSTAGE / START_DRAW_FUNC0 / DRAWELEMENTS bracket, VTX_FUNC). citro3d's
+ * uniform mirror gets the same value, not dirty, so it still matches the GPU.
+ * Reset at every pass boundary (Begin/End) and by any state change.
+ */
+
+static void N3DS_TrackDraw_RawElements(const u16 *indexBase, int indexCount, float otIndexLo, float ordinalLo, float ordinalSpan, float invIndexSpan)
+{
+	C3D_FVec *mirror = &C3D_FVUnif[GPU_VERTEX_SHADER][s_trackULocDepthRange];
+	const u32 pa = osConvertVirtToPhys(indexBase);
+	const u32 base = C3D_GetBufInfo()->base_paddr;
+
+	if (pa < base)
+	{
+		return; /* C3D_DrawElements' own guard */
+	}
+	mirror->x = -otIndexLo;
+	mirror->y = ordinalLo;
+	mirror->z = ordinalSpan;
+	mirror->w = invIndexSpan;
+
+	/* Straight into the command buffer, in GPUCMD_Add's own layout (param,
+	 * header, extra params, a pad word after an odd extra count): 38 words,
+	 * one bounds check instead of 17 calls. */
+	if ((gpuCmdBuf == NULL) || (gpuCmdBufOffset + 38u > gpuCmdBufSize))
+	{
+		return;
+	}
+	{
+		u32 *b = gpuCmdBuf + gpuCmdBufOffset;
+		const u32 *m = (const u32 *)mirror;
+#define N3DS_CMD1(mask, reg, val) do { *b++ = (u32)(val); *b++ = GPUCMD_HEADER(0, (mask), (reg)); } while (0)
+
+		N3DS_CMD1(0xF, GPUREG_VSH_FLOATUNIFORM_CONFIG, 0x80000000u | (u32)s_trackULocDepthRange);
+		*b++ = m[0];
+		*b++ = GPUCMD_HEADER(0, 0xF, GPUREG_VSH_FLOATUNIFORM_DATA) | (3u << 20);
+		*b++ = m[1];
+		*b++ = m[2];
+		*b++ = m[3];
+		*b++ = 0; /* alignment */
+		N3DS_CMD1(0x2, GPUREG_PRIMITIVE_CONFIG, GPU_GEOMETRY_PRIM);
+		N3DS_CMD1(0xF, GPUREG_RESTART_PRIMITIVE, 1);
+		N3DS_CMD1(0xF, GPUREG_INDEXBUFFER_CONFIG, (pa - base) | ((u32)C3D_UNSIGNED_SHORT << 31));
+		N3DS_CMD1(0xF, GPUREG_NUMVERTICES, (u32)indexCount);
+		N3DS_CMD1(0xF, GPUREG_VERTEX_OFFSET, 0);
+		N3DS_CMD1(0x2, GPUREG_GEOSTAGE_CONFIG, 0x100);
+		N3DS_CMD1(0x2, GPUREG_GEOSTAGE_CONFIG2, 0x100);
+		N3DS_CMD1(0x1, GPUREG_START_DRAW_FUNC0, 0);
+		N3DS_CMD1(0xF, GPUREG_DRAWELEMENTS, 1);
+		N3DS_CMD1(0x1, GPUREG_START_DRAW_FUNC0, 1);
+		N3DS_CMD1(0x2, GPUREG_GEOSTAGE_CONFIG, 0);
+		N3DS_CMD1(0x2, GPUREG_GEOSTAGE_CONFIG2, 0);
+		N3DS_CMD1(0xF, GPUREG_VTX_FUNC, 1);
+		N3DS_CMD1(0x8, GPUREG_PRIMITIVE_CONFIG, 0);
+		N3DS_CMD1(0x8, GPUREG_PRIMITIVE_CONFIG, 0);
+#undef N3DS_CMD1
+		gpuCmdBufOffset = (u32)(b - gpuCmdBuf);
+	}
+}
+
 void N3DS_TrackDraw_Leaf(int firstIndex, int indexCount, float otIndexLo, float ordinalLo, float ordinalSpan, float invIndexSpan, int atlasBin, int blend, int uvDx, int uvDy)
 {
 	const u16 *indexBase;
+	/* Everything the state block below can change, in one word. */
+	const int rawKey = (((atlasBin >= 0) && (atlasBin < s_trackAtlasUnitsAllocated)) ? (atlasBin & 0xfff) : 0xfff) | ((blend & 0xf) << 12) |
+	                   ((g_dbg_trackBilinear ? 1 : 0) << 16) | ((N3DS_DepthTintOn() ? 1 : 0) << 17);
 
 	{
 		N3DS_StereoOp *op = N3DS_StereoRecord(N3DS_STEREO_OP_TRACK_LEAF);
@@ -4264,6 +4343,13 @@ void N3DS_TrackDraw_Leaf(int firstIndex, int indexCount, float otIndexLo, float 
 	 * platform/native_track_frame.c's math a direct, literal reading of the
 	 * design doc's formulas.
 	 */
+	if (g_dbg_trackRawDraw && s_trackRawReady && (rawKey == s_trackRawKey) && (uvDx == s_trackRawUvDx) && (uvDy == s_trackRawUvDy) && s_frameOpen &&
+	    (g_dbg_depthTest != 2))
+	{
+		N3DS_TrackDraw_RawElements((const u16 *)s_trackIndexPtr + firstIndex, indexCount, otIndexLo, ordinalLo, ordinalSpan, invIndexSpan);
+		return;
+	}
+
 	C3D_FVUnifSet(GPU_VERTEX_SHADER, s_trackULocDepthRange, -otIndexLo, ordinalLo, ordinalSpan, invIndexSpan);
 
 	/*
@@ -4339,10 +4425,15 @@ void N3DS_TrackDraw_Leaf(int firstIndex, int indexCount, float otIndexLo, float 
 		return;
 	}
 	C3D_DrawElements(GPU_TRIANGLES, indexCount, C3D_UNSIGNED_SHORT, indexBase);
+	s_trackRawReady = 1;
+	s_trackRawKey = rawKey;
+	s_trackRawUvDx = uvDx;
+	s_trackRawUvDy = uvDy;
 }
 
 void N3DS_TrackDraw_End(void)
 {
+	s_trackRawReady = 0;
 	N3DS_StereoRecord(N3DS_STEREO_OP_TRACK_END);
 
 	/* Program + attribute layout + vertex buffer + texture-modulate combiner
@@ -5562,6 +5653,13 @@ unsigned int N3DS_ReadButtons(void)
 
 					N3DS_AudioThreadStopAndJoin();
 					N3DS_DebugLog("[CTR-3DS] audiothread: STOPPED (main-thread fallback)");
+				}
+				else if (strcmp(word, "trkraw") == 0)
+				{
+					extern int g_dbg_trackRawDraw;
+
+					g_dbg_trackRawDraw = !g_dbg_trackRawDraw;
+					N3DS_DebugLog(g_dbg_trackRawDraw ? "[CTR-3DS] trkraw: ON (same-state track leaves drawn directly)" : "[CTR-3DS] trkraw: OFF (every leaf through C3D_DrawElements)");
 				}
 				else if (strcmp(word, "skyfast") == 0)
 				{

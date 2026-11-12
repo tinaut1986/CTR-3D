@@ -746,6 +746,8 @@ internal const char *NativePerf_ProfLocName(int loc)
 	case NATIVE_PROFLOC_DEPTH: return "depth";
 	case NATIVE_PROFLOC_TEXRESOLVE: return "texresolve";
 	case NATIVE_PROFLOC_WALK_LINK: return "walk.link";
+	case NATIVE_PROFLOC_TRK_LEAFCPU: return "trk.leafcpu";
+	case NATIVE_PROFLOC_TRK_LEAFGPU: return "trk.leafc3d";
 	default: break;
 	}
 	return (loc < NATIVE_PERF_BUCKET_COUNT) ? NativePerf_BucketName((enum NativePerfBucket)loc) : "?";
