@@ -137,6 +137,8 @@ Rules the hardware enforces and emulators do not:
   file channel: polling `sdmc:/dumpreq.txt` stalled the frame for up to 230 ms
   when the SD card was busy), SELECT chords, `[PERF]` scope windows, screenshots and probes.
   OFF strips all of it from the binary and changes no default.
+  Words added for the Old-3DS race work: `deepprof`, `sampler`, `xaprefetch`, `mdlfast`, `skyfast`, `trkraw`,
+  `kartlod`, `cpulimit` (see "Race frame time" below).
 - Bottom screen (`platform/n3ds/n3ds_bottomui.c`, always on, from the first
   frame): graphics mode, no libctru console on it. Tabs ESTADO / MAPA /
   OPCIONES / ACTUALIZADOR (English on non-Spanish consoles: STATUS / MAP /
@@ -399,6 +401,62 @@ pauses briefly around the longest calls and the boot stage 0 (~8.9 s) shows noth
 presents a flag-only frame from inside the long steps (`perf/loading-frame-pump`) crashed the first time (a
 full `MainFrame_RenderFrame` re-entered menu input); the reduced version was not verified. Risk: it draws while
 a file is half read.
+
+### Race frame time (Old 3DS, 2026-11)
+
+Measured on the Old 2DS in an Arcade race on Crash Cove. Before: 35-38 ms a frame against the 33.3 ms of 30 fps
+(6-20 skipped draws per 64 frames) plus 0.15-1.5 s stalls. After (production build): 30 fps almost always; the race
+start still dips to 25-27 fps (eight karts in view). Every change below is in `release/v0.2.3`; the runtime ones
+are dumpreq toggles (all default on unless noted).
+
+- XA music read-ahead (`xaprefetch`): the 64-sector span reads (~20-28 ms on the game thread when there is no audio
+  worker) come from a background I/O thread (`n3ds_iothread.c`, one job at a time, just below the game's priority on
+  its core) with its own disc fd (`NATIVE_DISC_IMAGE_OWNER_PREFETCH`); the stream swaps buffers on the next miss.
+- GPU cache maintenance: `N3DS_FlushDcache` = `svcFlushProcessDataCache` on the calling core (GSP's IPC is the
+  fallback; the rsf allows the SVC). The Old-3DS class defaults to `c3dflush 1` (frame vertex range only).
+- Track mesh + atlas built at the end of the level load (`LOAD_TenStages.c`) for playable levels only
+  (`levelID < INTRO_RACE_TODAY`): removes the 0.5-0.8 s freeze of the first race frame. Menus and cutscenes upload
+  their textures after the load, so an early build there copies a black atlas (the character-select garage did).
+- `[BEAT] THAW`: its frame trace, ALIVE lines and synchronous SD flushes now only follow a >5 s system freeze; on
+  every >500 ms gap they turned one slow frame into 10 s of 0.1-1.5 s stalls (debug builds with the SD log on).
+- OT walk: the empty-slot run and each node's link go through cached registered ranges (no two range lookups per
+  node), and `GTECapture_MarkOTRun` marks a stretch of OT slots at once. Empty slots ~600 -> ~145 cycles.
+- Models (`mdlfast`): a gated (GPU-drawn) triangle is accepted in camera space: depth in (0, 0xffff] and the NCLIP
+  side as the sign of det[c0; c1; c2] (equal to NCLIP's when every z > 0), a strip FIFO of camera-space vertices,
+  s32 coordinates, s64 minors and a double outer product (exact sign in 20M random cases). No screen-window test (the
+  GPU clips). Specular instances keep the projected gate. A declined triangle re-projects with RTPT.
+- Rival-kart LOD step (`kartlod`: 0 off, 1 dynamic, 2 always; 1 on the Old-3DS class): while 4+ rival karts (not a
+  human player's) sat on rungs 0-1 the previous frame, rivals draw one rung coarser. Start: ~1640 -> ~1100 model
+  triangles. `[KARTLOD]` line per 64 frames (debug).
+- Sky (`skyfast`): faces project through `NativeModelGate_RtptFlags` (the gate's RTPT plus FLAG bits 16-18, which is
+  all `DrawSky_IsVisible` reads) instead of the software GTE: 2.0-2.2 -> 1.0-1.2 ms. Host check
+  `tests/perf-parity/sky_rtpt_test.c` (also run by `run.sh`).
+- Track leaves (`trkraw`): after one leaf through `C3D_DrawElements`, a leaf with the same state key writes its
+  depth-range uniform and `C3D_DrawElements`' own command sequence (read from libcitro3d's `drawElements.o`)
+  straight into `gpuCmdBuf`; citro3d's uniform mirror gets the value. ~16 -> ~5 us a leaf, ~100-200 leaves a frame.
+- `deepprof` (default off): the per-op profilers ([INSTPROF] counts/phase ticks, [GTEPROF], [PARSEPROF]/[G4PROF])
+  cost a debug (beta) build a visible frame-rate step through their SVC tick reads. With it off the debug build is
+  still somewhat slower than production.
+
+Tried and dropped:
+- Render worker on core 1 (`core1.txt` / cfg `core1` = percentage, default 0; rsf MaxCpu stays 30 %). At 80 % the
+  worker kept up, but GSP and the other services on core 1 starved (C3D_FrameEnd 0.2 -> 5-7 ms, GPU 7 -> 15 ms) and
+  core 0 slowed on the shared memory: a race ran no faster.
+- Direct `C3D_DrawArrays` for model runs: few runs a frame, no measurable gain (the model pass is per-triangle CPU).
+- PLD in `DrawFunc_Normal`'s command list is in, but its effect was not measured separately.
+
+Measuring: `[SAMPLE]` (dumpreq `sampler`, debug builds): a thread above the game's priority samples the game
+thread's location every 1 ms; the location is the innermost [PERF] scope (self-balancing stack in
+`NativePerf_Begin/EndScope`) or a finer marker (`NATIVE_PROFLOC_*`: model phases `mdl.*`, OT walk `walk.*`,
+`depth`, `texresolve`, race effects `fx.*`, track leaves `trk.leafcpu`/`trk.leafc3d`). Unlike the [INSTPROF] and
+[PARSEPROF] phase splits it reads no clock on the game thread, so its shares are trustworthy. `[TRKDRAW] draws/f`
+logs while it runs. The attract demo (idle ~5 min after boot) runs lvl 3/6/4 races hands-free, but a real race is
+heavier (more karts close).
+
+Race profile left (debug build, [SAMPLE], % of the frame): packet parse ~9, draw_all_splits (GrVertex -> GPU
+vertex conversion) ~6, track 3-8, game logic ~5, model facing test ~4-5, texture resolve 3-12 (first-use decode
+bursts), bottom screen ~1 ms. Race start: the eight karts' CPU path (animation decode, facing test, capture,
+draw prep) is ~2000 cycles a triangle.
 
 ## Race HUD on the bottom screen
 
