@@ -4558,7 +4558,28 @@ internal int N3DS_FBCaptureEnsure(const N3DS_FBStoreSlot *slot)
 	return 1;
 }
 
+internal int N3DS_ResolveTriangleTexture_Impl(const GrVertex *v0, const GrVertex *v1, const GrVertex *v2, s16 texPage,
+                                          s16 clut, TexFormat format, N3DS_TexView view, int *outAtlasIdx,
+                                          int *outPixelBaseU, int *outPixelBaseV, int *outOriginU, int *outOriginV);
+/* [SAMPLE] location while it runs (native_perf.c). */
 internal int N3DS_ResolveTriangleTexture(const GrVertex *v0, const GrVertex *v1, const GrVertex *v2, s16 texPage,
+                                          s16 clut, TexFormat format, N3DS_TexView view, int *outAtlasIdx,
+                                          int *outPixelBaseU, int *outPixelBaseV, int *outOriginU, int *outOriginV)
+{
+#if defined(CTR_INTERNAL) && defined(__3DS__)
+	const u8 profLocPrev = g_profLoc;
+	int r;
+
+	g_profLoc = (u8)NATIVE_PROFLOC_TEXRESOLVE;
+	r = N3DS_ResolveTriangleTexture_Impl(v0, v1, v2, texPage, clut, format, view, outAtlasIdx, outPixelBaseU, outPixelBaseV, outOriginU, outOriginV);
+	g_profLoc = profLocPrev;
+	return r;
+#else
+	return N3DS_ResolveTriangleTexture_Impl(v0, v1, v2, texPage, clut, format, view, outAtlasIdx, outPixelBaseU, outPixelBaseV, outOriginU, outOriginV);
+#endif
+}
+
+internal int N3DS_ResolveTriangleTexture_Impl(const GrVertex *v0, const GrVertex *v1, const GrVertex *v2, s16 texPage,
                                           s16 clut, TexFormat format, N3DS_TexView view, int *outAtlasIdx,
                                           int *outPixelBaseU, int *outPixelBaseV, int *outOriginU, int *outOriginV)
 {

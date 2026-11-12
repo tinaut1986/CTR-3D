@@ -2481,7 +2481,24 @@ internal void PacketDepth_FillParallaxFromCapture(const s16 *xs, const s16 *ys, 
  * caller's signal to keep its existing ordinal. */
 int NativeUiMap_RouteActive(void);
 
+internal int PacketDepth_ResolveXY_Impl(const s16 *xs, const s16 *ys, int n, u16 *out, u16 *perVert, u16 *perVertPar);
+/* [SAMPLE] location while it runs (native_perf.c). */
 internal int PacketDepth_ResolveXY(const s16 *xs, const s16 *ys, int n, u16 *out, u16 *perVert, u16 *perVertPar)
+{
+#if defined(CTR_INTERNAL) && defined(__3DS__)
+	const u8 profLocPrev = g_profLoc;
+	int r;
+
+	g_profLoc = (u8)NATIVE_PROFLOC_DEPTH;
+	r = PacketDepth_ResolveXY_Impl(xs, ys, n, out, perVert, perVertPar);
+	g_profLoc = profLocPrev;
+	return r;
+#else
+	return PacketDepth_ResolveXY_Impl(xs, ys, n, out, perVert, perVertPar);
+#endif
+}
+
+internal int PacketDepth_ResolveXY_Impl(const s16 *xs, const s16 *ys, int n, u16 *out, u16 *perVert, u16 *perVertPar)
 {
 	u16 sz3s[4];
 	u16 maxSz3 = 0;
@@ -5314,6 +5331,11 @@ void ParsePrimitivesLinkedList(u32 *p, int singlePrimitive)
 		const u64 profWalkStart = g_dbg_deepProf ? PARSEPROF_TICK() : 0;
 #endif
 
+		uintptr_t lkHost[2] = {0, 0};
+		u32 lkT0[2] = {1, 1};
+		u32 lkT1[2] = {0, 0};
+		int lkVictim = 0;
+
 		while (true)
 		{
 			otWalkIterations++;
@@ -5380,6 +5402,7 @@ void ParsePrimitivesLinkedList(u32 *p, int singlePrimitive)
 				// handled node emitted its triangles and advanced the emit
 				// ordinals itself, so the parse loop must not see it. See
 				// native_direct_emit.c.
+				NATIVE_PROFLOC_SET(NATIVE_PROFLOC_WALK_DEMIT);
 				if (NativeDirectEmit_TryNode(basePacket, (u32)tagLength))
 				{
 					// handled: nothing to parse
@@ -5418,6 +5441,7 @@ void ParsePrimitivesLinkedList(u32 *p, int singlePrimitive)
 #if defined(CTR_INTERNAL) && defined(__3DS__)
 					profClass = PARSEPROF_PARSE;
 #endif
+					NATIVE_PROFLOC_SET(NATIVE_PROFLOC_WALK_PARSE);
 					u8 *endPacket = basePacket + (tagLength + P_LEN) * sizeof(u32);
 					int primLength = 0;
 					int firstVertex = s_gpu.vertexIndex;
@@ -5451,6 +5475,7 @@ void ParsePrimitivesLinkedList(u32 *p, int singlePrimitive)
 			}
 			else
 			{
+				NATIVE_PROFLOC_SET(NATIVE_PROFLOC_WALK_EMPTY);
 				NativeGpu_WalkCrossEmptyNode((uintptr_t)basePacket);
 
 #if !defined(CTR_NATIVE_OTWALK_PROFILE)
@@ -5547,16 +5572,44 @@ void ParsePrimitivesLinkedList(u32 *p, int singlePrimitive)
 #endif
 			}
 
+			NATIVE_PROFLOC_SET(NATIVE_PROFLOC_WALK_LINK);
 			GPUDrawSplit *lastSplit = &s_gpu.splits[s_gpu.splitIndex];
 			lastSplit->numVerts = s_gpu.vertexIndex - lastSplit->startVertex;
 
-			if (isendprim(basePacket))
+			/* nextPrim + NativeGpu_IsValidOTLink through a two-entry cache of
+			 * registered ranges: a node's link alternates between the prim
+			 * pool and the OT, which defeated the links' one-entry hint and
+			 * cost two range scans per node. */
+			const u32 linkToken = CTR_GPU_ReadTagWord(basePacket) & 0x00ffffffu;
+
+			if (NativeGpuLinks_IsTerminator(linkToken))
 			{
 				break;
 			}
 
-			u8 *nextPacket = nextPrim(basePacket);
-			if (!NativeGpu_IsValidOTLink((uintptr_t)nextPacket))
+			u8 *nextPacket = NULL;
+			{
+				int slot = -1;
+
+				if ((linkToken >= lkT0[0]) && (linkToken < lkT1[0]))
+				{
+					slot = 0;
+				}
+				else if ((linkToken >= lkT0[1]) && (linkToken < lkT1[1]))
+				{
+					slot = 1;
+				}
+				else if (NativeGpuLinks_TokenRange(linkToken, &lkHost[lkVictim], &lkT0[lkVictim], &lkT1[lkVictim]))
+				{
+					slot = lkVictim;
+					lkVictim ^= 1;
+				}
+				if (slot >= 0)
+				{
+					nextPacket = (u8 *)(lkHost[slot] + (uintptr_t)(linkToken - lkT0[slot]));
+				}
+			}
+			if ((nextPacket == NULL) || (((uintptr_t)nextPacket & 3u) != 0))
 			{
 				char packetRegion[64];
 				char nextRegion[64];

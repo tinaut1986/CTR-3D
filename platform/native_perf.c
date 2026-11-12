@@ -677,6 +677,120 @@ internal const char *NativePerf_GteOpName(int funct)
 	}
 }
 
+/*
+ * [SAMPLE] statistical profiler (dumpreq `sampler`, default off): a thread above
+ * the game's priority on its core (n3ds_iothread.c) wakes every millisecond and
+ * counts the game thread's current location, g_profLoc. A location is the
+ * innermost open [PERF] scope (set in Begin/EndScope, a store and a small
+ * stack) or a finer marker inside one (PROF_LOC_*, >= NATIVE_PROFLOC_FIRST).
+ * No tick read on the game thread, so what it shows is what the frame costs.
+ */
+volatile u8 g_profLoc = NATIVE_PROFLOC_NONE;
+u32 g_profLocHist[256];
+global_variable u8 s_profLocStack[32];  /* the location to restore */
+global_variable u8 s_profLocBucket[32]; /* the scope that pushed it */
+global_variable int s_profLocDepth;
+
+/* Main thread only. A scope pushes even outside an open frame, and a close
+ * unwinds to its own entry, so a scope opened before a frame began and closed
+ * inside it cannot leave a stale location behind. */
+internal void NativePerf_ProfLocPush(int bucket)
+{
+	if (s_profLocDepth < (int)sizeof(s_profLocStack))
+	{
+		s_profLocStack[s_profLocDepth] = g_profLoc;
+		s_profLocBucket[s_profLocDepth] = (u8)bucket;
+		s_profLocDepth++;
+	}
+	g_profLoc = (u8)bucket;
+}
+
+internal void NativePerf_ProfLocPop(int bucket)
+{
+	int i;
+
+	for (i = s_profLocDepth - 1; i >= 0; i--)
+	{
+		if (s_profLocBucket[i] == (u8)bucket)
+		{
+			g_profLoc = s_profLocStack[i];
+			s_profLocDepth = i;
+			return;
+		}
+	}
+}
+
+internal const char *NativePerf_ProfLocName(int loc)
+{
+	switch (loc)
+	{
+	case NATIVE_PROFLOC_NONE: return "none";
+	case NATIVE_PROFLOC_MDL_SETUP: return "mdl.setup";
+	case NATIVE_PROFLOC_MDL_DECODE: return "mdl.decode";
+	case NATIVE_PROFLOC_MDL_ACCEPT: return "mdl.accept";
+	case NATIVE_PROFLOC_MDL_TEX: return "mdl.tex";
+	case NATIVE_PROFLOC_MDL_CAPTURE: return "mdl.capture";
+	case NATIVE_PROFLOC_MDL_PACKET: return "mdl.packet";
+	case NATIVE_PROFLOC_MDL_LOOP: return "mdl.loop";
+	case NATIVE_PROFLOC_MDL_END: return "mdl.end";
+	case NATIVE_PROFLOC_FX_PARTICLES: return "fx.particles";
+	case NATIVE_PROFLOC_FX_DISPENV: return "fx.dispenv";
+	case NATIVE_PROFLOC_FX_FLAGS: return "fx.flag40";
+	case NATIVE_PROFLOC_FX_TIRES: return "fx.tires";
+	case NATIVE_PROFLOC_FX_SHADOWS: return "fx.shadows";
+	case NATIVE_PROFLOC_FX_HEAT: return "fx.heat";
+	case NATIVE_PROFLOC_FX_FADE: return "fx.fade";
+	case NATIVE_PROFLOC_WALK_EMPTY: return "walk.empty";
+	case NATIVE_PROFLOC_WALK_DEMIT: return "walk.demit";
+	case NATIVE_PROFLOC_WALK_PARSE: return "walk.parse";
+	case NATIVE_PROFLOC_DEPTH: return "depth";
+	case NATIVE_PROFLOC_TEXRESOLVE: return "texresolve";
+	case NATIVE_PROFLOC_WALK_LINK: return "walk.link";
+	default: break;
+	}
+	return (loc < NATIVE_PERF_BUCKET_COUNT) ? NativePerf_BucketName((enum NativePerfBucket)loc) : "?";
+}
+
+internal void NativePerf_ReportSampler(void)
+{
+	u32 total = 0;
+	char line[480];
+	int off;
+	int k;
+
+	for (k = 0; k < 256; k++)
+	{
+		total += g_profLocHist[k];
+	}
+	if (total < 64)
+	{
+		return;
+	}
+	off = snprintf(line, sizeof(line), "[SAMPLE] n=%lu", (unsigned long)total);
+	for (k = 0; (k < 14) && (off < (int)sizeof(line) - 40); k++)
+	{
+		int best = -1;
+		int i;
+
+		for (i = 0; i < 256; i++)
+		{
+			if ((g_profLocHist[i] != 0) && ((best < 0) || (g_profLocHist[i] > g_profLocHist[best])))
+			{
+				best = i;
+			}
+		}
+		if (best < 0)
+		{
+			break;
+		}
+		off += snprintf(line + off, sizeof(line) - (size_t)off, " %s=%lu.%lu%%", NativePerf_ProfLocName(best), (unsigned long)((g_profLocHist[best] * 100u) / total),
+		                (unsigned long)(((g_profLocHist[best] * 1000u) / total) % 10u));
+		g_profLocHist[best] = 0;
+	}
+	N3DS_DebugLog(line);
+	memset(g_profLocHist, 0, sizeof(g_profLocHist));
+}
+
 internal void NativePerf_ReportInstProf(u32 frames)
 {
 	static const char *const funcNames[NATIVE_INSTPROF_FUNCS] = {"normal", "alt", "split", "special", "refl", "other"};
@@ -917,6 +1031,10 @@ internal void NativePerf_Report3DSWindow(void)
 	}
 
 	NativePerf_ReportInstProf(s_windowFrames);
+	if (N3DS_SamplerActive())
+	{
+		NativePerf_ReportSampler();
+	}
 	/* platform_end_scene_ms phase by phase, the frame-begin wait and the
 	 * right eye's journal shape (n3ds_backend.h's end-of-scene profile). */
 	{
@@ -1613,6 +1731,9 @@ void NativePerf_BeginScope(enum NativePerfBucket bucket)
 	}
 #endif
 
+#if defined(__3DS__) && defined(CTR_INTERNAL)
+	NativePerf_ProfLocPush((int)bucket);
+#endif
 	if (!s_frameOpen)
 	{
 		return;
@@ -1665,6 +1786,9 @@ void NativePerf_EndScope(enum NativePerfBucket bucket)
 	}
 #endif
 
+#if defined(__3DS__) && defined(CTR_INTERNAL)
+	NativePerf_ProfLocPop((int)bucket);
+#endif
 	if (!s_frameOpen)
 	{
 		return;

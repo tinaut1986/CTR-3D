@@ -84,6 +84,31 @@ static inline s32 NativeModelGate_Nclip(const struct NativeModelGateFifo *f)
 	return (sx0 * sy1) + (sx1 * sy2) + (sx2 * sy0) - (sx0 * sy2) - (sx1 * sy0) - (sx2 * sy1);
 }
 
+// The fast accept test (g_dbg_modelFast, dumpreq `mdlfast`, default on) for a
+// gated instance: the triangle's three vertices in camera space (the gate's
+// MAC sums, no divide, no screen coordinates), rejected when a depth leaves
+// (0, 0xffff] (RTPS/RTPT's FLAG bit 18 range), and its facing as the sign of
+// det[c0; c1; c2]. With every z > 0 that sign IS the sign of NCLIP: screen
+// x/y are the camera x/y over z times one positive scale, and the 2D cross
+// product of the projected points is det / (z0 z1 z2). Not done: the screen
+// window test (the GPU clips what lies outside) and the GTE's screen rounding
+// (a sliver within a pixel of edge-on may flip). Returns 0 = reject; else
+// *sideOut = +/-0x10000 (0 for a degenerate triangle) for the NCLIP-signed tests.
+extern int g_dbg_modelFast;
+int NativeModelGate_CameraTest(const struct NativeModelGate *g, u32 xy0, u32 z0, u32 xy1, u32 z1, u32 xy2, u32 z2, s32 *sideOut);
+
+// The same test on a strip: a FIFO of camera-space vertices mirroring the walk's
+// tempPacked[0..3], so an RTPS-shaped command transforms only its new vertex.
+struct NativeModelGateCamFifo
+{
+	s64 c[4][3];
+	u8 ok[4];
+};
+// useRtps / reuseFirstVertex as for NativeModelGate_Rtps; xy/z = the walk's
+// tempPacked[1..3] (all three for RTPT, only [2] i.e. the new one for RTPS).
+int NativeModelGate_CameraTestFifo(const struct NativeModelGate *g, struct NativeModelGateCamFifo *f, int useRtps, int reuseFirstVertex, const u32 *xy3, const u32 *z3,
+                                   s32 *sideOut);
+
 // FIFO <-> GTE data registers 12-14 and 16-19.
 void NativeModelGate_ToGte(const struct NativeModelGateFifo *f);
 void NativeModelGate_FromGte(struct NativeModelGateFifo *f);

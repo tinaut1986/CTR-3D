@@ -179,6 +179,87 @@ u32 NativeModelGate_Rtps(struct NativeModelGate *g, int reuseFirstVertex, u32 xy
 	return flag;
 }
 
+int g_dbg_modelFast = 1;
+
+static inline __attribute__((always_inline)) int NativeModelGate_Camera(const struct NativeModelGate *g, u32 xy, u32 z, s64 *c)
+{
+	const s32 vx = (s16)(xy & 0xffffu);
+	const s32 vy = (s16)(xy >> 16);
+	const s32 vz = (s16)(z & 0xffffu);
+	const s64 mac3 = (s64)((s64)g->trz << 12) + (g->r31 * vx) + (g->r32 * vy) + (g->r33 * vz);
+	const s32 cz = (s32)(mac3 >> 12);
+
+	if ((cz <= 0) || (cz > 0xffff))
+	{
+		return 0;
+	}
+	c[0] = ((s64)((s64)g->trx << 12) + (g->r11 * vx) + (g->r12 * vy) + (g->r13 * vz)) >> 12;
+	c[1] = ((s64)((s64)g->try_ << 12) + (g->r21 * vx) + (g->r22 * vy) + (g->r23 * vz)) >> 12;
+	c[2] = cz;
+	return 1;
+}
+
+int NativeModelGate_CameraTest(const struct NativeModelGate *g, u32 xy0, u32 z0, u32 xy1, u32 z1, u32 xy2, u32 z2, s32 *sideOut)
+{
+	s64 a[3];
+	s64 b[3];
+	s64 c[3];
+	s64 det;
+
+	if (!NativeModelGate_Camera(g, xy0, z0, a) || !NativeModelGate_Camera(g, xy1, z1, b) || !NativeModelGate_Camera(g, xy2, z2, c))
+	{
+		return 0;
+	}
+	/* |x|,|y| < 2^20 and z <= 2^16 in practice: every product below stays far
+	 * inside s64. */
+	det = a[0] * ((b[1] * c[2]) - (b[2] * c[1])) - a[1] * ((b[0] * c[2]) - (b[2] * c[0])) + a[2] * ((b[0] * c[1]) - (b[1] * c[0]));
+	*sideOut = (det > 0) ? 0x10000 : (det < 0) ? -0x10000 : 0;
+	return 1;
+}
+
+int NativeModelGate_CameraTestFifo(const struct NativeModelGate *g, struct NativeModelGateCamFifo *f, int useRtps, int reuseFirstVertex, const u32 *xy3, const u32 *z3,
+                                   s32 *sideOut)
+{
+	const s64 *a;
+	const s64 *b;
+	const s64 *c;
+	s64 det;
+
+	if (useRtps)
+	{
+		/* The walk shifted tempPacked by one since the last projection (and
+		 * copied [0] into [1] on a bit-30 continuation): do the same here. */
+		memcpy(f->c[0], f->c[1], sizeof(f->c[0]));
+		memcpy(f->c[1], f->c[2], sizeof(f->c[0]));
+		memcpy(f->c[2], f->c[3], sizeof(f->c[0]));
+		f->ok[0] = f->ok[1];
+		f->ok[1] = f->ok[2];
+		f->ok[2] = f->ok[3];
+		if (reuseFirstVertex)
+		{
+			memcpy(f->c[1], f->c[0], sizeof(f->c[0]));
+			f->ok[1] = f->ok[0];
+		}
+		f->ok[3] = (u8)NativeModelGate_Camera(g, xy3[2], z3[2], f->c[3]);
+	}
+	else
+	{
+		f->ok[1] = (u8)NativeModelGate_Camera(g, xy3[0], z3[0], f->c[1]);
+		f->ok[2] = (u8)NativeModelGate_Camera(g, xy3[1], z3[1], f->c[2]);
+		f->ok[3] = (u8)NativeModelGate_Camera(g, xy3[2], z3[2], f->c[3]);
+	}
+	if (!f->ok[1] || !f->ok[2] || !f->ok[3])
+	{
+		return 0;
+	}
+	a = f->c[1];
+	b = f->c[2];
+	c = f->c[3];
+	det = a[0] * ((b[1] * c[2]) - (b[2] * c[1])) - a[1] * ((b[0] * c[2]) - (b[2] * c[0])) + a[2] * ((b[0] * c[1]) - (b[1] * c[0]));
+	*sideOut = (det > 0) ? 0x10000 : (det < 0) ? -0x10000 : 0;
+	return 1;
+}
+
 void NativeModelGate_ToGte(const struct NativeModelGateFifo *f)
 {
 	MTC2(f->sxy[0], 12);

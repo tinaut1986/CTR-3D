@@ -84,3 +84,52 @@ void N3DS_IoJobWait(void)
 		LightEvent_Wait(&s_ioDone);
 	}
 }
+
+/* ------------------------------------------------- [SAMPLE] profiler --- */
+/* The game TU's location word and histogram (native_perf.c). Plain types: a
+ * byte and 32-bit counters cross the TU boundary. */
+extern volatile unsigned char g_profLoc;
+extern unsigned int g_profLocHist[256];
+
+static Thread s_samplerThread;
+static volatile int s_samplerOn;
+
+static void N3DS_SamplerMain(void *arg)
+{
+	(void)arg;
+	while (s_samplerOn)
+	{
+		svcSleepThread(1000000LL);
+		g_profLocHist[g_profLoc]++;
+	}
+}
+
+int N3DS_SamplerActive(void)
+{
+	return s_samplerOn;
+}
+
+/* dumpreq `sampler`. Returns the new state. */
+int N3DS_SamplerToggle(void)
+{
+	if (s_samplerOn)
+	{
+		s_samplerOn = 0;
+		if (s_samplerThread != NULL)
+		{
+			threadJoin(s_samplerThread, 100000000ULL);
+			threadFree(s_samplerThread);
+			s_samplerThread = NULL;
+		}
+		return 0;
+	}
+	s_samplerOn = 1;
+	/* Above the game thread (0x30) on its core, so each wake-up preempts it
+	 * and reads where it is. */
+	s_samplerThread = threadCreate(N3DS_SamplerMain, NULL, 4096, 0x20, -2, false);
+	if (s_samplerThread == NULL)
+	{
+		s_samplerOn = 0;
+	}
+	return s_samplerOn;
+}

@@ -5563,6 +5563,19 @@ unsigned int N3DS_ReadButtons(void)
 					N3DS_AudioThreadStopAndJoin();
 					N3DS_DebugLog("[CTR-3DS] audiothread: STOPPED (main-thread fallback)");
 				}
+				else if (strcmp(word, "sampler") == 0)
+				{
+					extern int N3DS_SamplerToggle(void);
+
+					N3DS_DebugLog(N3DS_SamplerToggle() ? "[CTR-3DS] sampler: ON ([SAMPLE] every [PERF] window)" : "[CTR-3DS] sampler: OFF");
+				}
+				else if (strcmp(word, "mdlfast") == 0)
+				{
+					extern int g_dbg_modelFast;
+
+					g_dbg_modelFast = !g_dbg_modelFast;
+					N3DS_DebugLog(g_dbg_modelFast ? "[CTR-3DS] mdlfast: ON (gated models: camera-space accept, no projection)" : "[CTR-3DS] mdlfast: OFF (projected gate)");
+				}
 				else if (strcmp(word, "deepprof") == 0)
 				{
 					extern int g_dbg_deepProf;
