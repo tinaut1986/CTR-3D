@@ -528,6 +528,13 @@ void N3DS_EarlyInit(void)
 			 * flush is a GSP request, and GSP runs on core 1 beside the render
 			 * worker, where it cost the worker ~7 ms a frame ([ENDPROF] fend). */
 			g_dbg_c3dFlush = 1;
+			{
+				extern int g_dbg_kartLod;
+
+				/* Rival karts one LOD rung coarser while many are near the camera
+				 * (RenderBucket_SelectModelHeader): the race start. */
+				g_dbg_kartLod = 1;
+			}
 		}
 		g_dbg_stereo = N3DS_ConfigGet("stereo", g_dbg_stereo);
 		/* FRAME SKIP (cfg `fpsmode`: 0 AUTO, 1 30, 2 OFF) replaced FRAME CAP
@@ -5660,6 +5667,15 @@ unsigned int N3DS_ReadButtons(void)
 
 					g_dbg_trackRawDraw = !g_dbg_trackRawDraw;
 					N3DS_DebugLog(g_dbg_trackRawDraw ? "[CTR-3DS] trkraw: ON (same-state track leaves drawn directly)" : "[CTR-3DS] trkraw: OFF (every leaf through C3D_DrawElements)");
+				}
+				else if (strcmp(word, "kartlod") == 0)
+				{
+					extern int g_dbg_kartLod;
+					char msg[80];
+
+					g_dbg_kartLod = (g_dbg_kartLod + 1) % 3;
+					snprintf(msg, sizeof(msg), "[CTR-3DS] kartlod: %d (0 off, 1 dynamic, 2 always)", g_dbg_kartLod);
+					N3DS_DebugLog(msg);
 				}
 				else if (strcmp(word, "skyfast") == 0)
 				{

@@ -108,7 +108,7 @@ int NativeModelGate_CameraTest(const struct NativeModelGate *g, u32 xy0, u32 z0,
 // tempPacked[0..3], so an RTPS-shaped command transforms only its new vertex.
 struct NativeModelGateCamFifo
 {
-	s64 c[4][3];
+	s32 c[4][3];
 	u8 ok[4];
 };
 // useRtps / reuseFirstVertex as for NativeModelGate_Rtps; xy/z = the walk's

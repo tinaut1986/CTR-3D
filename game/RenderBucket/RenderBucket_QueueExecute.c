@@ -1378,7 +1378,116 @@ static void RenderBucket_StoreMvpTranslation(struct InstDrawPerPlayer *idpp, con
 	CTC2(viewPos->vz, 7);
 }
 
+#ifdef CTR_NATIVE
+/*
+ * Rival-kart LOD step (g_dbg_kartLod; dumpreq `kartlod`: 0 off, 1 dynamic, 2
+ * always). The Old 3DS sets 1 at boot (n3ds_backend.c). At a race start every
+ * kart sits near the camera on its finest model, ~1600 model triangles a frame
+ * against ~800 mid-race, and on an Old 3DS the model path then costs ~13 ms.
+ * While the previous frame had RIVAL_NEAR or more rival karts (not a human
+ * player's) on one of their two finest rungs, rival karts draw one rung coarser (~30% fewer
+ * triangles; MODELFRAME's rung+1 figure). It lets go after RIVAL_QUIET frames in
+ * a row with fewer than RIVAL_NEAR - 1. Counted on the rung retail picked,
+ * before the step, so the step cannot switch itself off. Human players' karts
+ * and every other model are untouched.
+ */
+int g_dbg_kartLod = 0;
+#define RB_KARTLOD_RIVAL_NEAR  4
+/* A rival counts as near on rungs 0..1: at a race start the karts beside and behind the
+ * camera sit on rungs 1-2 (measured), not 0, yet 8 of them are ~1500 triangles. */
+#define RB_KARTLOD_NEAR_RUNG   1
+#define RB_KARTLOD_RIVAL_QUIET 30
+static int s_kartLodActive;
+static int s_kartLodNear;
+static int s_kartLodQuiet;
+static int s_kartLodFrame = -1;
+/* [KARTLOD] window: frames, frames stepped, rival draws, of which finest-rung, stepped. */
+static u32 s_klFrames, s_klActiveFrames, s_klRivals, s_klRivalsFine, s_klStepped;
+
+static int RenderBucket_IsRivalKart(const struct Instance *inst)
+{
+	struct GameTracker *gGT = sdata->gGT;
+	int i;
+
+	if (gGT == NULL)
+	{
+		return 0;
+	}
+	for (i = gGT->numPlyrCurrGame; i < 8; i++)
+	{
+		const struct Driver *d = gGT->drivers[i];
+
+		if ((d != NULL) && (d->instSelf == inst))
+		{
+			return 1;
+		}
+	}
+	return 0;
+}
+
+/* Once per frame, on the first rival kart: settle the step from the last frame's count. */
+static void RenderBucket_KartLodFrame(void)
+{
+	const int frame = sdata->frameCounter;
+
+	if (frame == s_kartLodFrame)
+	{
+		return;
+	}
+	s_kartLodFrame = frame;
+	s_klFrames++;
+	s_klActiveFrames += s_kartLodActive ? 1u : 0u;
+	if (s_klFrames >= 64)
+	{
+		Platform_LogInstrument("[KARTLOD] mode=%d frames=%lu stepped=%lu rivals/f=%lu fine/f=%lu steppedDraws/f=%lu\n", g_dbg_kartLod, (unsigned long)s_klFrames,
+		                       (unsigned long)s_klActiveFrames, (unsigned long)(s_klRivals / s_klFrames), (unsigned long)(s_klRivalsFine / s_klFrames),
+		                       (unsigned long)(s_klStepped / s_klFrames));
+		s_klFrames = s_klActiveFrames = s_klRivals = s_klRivalsFine = s_klStepped = 0;
+	}
+	if (s_kartLodNear >= RB_KARTLOD_RIVAL_NEAR)
+	{
+		s_kartLodActive = 1;
+		s_kartLodQuiet = 0;
+	}
+	else if (s_kartLodActive && (s_kartLodNear < (RB_KARTLOD_RIVAL_NEAR - 1)))
+	{
+		if (++s_kartLodQuiet >= RB_KARTLOD_RIVAL_QUIET)
+		{
+			s_kartLodActive = 0;
+		}
+	}
+	s_kartLodNear = 0;
+}
+#endif
+
+static struct ModelHeader *RenderBucket_SelectModelHeaderRetail(struct Instance *inst, struct PushBuffer *pb, int *lodIndexOut, int *lodExhaustedOut, int viewDepth);
+
 static struct ModelHeader *RenderBucket_SelectModelHeader(struct Instance *inst, struct PushBuffer *pb, int *lodIndexOut, int *lodExhaustedOut, int viewDepth)
+{
+	struct ModelHeader *mh = RenderBucket_SelectModelHeaderRetail(inst, pb, lodIndexOut, lodExhaustedOut, viewDepth);
+
+#ifdef CTR_NATIVE
+	if ((mh != 0) && (g_dbg_kartLod != 0) && RenderBucket_IsRivalKart(inst))
+	{
+		RenderBucket_KartLodFrame();
+		s_klRivals++;
+		if (*lodIndexOut <= RB_KARTLOD_NEAR_RUNG)
+		{
+			s_kartLodNear++;
+			s_klRivalsFine++;
+		}
+		if (((g_dbg_kartLod == 2) || s_kartLodActive) && ((*lodIndexOut + 1) < inst->model->numHeaders))
+		{
+			mh++;
+			(*lodIndexOut)++;
+			s_klStepped++;
+		}
+	}
+#endif
+	return mh;
+}
+
+static struct ModelHeader *RenderBucket_SelectModelHeaderRetail(struct Instance *inst, struct PushBuffer *pb, int *lodIndexOut, int *lodExhaustedOut, int viewDepth)
 {
 	struct ModelHeader *mh;
 	int headersRemaining;
@@ -4755,10 +4864,20 @@ void RenderBucket_DrawFunc_Normal(struct RenderBucketDrawContext *ctx)
 
 	while (*pCmd != 0xffffffff)
 	{
-		u32 command = *pCmd++;
-		u16 flags = (command >> 24) & 0xff;
-		u16 stackIndex = (command >> 16) & 0xff;
+		u32 command;
+		u16 flags;
+		u16 stackIndex;
 		int startsNewStrip;
+
+#ifdef CTR_NATIVE
+		/* PLD two cache lines ahead in the command list: on an Old 3DS (no L2,
+		 * 16 KB L1) eight kart models' lists are cold every frame, and the walk
+		 * otherwise stalls on each new line. A hint: no effect on results. */
+		__builtin_prefetch(pCmd + 16);
+#endif
+		command = *pCmd++;
+		flags = (command >> 24) & 0xff;
+		stackIndex = (command >> 16) & 0xff;
 		int useRtps;
 		int reuseFirstVertex;
 		u32 drawCommand;
