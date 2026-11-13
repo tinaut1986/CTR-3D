@@ -281,17 +281,12 @@ endif()
 
 # The clock item's full-screen feedback blur (game/Display.c DISPLAY_Blur_Main;
 # the intro flyby cutscenes drive the same call at full strength). It textures
-# a 50% quad from the previous presented frame every frame -- on the PC GL
-# renderer that reads back as retail; on the 3DS it is a framebuffer-sourced
-# quad per camera per frame with no cheap path (the semi-transparent view falls
-# to the mirror+decode route, and the fb-capture HOLD would freeze it), so the
-# 3DS build ships without it. The flat white clock flash and the item's
-# gameplay effect are unaffected. Source default lives in game/MAIN/MainFrame.c.
-if(NINTENDO_3DS)
-    set(CTR_NATIVE_FEEDBACK_BLUR_DEFAULT OFF)
-else()
-    set(CTR_NATIVE_FEEDBACK_BLUR_DEFAULT ON)
-endif()
+# a 50% quad from the previous presented frame every frame. The PC GL renderer
+# reads it back as retail; the 3DS renderer draws it from a GPU copy of the
+# previous frame (n3ds_backend.c "feedback blur"), with no CPU readback. Both
+# default ON; OFF compiles the call out (the flat white clock flash and the
+# item's gameplay effect stay). Source default lives in game/MAIN/MainFrame.c.
+set(CTR_NATIVE_FEEDBACK_BLUR_DEFAULT ON)
 option(CTR_NATIVE_FEEDBACK_BLUR
     "Retail full-screen feedback blur for the clock item / cutscene flybys"
     ${CTR_NATIVE_FEEDBACK_BLUR_DEFAULT})

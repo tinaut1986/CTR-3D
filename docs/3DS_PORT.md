@@ -84,9 +84,28 @@ renderer's per-pixel palette decode cannot be reproduced. The 3DS renderer
   orthographic window fitted to their bounds. In map mode a copy stays on the
   top screen as well. The frame-rate readout is drawn in the game's own font
   inside the same bracket.
-- **Not rendered.** The close-up "mosaic" texture tier, and retail's full-screen
-  feedback blur (the clock item's screen effect and the intro flyby's ghost
-  trail). Texture filtering is an option, off by default.
+- **Not rendered.** The close-up "mosaic" texture tier. Texture filtering is an
+  option, off by default.
+- **Feedback blur** (the clock item's screen effect, the intro flybys' ghost
+  trail). Retail draws the previously displayed frame back over the new one at
+  50%, slightly zoomed, as POLY_FT4 tiles at the head of the OT. The 3DS does it
+  on the GPU without a readback:
+  - `DISPLAY_Blur_Main` (`game/Display.c`) marks its tiles (`pad1`/`pad2` =
+    `NATIVE_FBBLUR_MARK1/2`, ignored by the PS1 GPU); the OT walk
+    (`platform/native_gpu.c`) hands marked tiles to
+    `NativeRenderer_FeedbackBlurTile`, which records them display-relative.
+  - The first tile sets the effect as wanted. At the next frame begin, before the
+    clears, `N3DS_FBBlurCopyPrevious` (`n3ds_backend.c`) queues one `GX_TextureCopy`
+    of the 240x400 RGBA8 render target into a 256x512 VRAM texture (375 KB,
+    VRAM to VRAM; a second one for the right eye in 3D). Frames without the
+    effect copy nothing.
+  - EndScene draws the tiles after the UI-last pass with an average blend,
+    sampling that copy; the right eye redraws them at the end of its replay.
+    The source rectangle maps to the rotated buffer as row = panel x,
+    column = 240 - panel y, T bottom-up.
+  - Cost on the 2DS (Crash Cove, clock hit): about 1-2 ms a frame while the
+    effect is on. dumpreq `fbblur 0/1` turns it off/on, `fbblurflip N` mirrors
+    rows (bit 0) or columns (bit 1) if a target ever disagrees.
 
 Rules the hardware enforces and emulators do not:
 
@@ -139,6 +158,14 @@ Rules the hardware enforces and emulators do not:
   OFF strips all of it from the binary and changes no default.
   Words added for the Old-3DS race work: `deepprof`, `sampler`, `xaprefetch`, `mdlfast`, `skyfast`, `trkraw`,
   `kartlod`, `cpulimit` (see "Race frame time" below).
+- DEBUG > ITEMS (OBJETOS): GIVE ME AN ITEM sets player 1's held item as a crate pickup would
+  (RANDOM spins the roulette; 10 WUMPA makes the next items juiced); HIT ME WITH applies a weapon's
+  effect on player 1's kart (bomb, missile, TNT, nitro, green/red potion, clock, warpball, squish,
+  burn, spin) without the weapon's projectile or explosion. Same over FTP: dumpreq `giveitem N` /
+  `hititem N`, N the 0-based list position (`include/platform/debug_items.h`). Applied by
+  `game/DebugItems.c` from the driver loop, during a race only; a request made in a menu, cutscene,
+  load or race end is dropped (kept while paused). Keeping it pending across a menu load
+  corrupted memory and crashed the next track select.
 - Bottom screen (`platform/n3ds/n3ds_bottomui.c`, always on, from the first
   frame): graphics mode, no libctru console on it. Tabs ESTADO / MAPA /
   OPCIONES / ACTUALIZADOR (English on non-Spanish consoles: STATUS / MAP /
@@ -494,5 +521,5 @@ OPTIONS > AUTO-HIDE HUD is on and the MAPA tab is up (otherwise the top keeps it
 | `CTR_INTERNAL` | ON (release: OFF) | The debug surface above |
 | `CTR_NATIVE_TRACK_RENDERER`, `CTR_NATIVE_MODEL_RENDERER`, `CTR_NATIVE_GTE_CAPTURE` | ON | The resident track and model paths and the sub-pixel capture table stereo is built on; the OFF legs do not link on 3DS |
 | `CTR_NATIVE_DIRECT_EMIT` | ON | Direct packet-to-bin emit for all-opaque ordering-table nodes |
-| `CTR_NATIVE_FEEDBACK_BLUR` | OFF | Retail's full-screen feedback blur; PC keeps it ON |
+| `CTR_NATIVE_FEEDBACK_BLUR` | ON | Retail's full-screen feedback blur (GPU copy on the 3DS, see "Renderer") |
 | `CTR_NATIVE_AUDIO_DECODE_PROFILE`, `CTR_NATIVE_DISC_IO_PROFILE`, `CTR_NATIVE_OTWALK_PROFILE`, `CTR_NATIVE_PRIMMEM_WATERMARK` | OFF | Counters and log lines for profiling builds |

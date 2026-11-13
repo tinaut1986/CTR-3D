@@ -326,4 +326,7 @@
 #include "233/R233.c"
 #include "233/D233.c"
 
+// Debug item tools (internal 3DS builds only; empty otherwise).
+#include "DebugItems.c"
+
 #endif
