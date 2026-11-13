@@ -336,14 +336,11 @@ void MainFrame_RenderFrame(struct GameTracker *gGT, struct GamepadSystem *gGamep
 
 	MAINFRAME_PERF_BEGIN(NATIVE_PERF_BUCKET_MAINFRAME_UI);
 	MAINFRAME_LOG_CHECKPOINT("UI");
-	if ((gGT->renderFlags & RENDER_FLAG_CHECKERED_FLAG) != 0)
-	{
-		RaceFlag_DrawSelf();
-	}
-
 #ifdef CTR_NATIVE
 	// 3DS FPS readout (OPTIONS: SHOW FPS), emitted every frame -- menus, loads, pauses, races -- on
 	// the top screen, top centre. The hook returns 0 on PC and whenever the option is off.
+	// It goes into the OT head (slot 0, walked last) before anything else is linked there, so it
+	// draws over every menu, the HUD and the checkered flag (which also links into slot 0).
 	{
 		extern int NativeUiMap_FpsOverlayText(char *buf, int bufSize);
 		char fpsStr[16];
@@ -352,10 +349,15 @@ void MainFrame_RenderFrame(struct GameTracker *gGT, struct GamepadSystem *gGamep
 		// race frame, readout included, so a live one doubled it.
 		if ((sdata->pause_state == 0) && NativeUiMap_FpsOverlayText(&fpsStr[0], (int)sizeof(fpsStr)))
 		{
-			DecalFont_DrawLine(&fpsStr[0], 226, 4, FONT_SMALL, WHITE);
+			DecalFont_DrawLineOT(&fpsStr[0], 226, 4, FONT_SMALL, WHITE, (uint32_t *)gGT->otSwapchainDB[gGT->swapchainIndex]);
 		}
 	}
 #endif
+
+	if ((gGT->renderFlags & RENDER_FLAG_CHECKERED_FLAG) != 0)
+	{
+		RaceFlag_DrawSelf();
+	}
 
 	RenderDispEnv_UI(gGT);
 	MAINFRAME_PERF_END(NATIVE_PERF_BUCKET_MAINFRAME_UI);
