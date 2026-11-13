@@ -5924,6 +5924,64 @@ internal int ProcessGouraudLines(P_TAG *polyTag)
 	return 0;
 }
 
+#if defined(__3DS__)
+/*
+ * REAL widescreen (dumpreq/OPTIONS wide mode 2) widens the ortho window past
+ * the 4:3 display rect by NativeWide_CullMarginX on each side, but the game
+ * sizes its full-view flat fills to the display rect: the white flash of a
+ * potion or TNT hit and other fades (PushBuffer_FadeOneWindow), the clock's
+ * flat flash (DISPLAY_Blur_Main, negative strength). Those then covered the
+ * 4:3 picture only. An axis-aligned flat quad that spans at least half the
+ * view both ways has every edge on the display boundary pushed out past the
+ * wide window edge (twice the margin, so a stereo eye shift never uncovers
+ * it; the overshoot is clipped). Smaller boxes (HUD, menus) are left alone.
+ */
+int NativeWide_CullMarginX(int rectW);
+
+internal void NativeWide_ExtendFlatFill(GrVertex *v)
+{
+	const int dispW = (activeDispEnv.disp.w > 0) ? activeDispEnv.disp.w : 512;
+	const int dispH = (activeDispEnv.disp.h > 0) ? activeDispEnv.disp.h : 216;
+	const float pad = (float)(2 * NativeWide_CullMarginX(dispW));
+	float minX = v[0].x, maxX = v[0].x, minY = v[0].y, maxY = v[0].y;
+	int i;
+
+	if (pad <= 0.0f)
+	{
+		return;
+	}
+	for (i = 1; i < 4; i++)
+	{
+		minX = (v[i].x < minX) ? v[i].x : minX;
+		maxX = (v[i].x > maxX) ? v[i].x : maxX;
+		minY = (v[i].y < minY) ? v[i].y : minY;
+		maxY = (v[i].y > maxY) ? v[i].y : maxY;
+	}
+	if (((maxX - minX) < (float)(dispW / 2)) || ((maxY - minY) < (float)(dispH / 2)))
+	{
+		return;
+	}
+	for (i = 0; i < 4; i++)
+	{
+		if (((v[i].x != minX) && (v[i].x != maxX)) || ((v[i].y != minY) && (v[i].y != maxY)))
+		{
+			return; /* not an axis-aligned rectangle */
+		}
+	}
+	for (i = 0; i < 4; i++)
+	{
+		if (v[i].x <= 0.0f)
+		{
+			v[i].x -= pad;
+		}
+		else if (v[i].x >= (float)dispW)
+		{
+			v[i].x += pad;
+		}
+	}
+}
+#endif
+
 internal int ProcessFlatPoly(P_TAG *polyTag)
 {
 	const bool shadeTexOn = (polyTag->code & 1) == 0;
@@ -5974,10 +6032,21 @@ internal int ProcessFlatPoly(P_TAG *polyTag)
 	{
 		POLY_F4 *poly = (POLY_F4 *)polyTag;
 
+#if defined(CTR_NATIVE) && CTR_NATIVE_GTE_CAPTURE
+		/* A player view's fade (PushBuffer_FadeOneWindow) rides the smoke
+		 * deferral: redrawn after the model pass so it covers the karts. */
+		if (NativeGpu_IsSmokePacket((uintptr_t)poly))
+		{
+			s_ngpuDeferSmokeNext = 1;
+		}
+#endif
 		AddSplit(semiTrans, false, false);
 
 		GrVertex *firstVertex = &s_gpu.vertexBuffer[s_gpu.vertexIndex];
 		MakeVertexQuad(firstVertex, &poly->x0, &poly->x1, &poly->x3, &poly->x2);
+#if defined(__3DS__)
+		NativeWide_ExtendFlatFill(firstVertex);
+#endif
 		MakeTexcoordQuadZero(firstVertex, 0);
 		MakeColourQuad(firstVertex, shadeTexOn, &poly->r0, &poly->r0, &poly->r0, &poly->r0);
 
