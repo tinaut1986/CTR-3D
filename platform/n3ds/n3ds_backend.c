@@ -1330,13 +1330,24 @@ int N3DS_CopyDisplayedTopFrame(unsigned char *dstRGB, int dstW, int dstH)
 			}
 			else if (((sx + popPx) < (contentX + contentW)) || (fbR == NULL))
 			{
-				const int lx = ((sx + popPx) < (contentX + contentW)) ? (sx + popPx) : (contentX + contentW - 1);
+				int lx = ((sx + popPx) < (contentX + contentW)) ? (sx + popPx) : (contentX + contentW - 1);
 
+				/* Past the edge window's strip (N3DS_StereoEdgeWindow), which is black. */
+				if (lx < (contentX + (2 * popPx)))
+				{
+					lx = contentX + (2 * popPx);
+				}
 				p = fb + (((lx * 240) + (239 - sy)) * 3);
 			}
 			else
 			{
-				p = fbR + ((((sx - popPx) * 240) + (239 - sy)) * 3);
+				int rx = sx - popPx;
+
+				if (rx > (contentX + contentW - 1 - (2 * popPx)))
+				{
+					rx = contentX + contentW - 1 - (2 * popPx);
+				}
+				p = fbR + (((rx * 240) + (239 - sy)) * 3);
 			}
 
 			dstRow[(x * 3) + 0] = p[2]; /* R */
@@ -3424,6 +3435,41 @@ static void N3DS_FBBlurDrawRightEye(void)
 	}
 }
 
+/*
+ * Stereo edge window. The UI pops out of the screen by s_uiPopPxFrame pixels per eye (right in the
+ * left eye, left in the right eye), so a menu or HUD piece that reaches the panel's edge lost that
+ * strip in one eye while the other still showed it: the 3D broke on it (the track list, the
+ * speedometer). Each eye now leaves undrawn the strip the other eye cannot show there -- the left eye
+ * its leftmost pixels, the right eye its rightmost -- so no edge strip is seen by one eye only: the
+ * film-style "floating window", the panel's edge read at the UI's depth. The strip keeps the clear
+ * colour (black). Costs that many pixels per side, in 3D only; mono and frames without the UI pop-out
+ * set no scissor.
+ */
+static void N3DS_StereoEdgeWindow(int eye)
+{
+	const int x0 = g_dbg_widescreen ? 0 : N3DS_TOP_CONTENT_X;
+	const int w = g_dbg_widescreen ? 400 : N3DS_TOP_CONTENT_W;
+	/* Twice the pop-out: the left eye shows the UI's edge column that far right of the panel edge and
+	 * the right eye that far left, so the strip one eye shows and the other does not is 2 x pop wide. */
+	const int pop = 2 * s_uiPopPxFrame;
+
+	if ((pop <= 0) || (pop >= (w / 4)))
+	{
+		C3D_SetScissor(GPU_SCISSOR_DISABLE, 0, 0, 0, 0);
+		return;
+	}
+	/* The target's long axis runs from the panel's RIGHT edge (y = 0) to its left: the left eye's
+	 * left strip is the top of the range (measured on hardware). */
+	if (eye == 0)
+	{
+		C3D_SetScissor(GPU_SCISSOR_NORMAL, 0, (u32)x0, 240, (u32)(x0 + w - pop));
+	}
+	else
+	{
+		C3D_SetScissor(GPU_SCISSOR_NORMAL, 0, (u32)(x0 + pop), 240, (u32)(x0 + w));
+	}
+}
+
 void N3DS_C3DBeginFrame(void)
 {
 	/* Latch the physical 3D slider for the whole frame BEFORE anything is
@@ -3515,6 +3561,7 @@ void N3DS_C3DBeginFrame(void)
 	 * centered 4:3 band, leaving the margins undimmed.
 	 */
 	C3D_SetViewport(0, g_dbg_widescreen ? 0 : N3DS_TOP_CONTENT_X, 240, g_dbg_widescreen ? 400 : N3DS_TOP_CONTENT_W);
+	N3DS_StereoEdgeWindow(0);
 
 	C3D_FVUnifMtx4x4(GPU_VERTEX_SHADER, s_uLocProjection, &s_projection);
 	/* Left eye's parallax (zero in mono) -- rides beside the projection for
@@ -5247,6 +5294,7 @@ int N3DS_BottomPass_Begin(void)
 	/* Viewport does not follow the framebuffer binding (same note as the right
 	 * eye); full 320x240 panel, stored sideways like every 3DS target. */
 	C3D_SetViewport(0, 0, 240, 320);
+	C3D_SetScissor(GPU_SCISSOR_DISABLE, 0, 0, 0, 0); /* the top eyes' edge window (N3DS_StereoEdgeWindow) */
 	if (g_dbg_depthTest == 1)
 	{
 		C3D_DepthTest(true, GPU_ALWAYS, GPU_WRITE_ALL);
@@ -5392,6 +5440,7 @@ void N3DS_StereoRenderRightEye(void)
 	/* Same pillarbox crop (or widescreen lift) as N3DS_C3DBeginFrame --
 	 * viewport state does not automatically follow the framebuffer binding. */
 	C3D_SetViewport(0, g_dbg_widescreen ? 0 : N3DS_TOP_CONTENT_X, 240, g_dbg_widescreen ? 400 : N3DS_TOP_CONTENT_W);
+	N3DS_StereoEdgeWindow(1);
 	/* Frame-wide depth pair, mirroring BeginFrame's policy exactly --
 	 * whatever state the left eye's last draw left behind is not it. */
 	if (g_dbg_depthTest == 1)
