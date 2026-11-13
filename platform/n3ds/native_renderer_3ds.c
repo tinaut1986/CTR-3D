@@ -251,7 +251,6 @@ typedef struct
 	/* (see N3DS_MergeEmit for the two globals and the state below) */
 	u8 doubling;  /* TEV color doubling to set for this draw */
 	u8 atlas;
-	u8 edgeClip;  /* ordered UI only: takes the UI pop-out, so the stereo edge window clips it */
 	int baseVertex; /* already appended to the frame VBO */
 	int vertCount;
 } N3DS_MergeSegment;
@@ -385,7 +384,6 @@ global_variable int s_uiOrdRunUsed = 0;
 global_variable int s_uiOrdRunBlend = -1;
 global_variable int s_uiOrdRunDoubling = -1;
 global_variable int s_uiOrdRunAtlas = -1;
-global_variable int s_uiOrdRunPop = -1; /* the open run's vertices take the UI pop-out (1) or not (0) */
 global_variable N3DS_MergeSegment s_uiOrdSegs[N3DS_UIORD_MAX_SEGS];
 global_variable int s_uiOrdSegCount = 0;
 /* Bisect instrument: screen-space bbox per segment (x0,y0,x1,y1), filled at
@@ -3143,7 +3141,6 @@ internal void N3DS_UiOrderCloseRun(void)
 		seg->blendMode = (u8)s_uiOrdRunBlend;
 		seg->doubling = (u8)s_uiOrdRunDoubling;
 		seg->atlas = (u8)s_uiOrdRunAtlas;
-		seg->edgeClip = (u8)(s_uiOrdRunPop > 0);
 		seg->baseVertex = baseVertex;
 		seg->vertCount = s_uiOrdRunUsed;
 
@@ -3178,21 +3175,17 @@ internal void N3DS_UiOrderCloseRun(void)
  * fast path -- during the OT walk, so appends arrive in parse order and the list
  * IS submission order.
  */
-internal N3DS_Vertex *N3DS_UiOrderAppend(int blendMode, int doubling, int atlas, int pop)
+internal N3DS_Vertex *N3DS_UiOrderAppend(int blendMode, int doubling, int atlas)
 {
 	N3DS_Vertex *dst;
 
-	/* pop: the triangle takes the UI pop-out. Runs split on it so the stereo edge window
-	 * (N3DS_StereoUiEdgeClip) clips only what pops out -- never the pause background's tiles, which
-	 * sit at screen depth (native_gpu.c, s_ngpuPauseTileNext). */
-	if ((atlas != s_uiOrdRunAtlas) || (blendMode != s_uiOrdRunBlend) || (doubling != s_uiOrdRunDoubling) || (pop != s_uiOrdRunPop) ||
+	if ((atlas != s_uiOrdRunAtlas) || (blendMode != s_uiOrdRunBlend) || (doubling != s_uiOrdRunDoubling) ||
 	    ((s_uiOrdRunUsed + 3) > N3DS_UIORD_RUN_CAP))
 	{
 		N3DS_UiOrderCloseRun();
 		s_uiOrdRunBlend = blendMode;
 		s_uiOrdRunDoubling = doubling;
 		s_uiOrdRunAtlas = atlas;
-		s_uiOrdRunPop = pop;
 	}
 	if ((s_uiOrdRunUsed + 3) > N3DS_UIORD_RUN_CAP)
 	{
@@ -3747,7 +3740,6 @@ int g_dbg_uiDump = 0;
 internal void N3DS_DrawUiPass(void)
 {
 	int lastDoubling = -1;
-	int clip = 0;
 	int i;
 
 	N3DS_UiOrderCloseRun(); /* the frame's last run is still open */
@@ -3793,16 +3785,7 @@ internal void N3DS_DrawUiPass(void)
 	{
 		const N3DS_MergeSegment *seg = &s_uiOrdSegs[i];
 
-		if ((int)seg->edgeClip != clip)
-		{
-			clip = (int)seg->edgeClip;
-			N3DS_StereoUiEdgeClip(clip);
-		}
 		N3DS_MergeEmit((int)seg->blendMode, (int)seg->doubling, (int)seg->atlas, seg->baseVertex, seg->vertCount, &lastDoubling);
-	}
-	if (clip)
-	{
-		N3DS_StereoUiEdgeClip(0);
 	}
 	s_uiOrdSegCount = 0;
 	s_uiOrdPrims = 0;
@@ -5022,7 +5005,6 @@ void NativeRenderer_BeginScene(void)
 	s_uiOrdRunAtlas = -1;
 	s_uiOrdRunBlend = -1;
 	s_uiOrdRunDoubling = -1;
-	s_uiOrdRunPop = -1;
 	s_uiOrdPrims = 0;
 }
 
@@ -7255,7 +7237,7 @@ void NativeRenderer_DrawTriangles(int startVertex, int triangles)
 				}
 				else
 				{
-					uiDst = N3DS_UiOrderAppend(s_currentBlendMode, untextured ? 0 : 1, atlasIdx, (triVerts[0].parallaxOrdinal >= 0xFFC0u) ? 1 : 0);
+					uiDst = N3DS_UiOrderAppend(s_currentBlendMode, untextured ? 0 : 1, atlasIdx);
 				}
 
 				if (uiDst != NULL)
@@ -7308,7 +7290,7 @@ void NativeRenderer_DrawTriangles(int startVertex, int triangles)
 				    (triVerts[0].emitOrdinal != (PKTDEPTH_UI_STAMP_BTMHUD_BASE + N3DS_BTMH_G_LISTBAR)) &&
 				    !N3DS_BottomUi_HudBelowWanted())
 				{
-					N3DS_Vertex *topDst = N3DS_UiOrderAppend(s_currentBlendMode, untextured ? 0 : 1, atlasIdx, 1);
+					N3DS_Vertex *topDst = N3DS_UiOrderAppend(s_currentBlendMode, untextured ? 0 : 1, atlasIdx);
 
 					if (topDst != NULL)
 					{
@@ -7326,7 +7308,7 @@ void NativeRenderer_DrawTriangles(int startVertex, int triangles)
 				if (g_dbg_btmMap && g_dbg_mapBoth && (triVerts[0].emitOrdinal == PKTDEPTH_UI_STAMP_BTMMAP) &&
 				    ((g_dbg_mapBoth >= 2) || NativeGpu_UiMapRetailTop()))
 				{
-					N3DS_Vertex *topDst = N3DS_UiOrderAppend(s_currentBlendMode, untextured ? 0 : 1, atlasIdx, 1);
+					N3DS_Vertex *topDst = N3DS_UiOrderAppend(s_currentBlendMode, untextured ? 0 : 1, atlasIdx);
 
 					s_mbTopCopyTris++;
 					if (topDst != NULL)

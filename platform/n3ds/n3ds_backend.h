@@ -199,7 +199,6 @@ void N3DS_LogAsyncStats(int *async, unsigned *syncDrains, unsigned *syncWorstUs)
  * persist to frame end, so the replay samples this frame's own pixels).
  */
 void N3DS_StereoRecordPacket(int blendMode, int doubling, int depthWrite, int atlas, int baseVertex, int vertCount);
-void N3DS_StereoUiEdgeClip(int on);
 void N3DS_StereoRecordVram(int slot, int baseVertex);
 void N3DS_StereoRenderRightEye(void);
 /* Max far-plane parallax in PSX px, rounded up (0 when stereo is
