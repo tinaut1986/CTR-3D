@@ -71,6 +71,13 @@ renderer's per-pixel palette decode cannot be reproduced. The 3DS renderer
 - **Widescreen.** The top screen renders a wider field of view. Widening the
   orthographic window the game projects through is widening the field of view;
   the HUD ramps out to the new edges.
+  - Full-view flat fills (a hit's white flash and other per-view fades from
+    `PushBuffer_FadeOneWindow`, the clock's flat flash) are sized to the 4:3
+    display rect by the game. The OT walk pushes any axis-aligned `POLY_F4` that
+    spans at least half the view out past the wide window
+    (`NativeWide_ExtendFlatFill`, `platform/native_gpu.c`). A per-view fade is
+    also marked paint-on-top and rides the smoke deferral, so it is redrawn after
+    the model pass and covers the karts.
 - **Stereoscopic 3D.** The frame's draw commands are journaled and the right eye
   replays the journal through a second projection. The slider sets the
   separation frame by frame; the UI sits on the screen plane with a small
