@@ -78,6 +78,17 @@ renderer's per-pixel palette decode cannot be reproduced. The 3DS renderer
     (`NativeWide_ExtendFlatFill`, `platform/native_gpu.c`). A per-view fade is
     also marked paint-on-top and rides the smoke deferral, so it is redrawn after
     the model pass and covers the karts.
+  - The pause background (`ElimBG`) is a screenshot of the last frame drawn as
+    POLY_FT4 tiles in the UI band. Its tiles are marked (`pad1`/`pad2` =
+    `NATIVE_PAUSEBG_MARK1/2`) and the OT walk places each X so that the UI ramp
+    lands the picture linearly on the wide window (`NativeWide_UiShiftInverseX`).
+    In 3D, the copy (`N3DS_CopyDisplayedTopFrame`) undoes the left eye's UI
+    pop-out, taking the right edge from the right eye. The tiles get the
+    screen-plane parallax (`N3DS_StereoScreenParallaxStamp`), so the frozen HUD
+    sits flat where the mono HUD was, uncut in both eyes; the renderer's edge
+    push (`N3DS_UiEdgeExtend`) is only for vertices that take the UI pop-out.
+    The live frame-rate readout is hidden while the screenshot shows (it holds
+    its own).
 - **Stereoscopic 3D.** The frame's draw commands are journaled and the right eye
   replays the journal through a second projection. The slider sets the
   separation frame by frame; the UI sits on the screen plane with a small

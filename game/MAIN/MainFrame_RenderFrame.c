@@ -348,7 +348,9 @@ void MainFrame_RenderFrame(struct GameTracker *gGT, struct GamepadSystem *gGamep
 		extern int NativeUiMap_FpsOverlayText(char *buf, int bufSize);
 		char fpsStr[16];
 
-		if (NativeUiMap_FpsOverlayText(&fpsStr[0], (int)sizeof(fpsStr)))
+		// Not over the pause screenshot (ElimBG): it is a copy of the last
+		// race frame, readout included, so a live one doubled it.
+		if ((sdata->pause_state == 0) && NativeUiMap_FpsOverlayText(&fpsStr[0], (int)sizeof(fpsStr)))
 		{
 			DecalFont_DrawLine(&fpsStr[0], 226, 4, FONT_SMALL, WHITE);
 		}
