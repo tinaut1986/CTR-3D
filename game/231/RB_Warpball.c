@@ -60,7 +60,15 @@ void RB_Warpball_Death(struct Thread *t)
 	struct TrackerWeapon *tw;
 
 	tw = t->object;
-	tw->ptrParticle->framesLeftInLife = 0;
+#ifdef CTR_NATIVE
+	// Particle_Init returns NULL when the particle pool is full (VehPickupItem_ShootNow
+	// stores it as is). Retail then wrote to PS1 address 0x10 harmlessly; natively it
+	// is a data abort (hit on hardware when a warpball died).
+	if (tw->ptrParticle != NULL)
+#endif
+	{
+		tw->ptrParticle->framesLeftInLife = 0;
+	}
 	tw->fadeFrame = 0;
 
 	// play sound of warpball death
