@@ -85,7 +85,6 @@ Everything here is on by default unless it says otherwise. The toggles are the O
 - **A boost-reserves meter** next to the power-slide meter, following the community ReservesMeter mod's design. Toggle.
 - **Texture filtering.** Toggle, off by default.
 - **Ice reflections no longer merge each kart's mirrored wheel pairs onto its centreline.** That is a bug in the shipped PS1 game.
-- **The full-screen feedback blur** used by the clock item and the intro flyby's ghost trail is removed. The clock's flash and slowdown remain.
 - **The close-up "mosaic" texture tier is not rendered.** Near surfaces use the standard texture.
 - **The Spyro 2 demo cheat code does something else now**, since a native build cannot launch the demo off the disc. One new cheat code has been added.
 - **VS and Battle modes** are not offered.

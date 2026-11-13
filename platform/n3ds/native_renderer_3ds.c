@@ -1013,6 +1013,10 @@ typedef struct
 } N3DS_FBStoreSlot;
 
 global_variable N3DS_FBStoreSlot s_fbStore[2];
+/* Clock-blur tiles of this frame's walk (NativeRenderer_FeedbackBlurTile). */
+#define N3DS_FBBLUR_TILE_MAX 16
+global_variable float s_fbBlurTileData[N3DS_FBBLUR_TILE_MAX * 8];
+global_variable int s_fbBlurTileCount = 0;
 /* Which slot the most recent arm landed in; a new, third distinct rect
  * evicts the OTHER (older) slot. */
 global_variable int s_fbStoreLastArmed = 0;
@@ -5189,6 +5193,16 @@ void NativeRenderer_EndScene(void)
 		endProfT = N3DS_EndProfMark(N3DS_ENDPROF_UI, endProfT);
 	}
 
+	/* Clock-item feedback blur, over everything like retail's (its tiles sit
+	 * at the head of the frame's OT, the last thing the PS1 draws). */
+	if (s_fbBlurTileCount > 0)
+	{
+		N3DS_MergeFlush();
+		N3DS_C3DFeedbackBlurDraw(s_fbBlurTileData, s_fbBlurTileCount);
+		s_runUntextured = -1;
+		s_fbBlurTileCount = 0;
+	}
+
 #ifdef CTR_INTERNAL
 	/*
 	 * Atlas inspector (dumpreq 'atlasview'): draw atlas
@@ -6328,6 +6342,50 @@ void NativeRenderer_SwapWindow(void)
 	NativePerf_EndScope(NATIVE_PERF_BUCKET_N3DS_GFX_PRESENT);
 
 	NativePerf_EndScope(NATIVE_PERF_BUCKET_SWAP_WINDOW);
+}
+
+/*
+ * Clock-item feedback blur tiles met by this frame's walk (the effect itself:
+ * n3ds_backend.c, "feedback blur"). Walk thread only: recorded during the walk,
+ * drawn and cleared by EndScene on the same thread. The source rect is made
+ * display-relative against the armed display buffer that holds it: the game
+ * samples the buffer last presented, which is what the GPU copy holds.
+ */
+
+void NativeRenderer_FeedbackBlurTile(float dstX0, float dstY0, float dstX1, float dstY1, int srcX0, int srcY0, int srcX1, int srcY1)
+{
+	extern int g_dbg_fbBlur;
+	int i;
+
+	if (!g_dbg_fbBlur)
+	{
+		return;
+	}
+	N3DS_FBBlurNoteWanted();
+	if (s_fbBlurTileCount >= N3DS_FBBLUR_TILE_MAX)
+	{
+		return;
+	}
+	for (i = 0; i < 2; i++)
+	{
+		const N3DS_FBStoreSlot *slot = &s_fbStore[i];
+
+		if ((slot->w > 0) && (srcX0 >= slot->x) && (srcX1 <= (slot->x + slot->w)) && (srcY0 >= slot->y) && (srcY1 <= (slot->y + slot->h)))
+		{
+			float *t = &s_fbBlurTileData[s_fbBlurTileCount * 8];
+
+			t[0] = dstX0;
+			t[1] = dstY0;
+			t[2] = dstX1;
+			t[3] = dstY1;
+			t[4] = (float)(srcX0 - slot->x);
+			t[5] = (float)(srcY0 - slot->y);
+			t[6] = (float)(srcX1 - slot->x);
+			t[7] = (float)(srcY1 - slot->y);
+			s_fbBlurTileCount++;
+			return;
+		}
+	}
 }
 
 void NativeRenderer_StoreFrameBuffer(int x, int y, int w, int h)

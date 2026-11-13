@@ -5991,6 +5991,24 @@ internal int ProcessFlatPoly(P_TAG *polyTag)
 		POLY_FT4 *poly = (POLY_FT4 *)polyTag;
 		activeDrawEnv.tpage = poly->tpage;
 
+#if defined(__3DS__)
+		/* Clock-item feedback blur tile (game/Display.c marks them): the 3DS
+		 * renderer draws it from a GPU copy of the previous frame, so it
+		 * never enters the split/texture-resolve machinery. Axis-aligned by
+		 * construction: corner 0 is top-left, corner 3 bottom-right. */
+		if ((poly->pad1 == NATIVE_FBBLUR_MARK1) && (poly->pad2 == NATIVE_FBBLUR_MARK2))
+		{
+			const int pageX = (poly->tpage & 0xF) * 64;
+			const int pageY = (poly->tpage & 0x10) ? 256 : 0;
+			float ofsX, ofsY;
+
+			DrawEnvOffset(&ofsX, &ofsY);
+			NativeRenderer_FeedbackBlurTile(poly->x0 + ofsX, poly->y0 + ofsY, poly->x3 + ofsX, poly->y3 + ofsY, pageX + poly->u0, pageY + poly->v0,
+			                                pageX + poly->u3, pageY + poly->v3);
+			return 9;
+		}
+#endif
+
 #if defined(CTR_NATIVE) && defined(CTR_NATIVE_BAKE_PARITY) && CTR_NATIVE_BAKE_PARITY
 		BakeParity_NotePolyFT4(poly);
 #endif

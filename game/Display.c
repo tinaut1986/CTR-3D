@@ -1,4 +1,7 @@
 #include <common.h>
+#if defined(CTR_NATIVE) && defined(__3DS__)
+#include <platform/native_renderer.h>
+#endif
 
 // NOTE(aalhendi): ASM-verified NTSC-U 926 0x80023a40-0x80023d4c
 u32 *DISPLAY_Blur_SubFunc(u32 *prim, struct DisplayBlurTile *tile)
@@ -178,6 +181,21 @@ void DISPLAY_Blur_Main(struct PushBuffer *pb, int strength)
 
 		nextPrim = DISPLAY_Blur_SubFunc(prim, tile);
 		((POLY_FT4 *)nextPrim - 1)->tag = CtrGpu_PackOTTag(oldTag, 0x09000000);
+
+#if defined(CTR_NATIVE) && defined(__3DS__)
+		// 3DS: mark the tiles for the renderer's GPU-side feedback path (see
+		// NATIVE_FBBLUR_MARK1 in platform/native_renderer.h). pad1/pad2 are
+		// ignored by the PS1 GPU, so the packets are unchanged otherwise.
+		{
+			POLY_FT4 *mark;
+
+			for (mark = (POLY_FT4 *)prim; mark < (POLY_FT4 *)nextPrim; mark++)
+			{
+				mark->pad1 = NATIVE_FBBLUR_MARK1;
+				mark->pad2 = NATIVE_FBBLUR_MARK2;
+			}
+		}
+#endif
 	}
 
 	backBuffer->primMem.cursor = nextPrim;

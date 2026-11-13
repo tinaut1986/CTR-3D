@@ -435,6 +435,14 @@ void N3DS_C3DSetDepthWrite(int enable);
 void N3DS_C3DUploadVramDisplayChunk(int slotIndex, const void *tiled256);
 void N3DS_C3DBindVramDisplayTex(int slotIndex);
 
+/* Clock-item feedback blur (n3ds_backend.c, "feedback blur"): the walk calls
+ * NoteWanted when it meets the effect's tiles, which makes the next frame
+ * begin copy the presented frame on the GPU; Draw then draws this frame's
+ * tiles from that copy (count x 8 floats: dst x0,y0,x1,y1 then src x0,y0,x1,y1,
+ * display-relative PSX coordinates). The right eye follows on its own. */
+void N3DS_FBBlurNoteWanted(void);
+void N3DS_C3DFeedbackBlurDraw(const float *tiles, int count);
+
 /* -------------------------------------------------- native track atlas --- */
 /* Dedicated pool for the native track renderer's atlas layout
  * (platform/native_track_mesh.c). Separate from the decode-cache atlases above --

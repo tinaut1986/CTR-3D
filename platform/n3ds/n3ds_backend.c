@@ -1344,6 +1344,8 @@ int g_dbg_uiPopPx = 4;
 static float s_uiPsxPerPx = 1.6f; /* game units per panel pixel across the top screen, from the projection */
 static float s_uiShiftPsx = 0.0f; /* this frame's UI shift per eye, game units (0 in mono) */
 static float s_uiWinL = 0.0f, s_uiWinR = 512.0f; /* the top screen's X window in game units (N3DS_C3DSetProjection) */
+/* The projection's bottom edge and its unextended right edge (the display width). */
+static float s_projWinB = 216.0f, s_projDispW = 512.0f;
 
 /* A UI quad that reaches the edge of the window (letterbox bars, full-width backdrops) would show a gap
  * the width of the eye's parallax on one side; push its edge vertices out by the shift (plus a margin) so
@@ -2154,6 +2156,8 @@ int g_dbg_rosaFix = 0;
 
 void N3DS_C3DSetProjection(float left, float right, float bottom)
 {
+	s_projWinB = bottom;
+	s_projDispW = right;
 	if (g_dbg_widescreen == 2)
 	{
 		/* REAL widescreen: grow the window by exactly the viewport's
@@ -3104,6 +3108,269 @@ void N3DS_C3DNoteDrawOutsideFrame(const char *site)
 	}
 }
 
+/* ------------------------------------------------ feedback blur (clock) --- */
+/*
+ * The clock item's screen blur (game/Display.c DISPLAY_Blur_Main) draws the
+ * previous presented frame back over the new one, slightly zoomed and at 50%,
+ * every frame the effect is live; the intro flybys drive the same call. On PS1
+ * that is a VRAM-to-VRAM textured quad. Here the previous frame still sits in
+ * the render target's colour buffer when the next frame begins, so
+ * N3DS_FBBlurCopyPrevious queues one GPU texture copy of it (VRAM to VRAM, 375
+ * KB) ahead of the clear, and N3DS_C3DFeedbackBlurDraw draws the game's tiles
+ * from that copy. No CPU readback, no decode, nothing at all on the frames the
+ * effect is off. The walk marks the effect as wanted (N3DS_FBBlurNoteWanted);
+ * the copy follows at the next frame begin, so the effect's first frame draws
+ * nothing, which is what retail does too (blurCameraMask).
+ *
+ * Layout: the colour buffer is 240x400 RGBA8 in PICA tiles, rotated (its rows
+ * are screen columns). The copy keeps the bytes and pads each 8-row tile row
+ * from 240 to 256 texels, so the texture (256x512, same format) holds memory
+ * row a = screen x, column c = 239 - screen y. PICA's T axis is bottom-up
+ * (see the atlas V flip in native_renderer_3ds.c), so t = 1 - a/512 and
+ * s = c/256. dumpreq `fbblurflip N` mirrors either axis if hardware disagrees
+ * (bit 0: rows, bit 1: columns); `fbblur 0` drops the effect (the old build).
+ */
+#define N3DS_FBBLUR_TEX_W 256
+#define N3DS_FBBLUR_TEX_H 512
+#define N3DS_FBBLUR_MAX_TILES 16
+
+int g_dbg_fbBlur = 1;
+/* Debug ITEMS page / dumpreq giveitem, hititem (include/platform/debug_items.h). */
+int g_dbg_giveItem = -1;
+int g_dbg_hitItem = -1;
+int g_dbg_fbBlurFlip = 0;
+static C3D_Tex s_fbBlurTex[2];
+static int s_fbBlurTexState = 0; /* 0 not allocated yet, 1 ready, -1 refused */
+static int s_fbBlurHasRight = 0;
+static int s_fbBlurWant = 0;     /* frames left to copy at frame begin */
+static int s_fbBlurCopied = 0;   /* bit 0: left copy queued this frame, bit 1: right */
+static int s_fbBlurLastStereo = 0;
+static int s_fbBlurBase = -1;    /* this frame's tile vertices, for the right eye */
+static int s_fbBlurVerts = 0;
+static unsigned s_fbBlurFrames = 0;
+
+void N3DS_FBBlurNoteWanted(void)
+{
+	s_fbBlurWant = 2;
+}
+
+static int N3DS_FBBlurAlloc(void)
+{
+	int i;
+
+	if (s_fbBlurTexState != 0)
+	{
+		return s_fbBlurTexState > 0;
+	}
+	s_fbBlurTexState = -1;
+	s_fbBlurHasRight = (s_renderTargetRight != NULL) ? 1 : 0;
+	for (i = 0; i < (1 + s_fbBlurHasRight); i++)
+	{
+		if (!C3D_TexInitVRAM(&s_fbBlurTex[i], N3DS_FBBLUR_TEX_W, N3DS_FBBLUR_TEX_H, GPU_RGBA8))
+		{
+			if (i == 0)
+			{
+				N3DS_DebugLog("[CTR-3DS] fbblur: no VRAM for the copy, effect off");
+				return 0;
+			}
+			s_fbBlurHasRight = 0; /* the right eye then reuses the left copy */
+			break;
+		}
+		C3D_TexSetFilter(&s_fbBlurTex[i], GPU_LINEAR, GPU_LINEAR);
+		C3D_TexSetWrap(&s_fbBlurTex[i], GPU_CLAMP_TO_EDGE, GPU_CLAMP_TO_EDGE);
+	}
+	s_fbBlurTexState = 1;
+	N3DS_DebugLog(s_fbBlurHasRight ? "[CTR-3DS] fbblur: copy textures ready (2 x 512 KB VRAM)" : "[CTR-3DS] fbblur: copy texture ready (512 KB VRAM)");
+	return 1;
+}
+
+static void N3DS_FBBlurCopyTarget(C3D_RenderTarget *target, C3D_Tex *tex)
+{
+	/* One tile row: 240/8 tiles x 256 bytes in, the same plus a 2-tile gap
+	 * out. GX_BUFFER_DIM takes 16-byte units for TextureCopy. Queued on
+	 * citro3d's GX queue like the clears that follow it, so it runs after the
+	 * previous frame's transfer and before this frame's clear. */
+	const u32 lineBytes = (240u / 8u) * 256u;
+	const u32 gapBytes = ((N3DS_FBBLUR_TEX_W - 240u) / 8u) * 256u;
+
+	GX_TextureCopy((u32 *)target->frameBuf.colorBuf, GX_BUFFER_DIM(lineBytes >> 4, 0), (u32 *)tex->data, GX_BUFFER_DIM(lineBytes >> 4, gapBytes >> 4),
+	               lineBytes * (400u / 8u), GX_TRANSFER_RAW_COPY(1));
+}
+
+/* Frame begin, before the clears (N3DS_C3DBeginFrame). */
+static void N3DS_FBBlurCopyPrevious(void)
+{
+	const int lastStereo = s_fbBlurLastStereo;
+
+	s_fbBlurCopied = 0;
+	s_fbBlurBase = -1;
+	s_fbBlurVerts = 0;
+	s_fbBlurLastStereo = s_stereoFrameActive;
+	if ((s_fbBlurWant <= 0) || !g_dbg_fbBlur)
+	{
+		return;
+	}
+	s_fbBlurWant--;
+	if (!N3DS_FBBlurAlloc())
+	{
+		return;
+	}
+	N3DS_FBBlurCopyTarget(s_renderTarget, &s_fbBlurTex[0]);
+	s_fbBlurCopied = 1;
+	/* The right target holds last frame's right eye only if last frame was
+	 * stereo too; otherwise that eye samples the left copy. */
+	if (s_stereoFrameActive && lastStereo && s_fbBlurHasRight && (s_renderTargetRight != NULL))
+	{
+		N3DS_FBBlurCopyTarget(s_renderTargetRight, &s_fbBlurTex[1]);
+		s_fbBlurCopied |= 2;
+	}
+}
+
+/* PSX display coordinates -> texture numerators (the shader divides by 2048).
+ * The window is the projection's (N3DS_C3DSetProjection keeps it). */
+static void N3DS_FBBlurTexcoord(float px, float py, s16 *u, s16 *v)
+{
+	const float vpX = g_dbg_widescreen ? 0.0f : (float)N3DS_TOP_CONTENT_X;
+	const float vpW = g_dbg_widescreen ? 400.0f : (float)N3DS_TOP_CONTENT_W;
+	float a = vpX + (((px - s_uiWinL) * vpW) / (s_uiWinR - s_uiWinL)); /* panel x = colour-buffer row */
+	float c = 240.0f - ((py * 240.0f) / s_projWinB);                   /* 240 - panel y = column */
+
+	if (g_dbg_fbBlurFlip & 1)
+	{
+		a = 400.0f - a;
+	}
+	if (g_dbg_fbBlurFlip & 2)
+	{
+		c = 240.0f - c;
+	}
+	*u = (s16)(c * (2048.0f / (float)N3DS_FBBLUR_TEX_W));
+	*v = (s16)(2048.0f - (a * (2048.0f / (float)N3DS_FBBLUR_TEX_H)));
+}
+
+static void N3DS_FBBlurBindDraw(int eye)
+{
+	/* Packet program, layout and combiner: the right eye's replay can end
+	 * inside a track/model bracket. */
+	N3DS_BindPacketDrawState();
+	C3D_TexBind(0, &s_fbBlurTex[((eye == 1) && (s_fbBlurCopied & 2)) ? 1 : 0]);
+	N3DS_C3DSetColorDoubling(0);
+	N3DS_C3DSetBlendMode(1); /* 0.5 * dst + 0.5 * src, PS1 TRANS_50 */
+	/* Zero parallax: each eye samples its own previous picture at the same
+	 * panel position, so the ghost keeps that eye's parallax by itself. */
+	if (s_uLocStereo >= 0)
+	{
+		C3D_FVUnifSet(GPU_VERTEX_SHADER, s_uLocStereo, 0.0f, 0.0f, 0.0f, 0.0f);
+	}
+	if (s_uLocStereoUi >= 0)
+	{
+		C3D_FVUnifSet(GPU_VERTEX_SHADER, s_uLocStereoUi, 0.0f, 0.0f, 0.0f, 0.0f);
+	}
+	C3D_DrawArrays(GPU_TRIANGLES, s_fbBlurBase, s_fbBlurVerts);
+	N3DS_StereoUploadUniform(s_uLocStereo, (const float(*)[4])s_stereoVecPkt);
+	N3DS_StereoUploadUniform(s_uLocStereoUi, (const float(*)[4])s_stereoVecUi);
+}
+
+/* tiles: count x {dstX0, dstY0, dstX1, dstY1, srcX0, srcY0, srcX1, srcY1},
+ * all in display-relative PSX coordinates. Left eye; the right eye redraws
+ * the same vertices at the end of N3DS_StereoRenderRightEye. */
+void N3DS_C3DFeedbackBlurDraw(const float *tiles, int count)
+{
+	N3DS_Vertex verts[N3DS_FBBLUR_MAX_TILES * 6];
+	int t, n = 0;
+
+	if (!s_frameOpen || !(s_fbBlurCopied & 1) || (count <= 0))
+	{
+		return;
+	}
+	if (count > N3DS_FBBLUR_MAX_TILES)
+	{
+		count = N3DS_FBBLUR_MAX_TILES;
+	}
+
+	for (t = 0; t < count; t++)
+	{
+		const float *tile = tiles + (t * 8);
+		float dx0 = tile[0], dy0 = tile[1], dx1 = tile[2], dy1 = tile[3];
+		float sx0 = tile[4], sy0 = tile[5], sx1 = tile[6], sy1 = tile[7];
+		s16 u0, v0, u1, v1;
+		int i;
+
+		if ((dx1 <= dx0) || (dy1 <= dy0))
+		{
+			continue;
+		}
+		/* REAL widescreen: a tile on the display's edge reaches the panel's
+		 * edge (the game knows only the 4:3 rect), its source following at
+		 * the tile's own scale. */
+		if (s_uiWinL < 0.0f)
+		{
+			const float k = (sx1 - sx0) / (dx1 - dx0);
+
+			if (dx0 <= 0.5f)
+			{
+				sx0 -= (dx0 - s_uiWinL) * k;
+				dx0 = s_uiWinL;
+			}
+			if (dx1 >= (s_projDispW - 0.5f))
+			{
+				sx1 += (s_uiWinR - dx1) * k;
+				dx1 = s_uiWinR;
+			}
+		}
+		N3DS_FBBlurTexcoord(sx0, sy0, &u0, &v0);
+		N3DS_FBBlurTexcoord(sx1, sy1, &u1, &v1);
+
+		/* Two triangles; each corner's texcoord is mapped on its own, which
+		 * swaps the axes for the rotated buffer: screen x moves v, y moves u. */
+		verts[n + 0].x = (s16)dx0; verts[n + 0].y = (s16)dy0; verts[n + 0].u = u0; verts[n + 0].v = v0;
+		verts[n + 1].x = (s16)dx0; verts[n + 1].y = (s16)dy1; verts[n + 1].u = u1; verts[n + 1].v = v0;
+		verts[n + 2].x = (s16)dx1; verts[n + 2].y = (s16)dy1; verts[n + 2].u = u1; verts[n + 2].v = v1;
+		verts[n + 3] = verts[n + 0];
+		verts[n + 4] = verts[n + 2];
+		verts[n + 5].x = (s16)dx1; verts[n + 5].y = (s16)dy0; verts[n + 5].u = u0; verts[n + 5].v = v1;
+		for (i = 0; i < 6; i++)
+		{
+			verts[n + i].z = N3DS_DEPTH_TOPMOST;
+			verts[n + i].w = N3DS_DEPTH_TOPMOST;
+			verts[n + i].r = 255;
+			verts[n + i].g = 255;
+			verts[n + i].b = 255;
+			verts[n + i]._pad = 0;
+		}
+		n += 6;
+	}
+	if (n == 0)
+	{
+		return;
+	}
+
+	s_fbBlurBase = N3DS_C3DAppendVertices(verts, n);
+	if (s_fbBlurBase < 0)
+	{
+		return;
+	}
+	s_fbBlurVerts = n;
+	N3DS_FBBlurBindDraw(0);
+
+	if ((s_fbBlurFrames++ & 255u) == 0u)
+	{
+		char msg[112];
+
+		snprintf(msg, sizeof(msg), "[CTR-3DS] fbblur: frame %u tiles=%d src0=%d,%d..%d,%d stereoCopy=%d", s_fbBlurFrames, count, (int)tiles[4], (int)tiles[5],
+		         (int)tiles[6], (int)tiles[7], (s_fbBlurCopied & 2) ? 1 : 0);
+		N3DS_DebugLog(msg);
+	}
+}
+
+/* Right eye, after the journal replay (N3DS_StereoRenderRightEye). */
+static void N3DS_FBBlurDrawRightEye(void)
+{
+	if ((s_fbBlurBase >= 0) && (s_fbBlurVerts > 0))
+	{
+		N3DS_FBBlurBindDraw(1);
+	}
+}
+
 void N3DS_C3DBeginFrame(void)
 {
 	/* Latch the physical 3D slider for the whole frame BEFORE anything is
@@ -3124,6 +3391,9 @@ void N3DS_C3DBeginFrame(void)
 	}
 	N3DS_FrameTrace("[CTR-3DS] FrameBegin: returned");
 	s_frameOpen = 1;
+	/* Before the clears: the colour buffer still holds the frame just
+	 * presented, which the clock blur draws back (see above). */
+	N3DS_FBBlurCopyPrevious();
 	/* Depth clears to FAR. Mtx_OrthoTilt maps LARGER vertex z to SMALLER
 	 * stored depth (verified empirically, see below), so far = max. */
 	C3D_RenderTargetClear(s_renderTarget, C3D_CLEAR_ALL, 0x000000FF, 0x00FFFFFF);
@@ -5211,6 +5481,10 @@ void N3DS_StereoRenderRightEye(void)
 		}
 	}
 
+	/* The clock blur over the right eye too (not journaled: it is drawn
+	 * after the left eye's UI pass, outside the merge). */
+	N3DS_FBBlurDrawRightEye();
+
 	/* s_stereoEye stays 1 until the next frame's latch resets it -- nothing
 	 * else draws between here and N3DS_C3DEndFrame. */
 	s_rightEyeLastTicks = (unsigned long long)svcGetSystemTick() - rightT0;
@@ -5829,6 +6103,50 @@ unsigned int N3DS_ReadButtons(void)
 					g_dbg_fastPresent ^= 1;
 					N3DS_DebugLog(g_dbg_fastPresent ? "[CTR-3DS] fastpresent: ON (flush bottom framebuffer only)"
 					                                : "[CTR-3DS] fastpresent: off (whole-system gfxFlushBuffers)");
+				}
+				else if ((strncmp(word, "giveitem", 8) == 0) || (strncmp(word, "hititem", 7) == 0))
+				{
+					/* Player 1 gets item option N, or is hit by option N, on the
+					 * next race frame (lists: include/platform/debug_items.h). */
+					const int give = (word[0] == 'g');
+					const char *arg = word + (give ? 8 : 7);
+					char msg[64];
+					int n = (*arg == ' ') ? atoi(arg + 1) : 0;
+
+					if (give)
+					{
+						g_dbg_giveItem = n;
+					}
+					else
+					{
+						g_dbg_hitItem = n;
+					}
+					snprintf(msg, sizeof(msg), "[CTR-3DS] %s %d", give ? "giveitem" : "hititem", n);
+					N3DS_DebugLog(msg);
+				}
+				else if (strncmp(word, "fbblurflip", 10) == 0)
+				{
+					/* Clock blur texture mapping: bit 0 mirrors the copy's rows
+					 * (panel x), bit 1 its columns (panel y). 'fbblurflip N'. */
+					char msg[64];
+
+					g_dbg_fbBlurFlip = (word[10] == ' ') ? (atoi(&word[11]) & 3) : 0;
+					snprintf(msg, sizeof(msg), "[CTR-3DS] fbblurflip: %d", g_dbg_fbBlurFlip);
+					N3DS_DebugLog(msg);
+				}
+				else if (strncmp(word, "fbblur", 6) == 0)
+				{
+					/* Clock-item feedback blur from a GPU copy of the previous
+					 * frame (default ON); off drops the effect as before. */
+					if (word[6] == ' ')
+					{
+						g_dbg_fbBlur = (atoi(&word[7]) != 0) ? 1 : 0;
+					}
+					else
+					{
+						g_dbg_fbBlur = !g_dbg_fbBlur;
+					}
+					N3DS_DebugLog(g_dbg_fbBlur ? "[CTR-3DS] fbblur: ON (clock blur from a GPU copy of the last frame)" : "[CTR-3DS] fbblur: off (no clock blur)");
 				}
 				else if (strncmp(word, "fbcap", 5) == 0)
 				{
