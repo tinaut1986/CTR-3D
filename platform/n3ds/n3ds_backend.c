@@ -1263,6 +1263,10 @@ void N3DS_ConsoleStatusClear(void)
  */
 static int s_topContentFullWidth = 0;
 
+/* This frame's UI pop-out in whole panel pixels (+ in the left eye, - in the right), 0 when the UI does not
+ * pop out: set beside s_uiShiftPsx every frame. The copy below undoes it, see there. */
+static int s_uiPopPxFrame = 0;
+
 void N3DS_SetTopContentFullWidth(int fullWidth)
 {
 	s_topContentFullWidth = fullWidth;
@@ -1274,6 +1278,17 @@ int N3DS_CopyDisplayedTopFrame(unsigned char *dstRGB, int dstW, int dstH)
 	u8 *fb = gfxGetFramebuffer(GFX_TOP, GFX_LEFT, &fbW, &fbH);
 	const int contentX = s_topContentFullWidth ? 0 : N3DS_TOP_CONTENT_X;
 	const int contentW = s_topContentFullWidth ? 400 : N3DS_TOP_CONTENT_W;
+	/*
+	 * Undo the UI pop-out. The left eye drew the HUD s_uiPopPxFrame pixels right of its place, and the
+	 * consumer (the pause background) draws this copy as one flat picture at screen depth: copied as is,
+	 * the frozen HUD sat that far right of the live one in both eyes and the speedometer ran off the
+	 * right edge. Sample the left eye that far to the right instead; the last columns, which the left eye
+	 * pushed off the panel, come from the right eye, whose HUD sits the same distance to the LEFT of its
+	 * place. Only the HUD lands exactly where it was (the world is one eye's view either way).
+	 */
+	const int popPx = (s_uiPopPxFrame > 0) ? s_uiPopPxFrame : 0;
+	u16 fbRW = 0, fbRH = 0;
+	u8 *fbR = (popPx > 0) ? gfxGetFramebuffer(GFX_TOP, GFX_RIGHT, &fbRW, &fbRH) : NULL;
 	int x, y;
 
 	if ((fb == NULL) || (dstRGB == NULL) || (dstW <= 0) || (dstH <= 0))
@@ -1289,6 +1304,10 @@ int N3DS_CopyDisplayedTopFrame(unsigned char *dstRGB, int dstW, int dstH)
 	 * actually needed it asks for it directly, on pause entry rather than
 	 * 30 times a second. */
 	GSPGPU_InvalidateDataCache(fb, (u32)fbW * (u32)fbH * 3U);
+	if (fbR != NULL)
+	{
+		GSPGPU_InvalidateDataCache(fbR, (u32)fbRW * (u32)fbRH * 3U);
+	}
 
 	for (y = 0; y < dstH; y++)
 	{
@@ -1303,7 +1322,22 @@ int N3DS_CopyDisplayedTopFrame(unsigned char *dstRGB, int dstW, int dstH)
 			 * background showed them squeezed inside the picture
 			 * (user-reported on hardware) -- or the whole panel in REAL wide. */
 			const int sx = contentX + ((x * contentW) / dstW);
-			const u8 *p = fb + (((sx * 240) + (239 - sy)) * 3);
+			const u8 *p;
+
+			if (popPx == 0)
+			{
+				p = fb + (((sx * 240) + (239 - sy)) * 3);
+			}
+			else if (((sx + popPx) < (contentX + contentW)) || (fbR == NULL))
+			{
+				const int lx = ((sx + popPx) < (contentX + contentW)) ? (sx + popPx) : (contentX + contentW - 1);
+
+				p = fb + (((lx * 240) + (239 - sy)) * 3);
+			}
+			else
+			{
+				p = fbR + ((((sx - popPx) * 240) + (239 - sy)) * 3);
+			}
 
 			dstRow[(x * 3) + 0] = p[2]; /* R */
 			dstRow[(x * 3) + 1] = p[1]; /* G */
@@ -1769,6 +1803,24 @@ static float N3DS_StereoConvNow(void)
 	return N3DS_StereoWindowNow() ? s_stereoConvWorld : s_stereoConv;
 }
 
+/* The parallax stamp of the screen plane: world parallax p = k - kC/d is 0 at d = C, and a stamp s
+ * reads as d = 65535 - s in the shaders (ctr.v.pica). For flat content that must sit at screen depth
+ * in both eyes, outside the UI band's pop-out (the pause background, NativeGpu_StampEmitOrdinal). */
+unsigned short N3DS_StereoScreenParallaxStamp(void)
+{
+	int d = (int)(N3DS_StereoConvNow() + 0.5f);
+
+	if (d < 64)
+	{
+		d = 64;
+	}
+	if (d > 65534)
+	{
+		d = 65534;
+	}
+	return (unsigned short)(65535 - d);
+}
+
 static float N3DS_StereoPopNow(void)
 {
 	return N3DS_StereoWindowNow() ? 0.0f : s_stereoPopMul;
@@ -1876,6 +1928,7 @@ static void N3DS_StereoLatchFrame(void)
 		int eye;
 
 		s_uiShiftPsx = (float)uiPx * s_uiPsxPerPx; /* before the eye vectors: they clamp the world to it */
+		s_uiPopPxFrame = pktLive ? uiPx : 0;
 		for (eye = 0; eye < 2; eye++)
 		{
 			const float k = (eye == 1) ? mag : -mag;

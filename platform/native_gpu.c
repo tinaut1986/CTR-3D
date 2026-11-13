@@ -3198,6 +3198,38 @@ internal int PacketDepth_ResolvePacked(const u32 *xyPacked, int n, u16 *out, u16
 }
 #endif
 
+#if defined(__3DS__)
+/*
+ * Set by the pause background's tiles (ElimBG, the POLY_FT4 case) for the primitive being parsed and
+ * consumed by its stamp below: their parallax goes to the screen plane instead of the UI band's fixed
+ * pop-out. The tiles are a photo of the last frame with its HUD put back in its mono place
+ * (N3DS_CopyDisplayedTopFrame), so it belongs on the screen in both eyes; popped out like the live HUD,
+ * the photo moved per eye and the renderer stretched its edge tiles to cover the gap that left
+ * (N3DS_UiEdgeExtend, skipped for vertices without the UI pop-out).
+ */
+global_variable int s_ngpuPauseTileNext = 0;
+unsigned short N3DS_StereoScreenParallaxStamp(void);
+#endif
+
+/* The primitive just stamped is a pause tile: its parallax to the screen plane. Both stamp paths. */
+internal void NativeGpu_ApplyPauseTileParallax(int firstVertex)
+{
+#if defined(__3DS__)
+	if (s_ngpuPauseTileNext)
+	{
+		const u16 screen = (u16)N3DS_StereoScreenParallaxStamp();
+
+		for (int i = firstVertex; i < s_gpu.vertexIndex; i++)
+		{
+			s_gpu.vertexBuffer[i].parallaxOrdinal = screen;
+		}
+		s_ngpuPauseTileNext = 0;
+	}
+#else
+	(void)firstVertex;
+#endif
+}
+
 internal void NativeGpu_StampEmitOrdinal(int firstVertex)
 {
 	u16 stamp = NativeGpu_NextDepthStamp();
@@ -3245,6 +3277,7 @@ internal void NativeGpu_StampEmitOrdinal(int firstVertex)
 			{
 				s_pktDepth2.wldPerVert++;
 			}
+			NativeGpu_ApplyPauseTileParallax(firstVertex);
 			s_gpu.emitOrdinal++;
 			return;
 		}
@@ -3313,6 +3346,7 @@ internal void NativeGpu_StampEmitOrdinal(int firstVertex)
 		 * -than-rippling face, not a wrong depth. */
 		s_gpu.vertexBuffer[i].parallaxOrdinal = stamp;
 	}
+	NativeGpu_ApplyPauseTileParallax(firstVertex);
 	s_gpu.emitOrdinal++;
 }
 
@@ -5937,6 +5971,7 @@ internal int ProcessGouraudLines(P_TAG *polyTag)
  * it; the overshoot is clipped). Smaller boxes (HUD, menus) are left alone.
  */
 int NativeWide_CullMarginX(int rectW);
+int NativeWide_UiShiftInverseX(int x);
 
 internal void NativeWide_ExtendFlatFill(GrVertex *v)
 {
@@ -6096,6 +6131,33 @@ internal int ProcessFlatPoly(P_TAG *polyTag)
 
 		GrVertex *firstVertex = &s_gpu.vertexBuffer[s_gpu.vertexIndex];
 		MakeVertexQuad(firstVertex, &poly->x0, &poly->x1, &poly->x3, &poly->x2);
+#if defined(__3DS__)
+		/* Pause screenshot tile (NATIVE_PAUSEBG_MARK1): the picture already
+		 * holds the wide frame, so it must cover the wide window linearly,
+		 * not through the UI ramp the renderer applies to this band. Place
+		 * each X so that the ramp lands it on the linear stretch. */
+		if ((poly->pad1 == NATIVE_PAUSEBG_MARK1) && (poly->pad2 == NATIVE_PAUSEBG_MARK2))
+		{
+			extern int g_dbg_packetDepth;
+			const int m = NativeWide_CullMarginX(512);
+			int vi;
+
+			if ((m != 0) && g_dbg_packetDepth)
+			{
+				for (vi = 0; vi < 4; vi++)
+				{
+					const int x = (int)firstVertex[vi].x;
+
+					firstVertex[vi].x = (float)NativeWide_UiShiftInverseX(x + (((x - 256) * m) / 256));
+				}
+			}
+			/* A flat photo at screen depth, not at the UI's pop-out: see s_ngpuPauseTileNext. */
+			if (g_dbg_packetDepth)
+			{
+				s_ngpuPauseTileNext = 1;
+			}
+		}
+#endif
 		MakeTexcoordQuad(firstVertex, &poly->u0, &poly->u1, &poly->u3, &poly->u2, poly->tpage, poly->clut,
 		                 GET_TPAGE_DITHER(activeDrawEnv.tpage) || activeDrawEnv.dtd);
 		MakeColourQuad(firstVertex, shadeTexOn, &poly->r0, &poly->r0, &poly->r0, &poly->r0);
@@ -6735,6 +6797,31 @@ int NativeWide_UiShiftX(int x)
 		shift = m;
 	}
 	return x + shift;
+}
+
+/* Inverse of NativeWide_UiShiftX: the X that the UI ramp moves to X. The ramp
+ * is x + clamp((x - 256) / 3, -m, m), strictly increasing, so the inverse is
+ * the matching piece: 4/3 slope in the middle, plain -/+m outside. Exact to
+ * the ramp's own integer rounding (under one unit). */
+int NativeWide_UiShiftInverseX(int x)
+{
+	const int m = NativeWide_CullMarginX(512);
+	int y;
+
+	if (m == 0)
+	{
+		return x;
+	}
+	y = ((3 * x) + 256) / 4;
+	if ((y - 256) >= (3 * m))
+	{
+		y = x - m;
+	}
+	else if ((256 - y) >= (3 * m))
+	{
+		y = x + m;
+	}
+	return y;
 }
 
 /*

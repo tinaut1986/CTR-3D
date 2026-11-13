@@ -54,4 +54,14 @@ void NativeRenderer_PopDebugLabel(void);
  * walk's own vertices), source rect in absolute PSX VRAM coordinates. */
 void NativeRenderer_FeedbackBlurTile(float dstX0, float dstY0, float dstX1, float dstY1, int srcX0, int srcY0, int srcX1, int srcY1);
 
+/*
+ * Pause screenshot tiles (game/ElimBG.c ElimBG_HandleState), same pad1/pad2
+ * idiom. The screenshot is the whole presented frame drawn back as 512-wide
+ * tiles in the UI OT, so in REAL widescreen it would take the UI X ramp a
+ * second time; the walk pre-inverts the ramp for these tiles
+ * (NativeWide_UiShiftInverseX) so the picture lands 1:1 on the panel.
+ */
+#define NATIVE_PAUSEBG_MARK1 0xE1B0u
+#define NATIVE_PAUSEBG_MARK2 0x6B60u
+
 #endif

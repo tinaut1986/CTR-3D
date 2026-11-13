@@ -1,4 +1,7 @@
 #include <common.h>
+#if defined(CTR_NATIVE) && defined(__3DS__)
+#include <platform/native_renderer.h>
+#endif
 
 enum ElimBGPauseState
 {
@@ -377,6 +380,13 @@ void ElimBG_HandleState(struct GameTracker *gGT)
 				textureY += ELIM_BG_TILE_H;
 				p->v2 = (char)textureY;
 				p->v3 = (char)textureY;
+
+#if defined(CTR_NATIVE) && defined(__3DS__)
+				// Widescreen-correct placement in the OT walk (see
+				// NATIVE_PAUSEBG_MARK1); the PS1 GPU ignores pad1/pad2.
+				p->pad1 = NATIVE_PAUSEBG_MARK1;
+				p->pad2 = NATIVE_PAUSEBG_MARK2;
+#endif
 
 				// pointer to OT mem, and pointer to primitive
 				AddPrim(&gGT->pushBuffer_UI.ptrOT[4], p);

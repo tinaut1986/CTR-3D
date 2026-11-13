@@ -4306,7 +4306,15 @@ internal void N3DS_ConvertTriangleVerts(N3DS_Vertex *dst3, const GrVertex *triVe
 			{
 				extern int N3DS_UiEdgeExtend(int x);
 
-				sx = (s16)N3DS_UiEdgeExtend(NativeWide_UiShiftX((int)sx));
+				/* The edge push only covers the gap the UI pop-out leaves, so it
+				 * is for vertices that take it: the pause background's tiles
+				 * sit at screen depth (s_ngpuPauseTileNext, native_gpu.c) and
+				 * the push would only stretch their edge tiles. */
+				sx = (s16)NativeWide_UiShiftX((int)sx);
+				if (src->parallaxOrdinal >= 0xFFC0u)
+				{
+					sx = (s16)N3DS_UiEdgeExtend((int)sx);
+				}
 			}
 			dst->x = sx;
 		}
