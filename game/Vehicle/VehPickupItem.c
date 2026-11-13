@@ -1188,7 +1188,13 @@ void VehPickupItem_ShootNow(struct Driver *d, s32 weaponID, s32 flags)
 		tw->vel.x = (dInst->matrix.m[0][2] * WARPBALL_VELOCITY_NUMERATOR) >> WARPBALL_VELOCITY_SHIFT;
 		tw->vel.z = (dInst->matrix.m[2][2] * WARPBALL_VELOCITY_NUMERATOR) >> WARPBALL_VELOCITY_SHIFT;
 
+		// 60fps: the warpball's trail is created once, here, and lives as long as the orb;
+		// Particle_Init must not thin it like a per-frame emitter (it returned NULL on half
+		// the frames and RB_Warpball_Death then wrote through it). No effect at 30 fps.
+		int prevForceParticle = g_fps60ForceParticle;
+		g_fps60ForceParticle = 1;
 		struct Particle *p = Particle_Init(0, gGT->iconGroup[WARPBALL_PARTICLE_ICON_GROUP], &data.emSet_Warpball[0]);
+		g_fps60ForceParticle = prevForceParticle;
 
 		tw->ptrParticle = p;
 
