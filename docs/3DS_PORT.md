@@ -97,15 +97,6 @@ renderer's per-pixel palette decode cannot be reproduced. The 3DS renderer
   citro3d draw issue of the frame's ~20-300 draws; the left eye pays nothing
   extra but the journal entries. OPTIONS > 3D EFFECT is ON / OFF, plus AUTO on
   an Old 3DS (see "Old 3DS / 2DS").
-  - Edge window: the UI's pop-out moves it right in the left eye and left in
-    the right eye, so a menu or HUD piece that reaches the panel edge (the
-    track list, the speedometer) showed a strip to one eye only. While the UI
-    pass draws what pops out, each eye clips a strip of twice the pop-out by
-    scissor, the left eye on its left and the right eye on its right
-    (`N3DS_StereoUiEdgeClip`, `n3ds_backend.c`; journaled so the right eye's
-    replay toggles it at the same point; the target's long axis runs from the
-    panel's right edge). UI runs split on whether they pop out, so the world,
-    the sky and the pause background (screen depth) are never clipped.
 - **Bottom screen.** The map's primitives are marked in the UI stream, peeled
   off at conversion time, and replayed on a bottom-screen target through an
   orthographic window fitted to their bounds. In map mode a copy stays on the

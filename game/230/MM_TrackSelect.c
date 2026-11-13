@@ -741,6 +741,18 @@ void MM_TrackSelect_MenuProc(struct RectMenu *menu)
 		// posX of track list
 		s32 rowX = (u32)D230.trackSelect_rowListTransition.currX + (MATH_Cos(rowAngle) * MM_TRACK_SELECT_ROW_X_RADIUS >> MM_TRACK_SELECT_ROW_X_SHIFT) +
 		           MM_TRACK_SELECT_ROW_X_OFFSET;
+#ifdef CTR_NATIVE
+		{
+			/* Widescreen: the UI ramp (NativeWide_UiShiftX) moves everything left of x=64 to the
+			 * wide window's edge, which put the wheel's top and bottom rows partly off screen and,
+			 * with the 3D UI pop-out, cut in one eye. Pull the list in by a quarter of the margin
+			 * (16 units, 10 px): the outermost visible rows (wheel steps +/-3, rowX -7) then start
+			 * 9 units in from the edge, more than the full-slider pop-out (4 px, 6.4 units), so neither
+			 * eye cuts them. 0 when not wide. */
+			extern int NativeWide_CullMarginX(int rectW);
+			rowX += NativeWide_CullMarginX(512) / 4;
+		}
+#endif
 
 		// posY of track list
 		s32 rowBaseY = (u32)D230.trackSelect_rowListTransition.currY + (MATH_Sin(rowAngle) * MM_TRACK_SELECT_ROW_Y_RADIUS >> MM_TRACK_SELECT_ROW_Y_SHIFT);

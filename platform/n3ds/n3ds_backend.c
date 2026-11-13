@@ -1336,9 +1336,7 @@ int N3DS_CopyDisplayedTopFrame(unsigned char *dstRGB, int dstW, int dstH)
 			}
 			else
 			{
-				const int rx = sx - popPx;
-
-				p = fbR + (((rx * 240) + (239 - sy)) * 3);
+				p = fbR + ((((sx - popPx) * 240) + (239 - sy)) * 3);
 			}
 
 			dstRow[(x * 3) + 0] = p[2]; /* R */
@@ -1715,8 +1713,7 @@ enum
 	N3DS_STEREO_OP_MODEL_BEGIN,
 	N3DS_STEREO_OP_MODEL_INSTANCE,
 	N3DS_STEREO_OP_MODEL_RUN,
-	N3DS_STEREO_OP_MODEL_END,
-	N3DS_STEREO_OP_EDGECLIP /* pkt.atlas = on: the UI edge window (N3DS_StereoUiEdgeClip) */
+	N3DS_STEREO_OP_MODEL_END
 };
 
 typedef struct N3DS_StereoOp
@@ -2070,7 +2067,7 @@ static unsigned s_endProfFrames;
 static unsigned s_endProfStereoFrames;
 /* Journal shape, summed over the window's stereo frames: what the right eye
  * replays per frame, by op kind (index = N3DS_STEREO_OP_*). */
-static unsigned s_endProfOps[N3DS_STEREO_OP_EDGECLIP + 1];
+static unsigned s_endProfOps[N3DS_STEREO_OP_MODEL_END + 1];
 static unsigned s_endProfOverflows;
 #endif
 
@@ -3427,60 +3424,6 @@ static void N3DS_FBBlurDrawRightEye(void)
 	}
 }
 
-/*
- * Stereo edge window for the UI layer. The UI pops out of the screen by s_uiPopPxFrame pixels per eye
- * (right in the left eye, left in the right eye), so a menu or HUD piece that reaches the panel's edge
- * showed a strip to one eye that the other could not: the 3D broke on it (the track list, the
- * speedometer). While the UI pass draws what pops out, each eye clips that strip -- the left eye on
- * its left, the right eye on its right -- so the UI's edge is seen by both eyes or by neither: a
- * "floating window" at the UI's depth. The world, the sky and the pause background (screen depth) are
- * never clipped. Mono and frames without the UI pop-out set no scissor.
- */
-static void N3DS_StereoEdgeWindow(int eye)
-{
-	const int x0 = g_dbg_widescreen ? 0 : N3DS_TOP_CONTENT_X;
-	const int w = g_dbg_widescreen ? 400 : N3DS_TOP_CONTENT_W;
-	/* Twice the pop-out: the left eye shows the UI's edge column that far right of the panel edge and
-	 * the right eye that far left, so the strip one eye shows and the other does not is 2 x pop wide. */
-	const int pop = 2 * s_uiPopPxFrame;
-
-	if ((pop <= 0) || (pop >= (w / 4)))
-	{
-		C3D_SetScissor(GPU_SCISSOR_DISABLE, 0, 0, 0, 0);
-		return;
-	}
-	/* The target's long axis runs from the panel's RIGHT edge (y = 0) to its left: the left eye's
-	 * left strip is the top of the range (measured on hardware). */
-	if (eye == 0)
-	{
-		C3D_SetScissor(GPU_SCISSOR_NORMAL, 0, (u32)x0, 240, (u32)(x0 + w - pop));
-	}
-	else
-	{
-		C3D_SetScissor(GPU_SCISSOR_NORMAL, 0, (u32)(x0 + pop), 240, (u32)(x0 + w));
-	}
-}
-
-/* The UI pass (N3DS_DrawUiPass) around its popped-out segments: on in this eye, and journaled so the
- * right eye's replay does the same at the same point. */
-void N3DS_StereoUiEdgeClip(int on)
-{
-	N3DS_StereoOp *op = N3DS_StereoRecord(N3DS_STEREO_OP_EDGECLIP);
-
-	if (op != NULL)
-	{
-		op->u.pkt.atlas = (u8)(on ? 1 : 0);
-	}
-	if (on)
-	{
-		N3DS_StereoEdgeWindow(s_stereoEye);
-	}
-	else
-	{
-		C3D_SetScissor(GPU_SCISSOR_DISABLE, 0, 0, 0, 0);
-	}
-}
-
 void N3DS_C3DBeginFrame(void)
 {
 	/* Latch the physical 3D slider for the whole frame BEFORE anything is
@@ -3572,7 +3515,6 @@ void N3DS_C3DBeginFrame(void)
 	 * centered 4:3 band, leaving the margins undimmed.
 	 */
 	C3D_SetViewport(0, g_dbg_widescreen ? 0 : N3DS_TOP_CONTENT_X, 240, g_dbg_widescreen ? 400 : N3DS_TOP_CONTENT_W);
-	C3D_SetScissor(GPU_SCISSOR_DISABLE, 0, 0, 0, 0); /* the UI pass sets its own (N3DS_StereoUiEdgeClip) */
 
 	C3D_FVUnifMtx4x4(GPU_VERTEX_SHADER, s_uLocProjection, &s_projection);
 	/* Left eye's parallax (zero in mono) -- rides beside the projection for
@@ -5305,7 +5247,6 @@ int N3DS_BottomPass_Begin(void)
 	/* Viewport does not follow the framebuffer binding (same note as the right
 	 * eye); full 320x240 panel, stored sideways like every 3DS target. */
 	C3D_SetViewport(0, 0, 240, 320);
-	C3D_SetScissor(GPU_SCISSOR_DISABLE, 0, 0, 0, 0); /* the top eyes' edge window (N3DS_StereoEdgeWindow) */
 	if (g_dbg_depthTest == 1)
 	{
 		C3D_DepthTest(true, GPU_ALWAYS, GPU_WRITE_ALL);
@@ -5451,7 +5392,6 @@ void N3DS_StereoRenderRightEye(void)
 	/* Same pillarbox crop (or widescreen lift) as N3DS_C3DBeginFrame --
 	 * viewport state does not automatically follow the framebuffer binding. */
 	C3D_SetViewport(0, g_dbg_widescreen ? 0 : N3DS_TOP_CONTENT_X, 240, g_dbg_widescreen ? 400 : N3DS_TOP_CONTENT_W);
-	C3D_SetScissor(GPU_SCISSOR_DISABLE, 0, 0, 0, 0); /* the journal replays the UI pass's own */
 	/* Frame-wide depth pair, mirroring BeginFrame's policy exactly --
 	 * whatever state the left eye's last draw left behind is not it. */
 	if (g_dbg_depthTest == 1)
@@ -5487,7 +5427,7 @@ void N3DS_StereoRenderRightEye(void)
 		const N3DS_StereoOp *op = &s_stereoOps[i];
 
 #ifdef CTR_INTERNAL
-		if (op->kind <= N3DS_STEREO_OP_EDGECLIP)
+		if (op->kind <= N3DS_STEREO_OP_MODEL_END)
 		{
 			s_endProfOps[op->kind]++;
 		}
@@ -5573,11 +5513,6 @@ void N3DS_StereoRenderRightEye(void)
 			N3DS_ModelDraw_End();
 			lastDoubling = -1;
 			lastDepthWrite = 1;
-			break;
-		}
-		case N3DS_STEREO_OP_EDGECLIP:
-		{
-			N3DS_StereoUiEdgeClip((int)op->u.pkt.atlas);
 			break;
 		}
 		default:
