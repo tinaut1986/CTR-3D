@@ -435,6 +435,14 @@ void N3DS_C3DSetDepthWrite(int enable);
 void N3DS_C3DUploadVramDisplayChunk(int slotIndex, const void *tiled256);
 void N3DS_C3DBindVramDisplayTex(int slotIndex);
 
+/* Clock-item feedback blur (n3ds_backend.c, "feedback blur"): the walk calls
+ * NoteWanted when it meets the effect's tiles, which makes the next frame
+ * begin copy the presented frame on the GPU; Draw then draws this frame's
+ * tiles from that copy (count x 8 floats: dst x0,y0,x1,y1 then src x0,y0,x1,y1,
+ * display-relative PSX coordinates). The right eye follows on its own. */
+void N3DS_FBBlurNoteWanted(void);
+void N3DS_C3DFeedbackBlurDraw(const float *tiles, int count);
+
 /* -------------------------------------------------- native track atlas --- */
 /* Dedicated pool for the native track renderer's atlas layout
  * (platform/native_track_mesh.c). Separate from the decode-cache atlases above --
@@ -776,6 +784,8 @@ int N3DS_O3dsSimActive(void);       /* 0 off, 1 o3ds-sim.txt, 2 legacy-mode CIA 
 int N3DS_O3dsSimFtpAllowed(void);
 int N3DS_O3dsSimToggleFile(void);   /* DEBUG > ACTIONS; returns the new state */
 int N3DS_ExtraCoresUsable(void);    /* New 3DS and not simulating an Old one */
+void N3DS_FlushDcache(const void *addr, unsigned size); /* CPU writes -> GPU, on the calling core */
+int N3DS_Core1Percent(void);        /* Old 3DS: core-1 share for the render worker (cfg `core1`), 0 = off */
 
 /*
  * Frame pacing and the Old-3DS stereo policy (n3ds_backend.c, "frame pace").

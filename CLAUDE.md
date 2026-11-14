@@ -10,9 +10,10 @@ updater code are copied from `../zelda-tmc-3ds`. When in doubt, do what it does.
 
 ## Current state
 
-Latest handoff: `docs/handoff-2026-10-30.md` (branches, what is verified on
-hardware, how to test, pending list). Read it before starting work; the older
-`docs/handoff-2026-10-29.md` still lists what is verified on the New 3DS.
+Latest handoff: `docs/handoff-2026-11-12.md` (Old 3DS race performance: what is
+merged into `release/v0.2.3`, measurements, how to build/install/measure from Windows,
+pending list). Read it before starting work; `docs/handoff-2026-10-30.md` and
+`docs/handoff-2026-10-29.md` still list what is verified on hardware before that.
 
 ## Language
 
@@ -148,6 +149,8 @@ git branch --unset-upstream
 git push -u origin release/v0.1.1
 git push origin --delete release/v0.1.0
 ```
+
+**Discord**: every run of `.github/workflows/build-release.yml` announces the version on the Discord server (Tinaut's 3DS Ports): a stable in #announcements, pinging the project's role, a beta in #beta-testing, with `docs/release-notes/<tag>.md` as the text (one more reason to write it before the tag). Don't post it by hand. It needs the repo secrets `DISCORD_WEBHOOK_RELEASE` and `DISCORD_WEBHOOK_BETA` (without them the step is skipped); a re-run of the workflow posts again.
 
 ## Game data and legal
 

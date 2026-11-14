@@ -116,10 +116,9 @@ static void MainFrame_PrimMemWatermarkSample(struct DB *db)
 // The clock item's full-screen feedback blur (DISPLAY_Blur_Main with a
 // positive strength; the cutscene camera path drives the same call at full
 // strength through gGT->clockEffectEnabled). It textures a 50% quad from the
-// previous presented frame every frame, so a renderer without a cheap
-// framebuffer-as-texture path can't draw it faithfully; the 3DS build defines
-// this 0 (CMakeLists.txt) and skips the blur while keeping the flat white
-// flash and the item's gameplay effect. 1 = retail.
+// previous presented frame every frame; the 3DS renderer draws its tiles from a
+// GPU copy of that frame (n3ds_backend.c "feedback blur"). 0 compiles the blur
+// out and keeps the flat white flash and the item's gameplay effect. 1 = retail.
 #ifndef CTR_NATIVE_FEEDBACK_BLUR
 #define CTR_NATIVE_FEEDBACK_BLUR 1
 #endif
@@ -272,6 +271,15 @@ void MainFrame_GameLogic(struct GameTracker *gGT, struct GamepadSystem *gGamepad
 		for (psVar12 = gGT->threadBuckets[0].thread; psVar12 != 0; psVar12 = psVar12->siblingThread)
 		{
 			psVar9 = (struct Driver *)psVar12->object;
+
+#if defined(CTR_NATIVE) && defined(CTR_INTERNAL) && defined(__3DS__)
+			// Debug ITEMS page: an item or a hit for player 1 (game/DebugItems.c).
+			{
+				void DebugItems_Apply(struct GameTracker *gGT, struct Driver *d);
+
+				DebugItems_Apply(gGT, psVar9);
+			}
+#endif
 
 			// 60fps: a 30 Hz-world countdown (see include/ctr_fps60.h).
 			if (psVar9->clockSend && g_fps60Full)

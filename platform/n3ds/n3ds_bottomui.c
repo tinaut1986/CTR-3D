@@ -38,6 +38,7 @@
 #include <time.h>
 
 #include "n3ds_backend.h"
+#include "platform/debug_items.h"
 #include "n3ds_bottomui.h"
 #include "n3ds_debuglink.h"
 #include "n3ds_dspfirm.h"
@@ -85,6 +86,7 @@ enum
 {
 	DBG_PERF = 0,
 	DBG_ACTIONS,
+	DBG_ITEMS,
 	DBG_LOG,
 	DBG_PAGES
 };
@@ -538,9 +540,9 @@ enum
 
 static void ui_sub_rect(int i, int *x, int *y, int *w, int *h)
 {
-	*x = 4 + (i * 104);
+	*x = 4 + (i * 79);
 	*y = DBG_SUB_Y;
-	*w = 100;
+	*w = 75;
 	*h = DBG_SUB_H;
 }
 
@@ -550,6 +552,44 @@ static void ui_act_rect(int i, int *x, int *y, int *w, int *h)
 	*x = (i & 1) ? 162 : 4;
 	*y = CONTENT_Y + 30 + ((i >> 1) * 38);
 	*w = 154;
+	*h = 34;
+}
+
+/* ITEMS page: two rows of  [<] [ name ] [>] [ACTION]  (give, hit). */
+enum
+{
+	ITM_GIVE_PREV = 0,
+	ITM_GIVE_NEXT,
+	ITM_GIVE_GO,
+	ITM_HIT_PREV,
+	ITM_HIT_NEXT,
+	ITM_HIT_GO,
+	ITM_COUNT
+};
+#define ITM_BTN_BASE 200
+#define ITM_ROW_Y(row) (CONTENT_Y + 44 + ((row) * 58))
+
+static int s_itemGiveSel = 0;
+static int s_itemHitSel = 0;
+
+static const char *const s_itemGiveEn[DEBUG_GIVE_COUNT] = {"RANDOM (CRATE)", "TURBO", "BOMB", "BOMB X3", "MISSILE", "MISSILE X3", "TNT",
+                                                            "POTION", "SHIELD", "MASK", "CLOCK", "WARPBALL", "INVISIBILITY", "10 WUMPA"};
+static const char *const s_itemGiveEs[DEBUG_GIVE_COUNT] = {"AZAR (CAJA)", "TURBO", "BOMBA", "BOMBA X3", "MISIL", "MISIL X3", "TNT",
+                                                            "POCION", "ESCUDO", "MASCARA", "RELOJ", "BOLA WARP", "INVISIBILIDAD", "10 WUMPAS"};
+static const char *const s_itemHitEn[DEBUG_HIT_COUNT] = {"BOMB", "MISSILE", "TNT", "NITRO", "GREEN POTION", "RED POTION",
+                                                          "CLOCK", "WARPBALL", "SQUISH", "BURN", "SPIN"};
+static const char *const s_itemHitEs[DEBUG_HIT_COUNT] = {"BOMBA", "MISIL", "TNT", "NITRO", "POCION VERDE", "POCION ROJA",
+                                                          "RELOJ", "BOLA WARP", "APLASTADO", "QUEMADO", "TROMPO"};
+
+static void ui_item_rect(int i, int *x, int *y, int *w, int *h)
+{
+	static const int xs[3] = {4, 196, 234};
+	static const int ws[3] = {34, 34, 82};
+	const int col = i % 3;
+
+	*x = xs[col];
+	*y = ITM_ROW_Y(i / 3);
+	*w = ws[col];
 	*h = 34;
 }
 #endif
@@ -1312,6 +1352,36 @@ static void ui_draw_dbg_actions(void)
 	}
 }
 
+static void ui_draw_dbg_items(void)
+{
+	int row, i;
+
+	for (row = 0; row < 2; row++)
+	{
+		const char *name = (row == 0) ? TR(s_itemGiveEn[s_itemGiveSel], s_itemGiveEs[s_itemGiveSel]) : TR(s_itemHitEn[s_itemHitSel], s_itemHitEs[s_itemHitSel]);
+		const int y = ITM_ROW_Y(row);
+
+		ui_text(6, y - 12, 1, COL_LABEL, (row == 0) ? TR("GIVE ME AN ITEM", "DARME UN OBJETO") : TR("HIT ME WITH", "QUE ME IMPACTE"));
+		ui_cell(42, y, 150, 34, COL_PANEL, COL_EDGE);
+		ui_text_c(42 + 75, y + 13, 1, COL_TEXT, name);
+	}
+	for (i = 0; i < ITM_COUNT; i++)
+	{
+		int x, y, w, h;
+		const int col = i % 3;
+		const char *label = (col == 0) ? "<" : (col == 1) ? ">" : (i == ITM_GIVE_GO) ? TR("GIVE", "DAR") : TR("HIT", "IMPACTO");
+
+		ui_item_rect(i, &x, &y, &w, &h);
+		ui_button(x, y, w, h, (col == 2) ? COL_BTN_ON : COL_BTN_OFF, (ITM_BTN_BASE + i == s_pressBtn));
+		ui_text_c(x + (w / 2), y + 13, 1, COL_TEXT, label);
+	}
+	ui_text(6, ITM_ROW_Y(2) - 8, 1, COL_LABEL, TR("PLAYER 1, DURING A RACE", "JUGADOR 1, EN CARRERA"));
+	if (s_msg[0] != '\0')
+	{
+		ui_text(6, ITM_ROW_Y(2) + 4, 1, COL_GOOD, s_msg);
+	}
+}
+
 static void ui_draw_dbg_log(void)
 {
 	const unsigned head = s_logHead;
@@ -1338,7 +1408,7 @@ static void ui_draw_debug(void)
 	for (i = 0; i < DBG_PAGES; i++)
 	{
 		int x, y, w, h;
-		const char *nm = (i == DBG_PERF) ? "PERF" : (i == DBG_ACTIONS) ? TR("ACTIONS", "ACCIONES") : "LOG";
+		const char *nm = (i == DBG_PERF) ? "PERF" : (i == DBG_ACTIONS) ? TR("ACTIONS", "ACCIONES") : (i == DBG_ITEMS) ? TR("ITEMS", "OBJETOS") : "LOG";
 
 		ui_sub_rect(i, &x, &y, &w, &h);
 		ui_button(x, y, w, h, (i == s_dbgPage) ? COL_TAB_ON : COL_TAB_OFF, 0);
@@ -1347,6 +1417,7 @@ static void ui_draw_debug(void)
 	switch (s_dbgPage)
 	{
 	case DBG_ACTIONS: ui_draw_dbg_actions(); break;
+	case DBG_ITEMS: ui_draw_dbg_items(); break;
 	case DBG_LOG: ui_draw_dbg_log(); break;
 	default: ui_draw_dbg_perf(); break;
 	}
@@ -1502,7 +1573,7 @@ static void ui_blit_to_panel(void)
 			dst -= 3;
 		}
 	}
-	GSPGPU_FlushDataCache(fb, (u32)w * h * 3U);
+	N3DS_FlushDcache(fb, (u32)w * h * 3U);
 	gfxScreenSwapBuffers(GFX_BOTTOM, false);
 }
 
@@ -1627,6 +1698,27 @@ static void ui_press_updater(int i)
 }
 
 #ifdef CTR_INTERNAL
+static void ui_press_item(int i)
+{
+	switch (i)
+	{
+	case ITM_GIVE_PREV: s_itemGiveSel = (s_itemGiveSel + DEBUG_GIVE_COUNT - 1) % DEBUG_GIVE_COUNT; break;
+	case ITM_GIVE_NEXT: s_itemGiveSel = (s_itemGiveSel + 1) % DEBUG_GIVE_COUNT; break;
+	case ITM_HIT_PREV: s_itemHitSel = (s_itemHitSel + DEBUG_HIT_COUNT - 1) % DEBUG_HIT_COUNT; break;
+	case ITM_HIT_NEXT: s_itemHitSel = (s_itemHitSel + 1) % DEBUG_HIT_COUNT; break;
+	case ITM_GIVE_GO:
+		g_dbg_giveItem = s_itemGiveSel;
+		ui_set_msg(TR(s_itemGiveEn[s_itemGiveSel], s_itemGiveEs[s_itemGiveSel]));
+		break;
+	default:
+		g_dbg_hitItem = s_itemHitSel;
+		ui_set_msg(TR(s_itemHitEn[s_itemHitSel], s_itemHitEs[s_itemHitSel]));
+		break;
+	}
+	s_pressBtn = ITM_BTN_BASE + i;
+	s_pressFrames = 8;
+}
+
 static void ui_press_action(int i)
 {
 	switch (i)
@@ -1858,6 +1950,21 @@ void N3DS_BottomUi_Touch(void)
 				}
 			}
 		}
+		if (s_dbgPage == DBG_ITEMS)
+		{
+			for (i = 0; i < ITM_COUNT; i++)
+			{
+				int x, y, w, h;
+
+				ui_item_rect(i, &x, &y, &w, &h);
+				if (ui_in(t.px, t.py, x, y, w, h))
+				{
+					ui_press_item(i);
+					s_dirty = 1;
+					return;
+				}
+			}
+		}
 		break;
 #endif
 	default:
@@ -2070,7 +2177,7 @@ void N3DS_BottomUi_Frame(const struct N3DS_BottomUiGameInfo *gi)
 		int live = 0;
 
 #ifdef CTR_INTERNAL
-		live |= (tab == TAB_DEBUG) && (s_dbgPage != DBG_ACTIONS);
+		live |= (tab == TAB_DEBUG) && ((s_dbgPage == DBG_PERF) || (s_dbgPage == DBG_LOG));
 #endif
 		s_lastLiveTick = now;
 		if (live)

@@ -425,7 +425,10 @@ GTE_INLINE int GTE_Execute(int op)
 	C2_FLAG = 0;
 
 #if defined(CTR_INTERNAL) && defined(__3DS__)
-	g_gteProfOps[g_gteProfPhase][GTE_FUNCT(gteop(op))]++;
+	if (g_dbg_deepProf)
+	{
+		g_gteProfOps[g_gteProfPhase][GTE_FUNCT(gteop(op))]++;
+	}
 #endif
 
 	switch (GTE_FUNCT(gteop(op)))

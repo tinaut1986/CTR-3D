@@ -971,6 +971,10 @@ internal int NativeTrackDraw_ComputeLeafDepthRange(const struct NativeTrackFrame
 	return 1;
 }
 
+/* [TRKDRAW] window (with the [SAMPLE] profiler on): leaf draws per frame. */
+static u32 s_trkDrawsWin;
+static u32 s_trkFramesWin;
+
 void NativeTrackDraw_IssueForWalk(void)
 {
 	const struct NativeTrackFrameSnapshot *snap = NativeTrackFrame_ForWalk();
@@ -1137,6 +1141,7 @@ void NativeTrackDraw_IssueForWalk(void)
 		{
 			continue;
 		}
+		NATIVE_PROFLOC_SET(NATIVE_PROFLOC_TRK_LEAFCPU);
 
 		if (leafIsBlended && (pass == 1))
 		{
@@ -1209,6 +1214,7 @@ void NativeTrackDraw_IssueForWalk(void)
 			}
 		}
 
+		NATIVE_PROFLOC_SET(NATIVE_PROFLOC_TRK_LEAFGPU);
 		N3DS_TrackDraw_Leaf((int)firstIndex, (int)indexCount, otIndexLo, ordinalLo, ordinalSpan, invIndexSpan,
 		                    (int)NativeTrackMesh_LeafAtlasBin(snap->leafSlot[i], pass == 1), drawBlend, uvDx, uvDy);
 		drawsIssued++;
@@ -1221,9 +1227,26 @@ void NativeTrackDraw_IssueForWalk(void)
 	}
 	}
 
+	NATIVE_PROFLOC_SET(NATIVE_PROFLOC_TRK_LEAFGPU);
 	N3DS_TrackDraw_End();
 
 	s_totalSkippedOrdinal += leavesSkippedOrdinal;
+	s_trkDrawsWin += drawsIssued;
+	s_trkFramesWin++;
+#if defined(CTR_INTERNAL)
+	if (s_trkFramesWin >= 64)
+	{
+		if (N3DS_SamplerActive())
+		{
+			char line[96];
+
+			snprintf(line, sizeof(line), "[TRKDRAW] draws/f=%lu leaves=%lu", (unsigned long)(s_trkDrawsWin / s_trkFramesWin), (unsigned long)snap->leafCount);
+			N3DS_DebugLog(line);
+		}
+		s_trkDrawsWin = 0;
+		s_trkFramesWin = 0;
+	}
+#endif
 
 	if (--s_logCountdown == 0)
 	{

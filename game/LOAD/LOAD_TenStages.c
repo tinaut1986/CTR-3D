@@ -837,6 +837,23 @@ int LOAD_TenStages(struct GameTracker *gGT, int loadingStage, struct BigHeader *
 			extern void NativeModelTexWarm_OnLevelLoad(struct GameTracker *gGT, struct Level *level);
 			NativeModelTexWarm_OnLevelLoad(gGT, gGT->level1);
 		}
+#if defined(CTR_NATIVE_TRACK_RENDERER) && CTR_NATIVE_TRACK_RENDERER
+		// Build the resident track mesh and its texture atlas now, behind the
+		// loading screen. Otherwise the first rendered frame of the level builds
+		// it (MainFrame_RenderFrame.c, NativeTrackMesh_Frame) and the race intro
+		// freezes for 0.5-0.8 s on an Old 3DS. The render-time call then finds it
+		// latched and returns at once.
+		// Playable levels only (tracks, arenas, adventure hubs: levelID below
+		// INTRO_RACE_TODAY). Menus and cutscenes upload their textures to VRAM
+		// after the load ends, so an atlas copied here would stay black (the
+		// character-select garage did); they build on their first frame as before.
+		if ((gGT->level1 != NULL) && (gGT->level1->ptr_mesh_info != NULL) &&
+		    ((gGT->renderFlags & RENDER_FLAG_DRAW_LEVEL) != 0) && (gGT->levelID < INTRO_RACE_TODAY))
+		{
+			extern void NativeTrackMesh_Frame(struct Level *level, struct mesh_info *mesh);
+			NativeTrackMesh_Frame(gGT->level1, gGT->level1->ptr_mesh_info);
+		}
+#endif
 #endif
 
 		// signify end of load

@@ -885,6 +885,16 @@ void PushBuffer_UpdateFrustum(struct PushBuffer *pb)
 }
 
 
+#ifndef CTR_NATIVE_GTE_CAPTURE
+#define CTR_NATIVE_GTE_CAPTURE 0
+#endif
+#if defined(CTR_NATIVE) && CTR_NATIVE_GTE_CAPTURE
+// Local prototype, as in DotLights.c (this file precedes the header in the
+// unity chain; MainFrame.c checks it against the real one).
+extern void GTECapture_AddPaintOnTopRange(const void *start, const void *end, int flatParallax);
+extern void NativeGpu_MarkSmokePacket(uintptr_t addr);
+#endif
+
 // NOTE(aalhendi): ASM-verified NTSC-U 926 0x80043928-0x80043ab8.
 void PushBuffer_FadeOneWindow(struct PushBuffer *pb)
 {
@@ -952,6 +962,24 @@ void PushBuffer_FadeOneWindow(struct PushBuffer *pb)
 
 		// move pointer after writing polygons
 		backBuffer->primMem.cursor = p + 1;
+
+#if defined(CTR_NATIVE) && CTR_NATIVE_GTE_CAPTURE
+		// A player view's fade (the white flash of a potion or TNT hit, the
+		// race-end fade) is linked at the head of that view's world OT: on the
+		// PS1 it paints over everything in the view, karts included. The
+		// depth-tested 3DS renderer put it at its OT slot's depth, so near
+		// geometry (the player's own kart, the road ahead) stayed unflashed.
+		// Paint-on-top pins it above all world content, below the HUD, flat
+		// in stereo; the deferred pass the exhaust smoke uses redraws it after
+		// the model pass, which would otherwise paint the karts over it. The
+		// walk sees the F4 command at &p->f4 (ParseTaglessPrimitive). Not for
+		// pushBuffer_UI, whose fades must cover the HUD.
+		if (pb != &sdata->gGT->pushBuffer_UI)
+		{
+			GTECapture_AddPaintOnTopRange(p, p + 1, 1);
+			NativeGpu_MarkSmokePacket((uintptr_t)&p->f4);
+		}
+#endif
 	}
 
 	// alter the fade value by the fade velocity

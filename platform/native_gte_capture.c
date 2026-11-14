@@ -1322,6 +1322,21 @@ void GTECapture_MarkOTNode(const void *node)
 	}
 }
 
+/* A run of OT slots [lo, hi] crossed back to back, `last` the one the walk
+ * stops on: the same state MarkOTNode leaves after visiting each of them --
+ * the sticky UI-band latch if any slot of the run is inside the band, and the
+ * per-node exemption / flag slot / paint-on-top state of the last one. */
+void GTECapture_MarkOTRun(const void *lo, const void *hi, const void *last)
+{
+	const GTECaptureBuffer *buf = &s_gteCaptureBuf[s_gteCaptureReadIdx];
+
+	if (((const u8 *)hi >= (const u8 *)buf->bandStart) && ((const u8 *)lo < (const u8 *)buf->bandEnd))
+	{
+		s_gteCaptureSuppress = 1;
+	}
+	GTECapture_MarkOTNode(last);
+}
+
 int GTECapture_LookupSuppressed(void)
 {
 	// Deliberately the RAW sticky flag. The flag-range exemption used to be

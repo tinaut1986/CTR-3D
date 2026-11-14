@@ -22,6 +22,9 @@ int N3DS_RenderWorkerStart(void (*workerMain)(void));
  * would otherwise never return). No-op if the worker never came up. */
 void N3DS_RenderWorkerStopAndJoin(void);
 
+/* The core the worker runs on (2 New 3DS, 1 Old 3DS), -1 when there is none. */
+int N3DS_RenderWorkerCore(void);
+
 /* 1 iff StopAndJoin timed out and the worker is still running. */
 int N3DS_RenderWorkerStuck(void);
 

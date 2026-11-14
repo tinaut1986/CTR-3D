@@ -53,7 +53,9 @@
 
 #define NATIVE_DISC_IMAGE_OWNER_MAIN  0
 #define NATIVE_DISC_IMAGE_OWNER_AUDIO 1
-#define NATIVE_DISC_IMAGE_OWNER_COUNT 2
+/* 3DS: the background XA read-ahead (n3ds_iothread.c), its own fd. */
+#define NATIVE_DISC_IMAGE_OWNER_PREFETCH 2
+#define NATIVE_DISC_IMAGE_OWNER_COUNT    3
 
 struct NativeDiscImageScratch
 {

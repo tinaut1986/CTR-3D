@@ -57,7 +57,7 @@ global_variable char s_nativeDiscImagePath[NATIVE_DISC_IMAGE_PATH_MAX];
  * 2. One fd per role deletes the shared-file-position hazard by construction,
  *    since each role's fd has exactly one thread using it at a time.
  */
-global_variable int s_nativeDiscImageFd[NATIVE_DISC_IMAGE_OWNER_COUNT] = {-1, -1};
+global_variable int s_nativeDiscImageFd[NATIVE_DISC_IMAGE_OWNER_COUNT] = {-1, -1, -1};
 #else
 global_variable FILE *s_nativeDiscImageFile;
 #endif
@@ -335,7 +335,7 @@ internal int NativeDiscImage_ReadRawRun(u32 lba, u32 count, u8 *raw, int owner)
 	size_t bytes;
 	u32 i;
 #if CTR_NATIVE_DISC_IO_PROFILE
-	struct NativeDiscImageIoProf *prof = &s_nativeDiscIoProf[(owner == NATIVE_DISC_IMAGE_OWNER_AUDIO) ? NATIVE_DISC_IMAGE_OWNER_AUDIO : NATIVE_DISC_IMAGE_OWNER_MAIN];
+	struct NativeDiscImageIoProf *prof = &s_nativeDiscIoProf[(owner != NATIVE_DISC_IMAGE_OWNER_MAIN) ? NATIVE_DISC_IMAGE_OWNER_AUDIO : NATIVE_DISC_IMAGE_OWNER_MAIN];
 	unsigned long long beginTick;
 #else
 	(void)owner;
@@ -382,7 +382,7 @@ internal int NativeDiscImage_ReadRawRun(u32 lba, u32 count, u8 *raw, int owner)
 	 */
 	{
 #if defined(__3DS__)
-		int fd = s_nativeDiscImageFd[(owner == NATIVE_DISC_IMAGE_OWNER_AUDIO) ? NATIVE_DISC_IMAGE_OWNER_AUDIO : NATIVE_DISC_IMAGE_OWNER_MAIN];
+		int fd = s_nativeDiscImageFd[((owner > 0) && (owner < NATIVE_DISC_IMAGE_OWNER_COUNT)) ? owner : NATIVE_DISC_IMAGE_OWNER_MAIN];
 		int seekFailed = (lseek(fd, (off_t)offset, SEEK_SET) < 0);
 #else
 		int seekFailed = (fseek(s_nativeDiscImageFile, (long)offset, SEEK_SET) != 0);

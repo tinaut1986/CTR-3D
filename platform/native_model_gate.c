@@ -57,6 +57,8 @@ void NativeModelGate_Load(struct NativeModelGate *g)
 	/* C2_H is the s16 view of the register; gte_divide takes it as u16, the
 	 * same conversion the RTPS call site makes. */
 	g->h = (u16)C2_H;
+	g->dqa = C2_DQA;
+	g->dqb = C2_DQB;
 	NativeModelGate_FromGte(&g->fifo);
 }
 
@@ -68,7 +70,7 @@ void NativeModelGate_Load(struct NativeModelGate *g)
  * bit the gate reads, bit 18), h/SZ3 through the UNR divide and Lm_E's 0x1ffff
  * ceiling, then OFX/OFY + IR*q >> 16 clamped to [-0x400, 0x3ff].
  */
-static inline __attribute__((always_inline)) u32 NativeModelGate_Vertex(struct NativeModelGate *g, u32 xy, u32 z, u32 *outSxy, int store)
+static inline __attribute__((always_inline)) u32 NativeModelGate_VertexQ(struct NativeModelGate *g, u32 xy, u32 z, u32 *outSxy, int store, u32 *outQ)
 {
 	const s32 vx = (s16)(xy & 0xffffu);
 	const s32 vy = (s16)(xy >> 16);
@@ -98,6 +100,10 @@ static inline __attribute__((always_inline)) u32 NativeModelGate_Vertex(struct N
 	}
 
 	q = gte_divide(g->h, (u16)sz);
+	if (q == 0xffffffffu)
+	{
+		flag |= 1u << 17; /* Lm_E: divide overflow */
+	}
 	q = (q > 0x1ffffu) ? 0x1ffffu : q; /* Lm_E: the overflow value 0xffffffff lands on the same ceiling */
 
 	{
@@ -106,6 +112,10 @@ static inline __attribute__((always_inline)) u32 NativeModelGate_Vertex(struct N
 
 		sx = (s32)(sxFull >> 16);
 		sy = (s32)(syFull >> 16);
+		if ((sxFull > 0x7fffffffLL) || (syFull > 0x7fffffffLL))
+		{
+			flag |= 1u << 16; /* F() on the screen sums */
+		}
 #if CTR_NATIVE_GTE_CAPTURE
 		/* The capture side effect of GTE_RotTransPers, same condition, same
 		 * arguments: only for a producer whose packets still resolve depth
@@ -126,6 +136,32 @@ static inline __attribute__((always_inline)) u32 NativeModelGate_Vertex(struct N
 	g->fifo.sz[2] = g->fifo.sz[3];
 	g->fifo.sz[3] = (u16)sz;
 	*outSxy = ((u32)(u16)sy << 16) | (u32)(u16)sx;
+	*outQ = q;
+	return flag;
+}
+
+static inline __attribute__((always_inline)) u32 NativeModelGate_Vertex(struct NativeModelGate *g, u32 xy, u32 z, u32 *outSxy, int store)
+{
+	u32 q;
+
+	return NativeModelGate_VertexQ(g, xy, z, outSxy, store, &q);
+}
+
+int g_dbg_skyFast = 1;
+
+u32 NativeModelGate_RtptFlags(struct NativeModelGate *g, u32 xy0, u32 z0, u32 xy1, u32 z1, u32 xy2, u32 z2)
+{
+	u32 flag;
+	u32 q;
+
+	flag = NativeModelGate_VertexQ(g, xy0, z0, &g->fifo.sxy[0], 0, &q);
+	flag |= NativeModelGate_VertexQ(g, xy1, z1, &g->fifo.sxy[1], 0, &q);
+	flag |= NativeModelGate_VertexQ(g, xy2, z2, &g->fifo.sxy[2], 0, &q);
+	/* RTPT's MAC0 = DQB + DQA * (h / SZ3) of the last vertex, through F(). */
+	if (((s64)g->dqb + ((s64)g->dqa * (s64)q)) > 0x7fffffffLL)
+	{
+		flag |= 1u << 16;
+	}
 	return flag;
 }
 
@@ -177,6 +213,95 @@ u32 NativeModelGate_Rtps(struct NativeModelGate *g, int reuseFirstVertex, u32 xy
 	g->fifo.sxy[1] = g->fifo.sxy[2];
 	g->fifo.sxy[2] = sxy2;
 	return flag;
+}
+
+int g_dbg_modelFast = 1;
+
+/* Camera-space x/y clamped to +/-2^30 so they stay s32 (only a vertex absurdly
+ * far off to the side reaches it, where the facing of its triangle is moot). */
+static inline __attribute__((always_inline)) s32 NativeModelGate_Clamp30(s64 v)
+{
+	return (v > 0x3fffffffLL) ? 0x3fffffff : (v < -0x3fffffffLL) ? -0x3fffffff : (s32)v;
+}
+
+/* det[a; b; c]'s sign. The 2x2 minors are exact s64 (one smull each); only the
+ * outer three products go through double (VFP), because an s64 x s64 multiply
+ * is a library call on the ARM11. |det| < 2^58 and the double keeps 53 bits, so
+ * the sign can only differ for a triangle within rounding of edge-on. */
+static inline __attribute__((always_inline)) s32 NativeModelGate_DetSide(const s32 *a, const s32 *b, const s32 *c)
+{
+	const s64 m0 = ((s64)b[1] * c[2]) - ((s64)b[2] * c[1]);
+	const s64 m1 = ((s64)b[0] * c[2]) - ((s64)b[2] * c[0]);
+	const s64 m2 = ((s64)b[0] * c[1]) - ((s64)b[1] * c[0]);
+	const double det = ((double)a[0] * (double)m0) - ((double)a[1] * (double)m1) + ((double)a[2] * (double)m2);
+
+	return (det > 0.0) ? 0x10000 : (det < 0.0) ? -0x10000 : 0;
+}
+
+static inline __attribute__((always_inline)) int NativeModelGate_Camera(const struct NativeModelGate *g, u32 xy, u32 z, s32 *c)
+{
+	const s32 vx = (s16)(xy & 0xffffu);
+	const s32 vy = (s16)(xy >> 16);
+	const s32 vz = (s16)(z & 0xffffu);
+	const s64 mac3 = (s64)((s64)g->trz << 12) + (g->r31 * vx) + (g->r32 * vy) + (g->r33 * vz);
+	const s32 cz = (s32)(mac3 >> 12);
+
+	if ((cz <= 0) || (cz > 0xffff))
+	{
+		return 0;
+	}
+	c[0] = NativeModelGate_Clamp30(((s64)((s64)g->trx << 12) + (g->r11 * vx) + (g->r12 * vy) + (g->r13 * vz)) >> 12);
+	c[1] = NativeModelGate_Clamp30(((s64)((s64)g->try_ << 12) + (g->r21 * vx) + (g->r22 * vy) + (g->r23 * vz)) >> 12);
+	c[2] = cz;
+	return 1;
+}
+
+int NativeModelGate_CameraTest(const struct NativeModelGate *g, u32 xy0, u32 z0, u32 xy1, u32 z1, u32 xy2, u32 z2, s32 *sideOut)
+{
+	s32 a[3];
+	s32 b[3];
+	s32 c[3];
+
+	if (!NativeModelGate_Camera(g, xy0, z0, a) || !NativeModelGate_Camera(g, xy1, z1, b) || !NativeModelGate_Camera(g, xy2, z2, c))
+	{
+		return 0;
+	}
+	*sideOut = NativeModelGate_DetSide(a, b, c);
+	return 1;
+}
+
+int NativeModelGate_CameraTestFifo(const struct NativeModelGate *g, struct NativeModelGateCamFifo *f, int useRtps, int reuseFirstVertex, const u32 *xy3, const u32 *z3,
+                                   s32 *sideOut)
+{
+	if (useRtps)
+	{
+		/* The walk shifted tempPacked by one since the last projection (and
+		 * copied [0] into [1] on a bit-30 continuation): do the same here. */
+		memcpy(f->c[0], f->c[1], sizeof(f->c[0]));
+		memcpy(f->c[1], f->c[2], sizeof(f->c[0]));
+		memcpy(f->c[2], f->c[3], sizeof(f->c[0]));
+		f->ok[0] = f->ok[1];
+		f->ok[1] = f->ok[2];
+		f->ok[2] = f->ok[3];
+		if (reuseFirstVertex)
+		{
+			memcpy(f->c[1], f->c[0], sizeof(f->c[0]));
+			f->ok[1] = f->ok[0];
+		}
+		f->ok[3] = (u8)NativeModelGate_Camera(g, xy3[2], z3[2], f->c[3]);
+	}
+	else
+	{
+		f->ok[1] = (u8)NativeModelGate_Camera(g, xy3[0], z3[0], f->c[1]);
+		f->ok[2] = (u8)NativeModelGate_Camera(g, xy3[1], z3[1], f->c[2]);
+		f->ok[3] = (u8)NativeModelGate_Camera(g, xy3[2], z3[2], f->c[3]);
+	}
+	if (!f->ok[1] || !f->ok[2] || !f->ok[3])
+	{
+		return 0;
+	}
+	*sideOut = NativeModelGate_DetSide(f->c[1], f->c[2], f->c[3]);
+	return 1;
 }
 
 void NativeModelGate_ToGte(const struct NativeModelGateFifo *f)

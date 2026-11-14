@@ -26,16 +26,20 @@
 #if defined(CTR_NATIVE) && defined(CTR_INTERNAL) && defined(__3DS__)
 #include <platform/native_perf.h>
 #define RB_INSTPROF                   1
-#define RB_INSTPROF_COUNT(field)      (g_instProf.field++)
-#define RB_INSTPROF_SAMPLE()          (((++g_instProf.clock) & (NATIVE_INSTPROF_SAMPLE_EVERY - 1)) == 0)
+#define RB_INSTPROF_COUNT(field)      (g_dbg_deepProf ? (void)(g_instProf.field++) : (void)0)
+#define RB_INSTPROF_SAMPLE()          (g_dbg_deepProf && ((((++g_instProf.clock) & (NATIVE_INSTPROF_SAMPLE_EVERY - 1)) == 0)))
 #define RB_INSTPROF_TICK()            NativeInstProf_Tick()
 #define RB_INSTPROF_PHASE(phase, t0)  (g_instProf.samples[(phase)]++, g_instProf.ticks[(phase)] += NativeInstProf_Tick() - (t0))
+#define RB_PROFLOC(loc)               (g_profLoc = (u8)(loc))
+#define RB_PROFLOC_SAVE()             g_profLoc
 #else
 #define RB_INSTPROF                   0
 #define RB_INSTPROF_COUNT(field)      ((void)0)
 #define RB_INSTPROF_SAMPLE()          0
 #define RB_INSTPROF_TICK()            0u
 #define RB_INSTPROF_PHASE(phase, t0)  ((void)(t0))
+#define RB_PROFLOC(loc)               ((void)0)
+#define RB_PROFLOC_SAVE()             0
 #endif
 
 #if defined(CTR_NATIVE) && defined(CTR_NATIVE_MODEL_RENDERER) && CTR_NATIVE_MODEL_RENDERER
@@ -1374,7 +1378,116 @@ static void RenderBucket_StoreMvpTranslation(struct InstDrawPerPlayer *idpp, con
 	CTC2(viewPos->vz, 7);
 }
 
+#ifdef CTR_NATIVE
+/*
+ * Rival-kart LOD step (g_dbg_kartLod; dumpreq `kartlod`: 0 off, 1 dynamic, 2
+ * always). The Old 3DS sets 1 at boot (n3ds_backend.c). At a race start every
+ * kart sits near the camera on its finest model, ~1600 model triangles a frame
+ * against ~800 mid-race, and on an Old 3DS the model path then costs ~13 ms.
+ * While the previous frame had RIVAL_NEAR or more rival karts (not a human
+ * player's) on one of their two finest rungs, rival karts draw one rung coarser (~30% fewer
+ * triangles; MODELFRAME's rung+1 figure). It lets go after RIVAL_QUIET frames in
+ * a row with fewer than RIVAL_NEAR - 1. Counted on the rung retail picked,
+ * before the step, so the step cannot switch itself off. Human players' karts
+ * and every other model are untouched.
+ */
+int g_dbg_kartLod = 0;
+#define RB_KARTLOD_RIVAL_NEAR  4
+/* A rival counts as near on rungs 0..1: at a race start the karts beside and behind the
+ * camera sit on rungs 1-2 (measured), not 0, yet 8 of them are ~1500 triangles. */
+#define RB_KARTLOD_NEAR_RUNG   1
+#define RB_KARTLOD_RIVAL_QUIET 30
+static int s_kartLodActive;
+static int s_kartLodNear;
+static int s_kartLodQuiet;
+static int s_kartLodFrame = -1;
+/* [KARTLOD] window: frames, frames stepped, rival draws, of which finest-rung, stepped. */
+static u32 s_klFrames, s_klActiveFrames, s_klRivals, s_klRivalsFine, s_klStepped;
+
+static int RenderBucket_IsRivalKart(const struct Instance *inst)
+{
+	struct GameTracker *gGT = sdata->gGT;
+	int i;
+
+	if (gGT == NULL)
+	{
+		return 0;
+	}
+	for (i = gGT->numPlyrCurrGame; i < 8; i++)
+	{
+		const struct Driver *d = gGT->drivers[i];
+
+		if ((d != NULL) && (d->instSelf == inst))
+		{
+			return 1;
+		}
+	}
+	return 0;
+}
+
+/* Once per frame, on the first rival kart: settle the step from the last frame's count. */
+static void RenderBucket_KartLodFrame(void)
+{
+	const int frame = sdata->frameCounter;
+
+	if (frame == s_kartLodFrame)
+	{
+		return;
+	}
+	s_kartLodFrame = frame;
+	s_klFrames++;
+	s_klActiveFrames += s_kartLodActive ? 1u : 0u;
+	if (s_klFrames >= 64)
+	{
+		Platform_LogInstrument("[KARTLOD] mode=%d frames=%lu stepped=%lu rivals/f=%lu fine/f=%lu steppedDraws/f=%lu\n", g_dbg_kartLod, (unsigned long)s_klFrames,
+		                       (unsigned long)s_klActiveFrames, (unsigned long)(s_klRivals / s_klFrames), (unsigned long)(s_klRivalsFine / s_klFrames),
+		                       (unsigned long)(s_klStepped / s_klFrames));
+		s_klFrames = s_klActiveFrames = s_klRivals = s_klRivalsFine = s_klStepped = 0;
+	}
+	if (s_kartLodNear >= RB_KARTLOD_RIVAL_NEAR)
+	{
+		s_kartLodActive = 1;
+		s_kartLodQuiet = 0;
+	}
+	else if (s_kartLodActive && (s_kartLodNear < (RB_KARTLOD_RIVAL_NEAR - 1)))
+	{
+		if (++s_kartLodQuiet >= RB_KARTLOD_RIVAL_QUIET)
+		{
+			s_kartLodActive = 0;
+		}
+	}
+	s_kartLodNear = 0;
+}
+#endif
+
+static struct ModelHeader *RenderBucket_SelectModelHeaderRetail(struct Instance *inst, struct PushBuffer *pb, int *lodIndexOut, int *lodExhaustedOut, int viewDepth);
+
 static struct ModelHeader *RenderBucket_SelectModelHeader(struct Instance *inst, struct PushBuffer *pb, int *lodIndexOut, int *lodExhaustedOut, int viewDepth)
+{
+	struct ModelHeader *mh = RenderBucket_SelectModelHeaderRetail(inst, pb, lodIndexOut, lodExhaustedOut, viewDepth);
+
+#ifdef CTR_NATIVE
+	if ((mh != 0) && (g_dbg_kartLod != 0) && RenderBucket_IsRivalKart(inst))
+	{
+		RenderBucket_KartLodFrame();
+		s_klRivals++;
+		if (*lodIndexOut <= RB_KARTLOD_NEAR_RUNG)
+		{
+			s_kartLodNear++;
+			s_klRivalsFine++;
+		}
+		if (((g_dbg_kartLod == 2) || s_kartLodActive) && ((*lodIndexOut + 1) < inst->model->numHeaders))
+		{
+			mh++;
+			(*lodIndexOut)++;
+			s_klStepped++;
+		}
+	}
+#endif
+	return mh;
+}
+
+static struct ModelHeader *RenderBucket_SelectModelHeaderRetail(struct Instance *inst, struct PushBuffer *pb, int *lodIndexOut, int *lodExhaustedOut, int viewDepth)
 {
 	struct ModelHeader *mh;
 	int headersRemaining;
@@ -3017,6 +3130,42 @@ static int RenderBucket_ProjectGatedPrim(struct RenderBucketDrawContext *ctx, st
 
 	return RenderBucket_TriangleInScreenWindowXY(ctx, gate->fifo.sxy[0], gate->fifo.sxy[1], gate->fifo.sxy[2]);
 }
+
+/* The fast form of the test above (NativeModelGate_CameraTest): depth range and
+ * the NCLIP side test from camera space, no projection, no screen window. The
+ * gate's FIFO is not advanced; a declined triangle re-projects its three
+ * vertices with RTPT (see the packet write). */
+static int RenderBucket_FastGatedPrim(struct RenderBucketDrawContext *ctx, const struct NativeModelGate *gate, struct NativeModelGateCamFifo *cam, u32 command, int useRtps,
+                                      int reuseFirstVertex)
+{
+	const u32 xy3[3] = {ctx->tempPacked[1].xy, ctx->tempPacked[2].xy, ctx->tempPacked[3].xy};
+	const u32 z3[3] = {ctx->tempPacked[1].z, ctx->tempPacked[2].z, ctx->tempPacked[3].z};
+	s32 side;
+
+	if (!NativeModelGate_CameraTestFifo(gate, cam, useRtps, reuseFirstVertex, xy3, z3, &side))
+	{
+		return 0;
+	}
+
+	if ((s32)(command << 3) < 0)
+	{
+		int cullXor;
+		s16 cullFlags = (s16)(u16)ctx->idpp->instFlags;
+
+		if (side == 0)
+		{
+			return 0;
+		}
+
+		cullXor = (s32)cullFlags ^ (s32)(command << 2);
+		if ((s32)((u32)side ^ (u32)cullXor) <= 0)
+		{
+			return 0;
+		}
+	}
+
+	return 1;
+}
 #endif
 
 static void RenderBucket_InitSplitVertex(struct RenderBucketDrawContext *ctx, int slot, u32 packedXY, u32 packedZ, int color)
@@ -4646,6 +4795,9 @@ static int RenderBucket_DrawWaterSplitClipped(struct RenderBucketDrawContext *ct
 
 void RenderBucket_DrawFunc_Normal(struct RenderBucketDrawContext *ctx)
 {
+	const u8 profLocPrev = (u8)RB_PROFLOC_SAVE();
+	const int profLocSetup = (RB_PROFLOC(NATIVE_PROFLOC_MDL_SETUP), 0);
+
 	u32 *pCmd;
 
 #if defined(CTR_NATIVE) && defined(CTR_NATIVE_MODEL_RENDERER) && CTR_NATIVE_MODEL_RENDERER
@@ -4694,10 +4846,15 @@ void RenderBucket_DrawFunc_Normal(struct RenderBucketDrawContext *ctx)
 	 * CPU only has to decide which ones it hands over. Only in state 1 -- in
 	 * states 0 and 2 the packet path consumes the full projection anyway. */
 	struct NativeModelGate mdlGate;
+	struct NativeModelGateCamFifo mdlCam;
 	int mdlGated;
+	int mdlFast;
 
 	memset(&mdlGate, 0, sizeof(mdlGate));
 	mdlGated = mdlReplaces && NativeModelGate_Begin(&mdlGate);
+	/* Specular instances keep the projected gate: their writer's colour reads
+	 * NCLIP from the FIFO. */
+	mdlFast = mdlGated && g_dbg_modelFast && !mdlSpecular;
 #endif
 
 	// NOTE(aalhendi): ASM-verified NTSC-U 926 0x8006a52c-0x8006a8e0;
@@ -4707,10 +4864,20 @@ void RenderBucket_DrawFunc_Normal(struct RenderBucketDrawContext *ctx)
 
 	while (*pCmd != 0xffffffff)
 	{
-		u32 command = *pCmd++;
-		u16 flags = (command >> 24) & 0xff;
-		u16 stackIndex = (command >> 16) & 0xff;
+		u32 command;
+		u16 flags;
+		u16 stackIndex;
 		int startsNewStrip;
+
+#ifdef CTR_NATIVE
+		/* PLD two cache lines ahead in the command list: on an Old 3DS (no L2,
+		 * 16 KB L1) eight kart models' lists are cold every frame, and the walk
+		 * otherwise stalls on each new line. A hint: no effect on results. */
+		__builtin_prefetch(pCmd + 16);
+#endif
+		command = *pCmd++;
+		flags = (command >> 24) & 0xff;
+		stackIndex = (command >> 16) & 0xff;
 		int useRtps;
 		int reuseFirstVertex;
 		u32 drawCommand;
@@ -4728,7 +4895,9 @@ void RenderBucket_DrawFunc_Normal(struct RenderBucketDrawContext *ctx)
 
 		ipSample = RB_INSTPROF_SAMPLE();
 		ipT0 = ipSample ? RB_INSTPROF_TICK() : 0u;
+		RB_PROFLOC(NATIVE_PROFLOC_MDL_DECODE);
 		decoded = RenderBucket_DispatchUncompressAnimationFrame(ctx, command, stackIndex);
+		RB_PROFLOC(NATIVE_PROFLOC_MDL_LOOP);
 		if (ipSample)
 		{
 			RB_INSTPROF_PHASE(NATIVE_INSTPROF_DECODE, ipT0);
@@ -4804,7 +4973,14 @@ void RenderBucket_DrawFunc_Normal(struct RenderBucketDrawContext *ctx)
 
 			ipT0 = ipSample ? RB_INSTPROF_TICK() : 0u;
 #if defined(CTR_NATIVE) && defined(CTR_NATIVE_MODEL_RENDERER) && CTR_NATIVE_MODEL_RENDERER
-			if (mdlGated)
+			RB_PROFLOC(NATIVE_PROFLOC_MDL_ACCEPT);
+			if (mdlFast)
+			{
+				depthMac0 = 0;
+				shouldDraw = RenderBucket_FastGatedPrim(ctx, &mdlGate, &mdlCam, drawCommand, useRtps, reuseFirstVertex);
+				RB_INSTPROF_COUNT(gated);
+			}
+			else if (mdlGated)
 			{
 				depthMac0 = 0;
 				shouldDraw = RenderBucket_ProjectGatedPrim(ctx, &mdlGate, drawCommand, useRtps, reuseFirstVertex);
@@ -4834,6 +5010,7 @@ void RenderBucket_DrawFunc_Normal(struct RenderBucketDrawContext *ctx)
 			}
 			RB_INSTPROF_COUNT(accepted);
 
+			RB_PROFLOC(NATIVE_PROFLOC_MDL_TEX);
 			tex = RenderBucket_GetCommandTexture(ctx, drawCommand, &isValidTexture);
 			if (isValidTexture == 0)
 			{
@@ -4868,6 +5045,7 @@ void RenderBucket_DrawFunc_Normal(struct RenderBucketDrawContext *ctx)
 			 * must decline it too -- claiming it would draw geometry retail
 			 * never shows. Declined = mdlClaimed stays 0, and the writer's own
 			 * no-op handles the rest. */
+			RB_PROFLOC(NATIVE_PROFLOC_MDL_CAPTURE);
 			if (mdlCapture && !((mdlSpecular || mdlDepthFade) && tex == 0))
 			{
 				const u32 mdlXY[3] = {ctx->tempPacked[1].xy, ctx->tempPacked[2].xy, ctx->tempPacked[3].xy};
@@ -4934,6 +5112,7 @@ void RenderBucket_DrawFunc_Normal(struct RenderBucketDrawContext *ctx)
 				int drawResult;
 
 				RB_INSTPROF_COUNT(packets);
+				RB_PROFLOC(NATIVE_PROFLOC_MDL_PACKET);
 				ipT0 = ipSample ? RB_INSTPROF_TICK() : 0u;
 #if defined(CTR_NATIVE) && defined(CTR_NATIVE_MODEL_RENDERER) && CTR_NATIVE_MODEL_RENDERER
 				if (mdlGated)
@@ -4943,8 +5122,17 @@ void RenderBucket_DrawFunc_Normal(struct RenderBucketDrawContext *ctx)
 					 * registers and AVSZ3's MAC0. Re-run the retail projection
 					 * from the FIFO this triangle started with; it accepts
 					 * (same arithmetic), and the writer runs as in state 0. */
-					NativeModelGate_ToGte(&mdlFifoBefore);
-					drawResult = RenderBucket_ProjectPrim_Normal(ctx, drawCommand, useRtps, reuseFirstVertex, &depthMac0) ? RenderBucket_DispatchDrawInstPrim(ctx, drawCommand, tex, depthMac0) : 0;
+					if (mdlFast)
+					{
+						/* The FIFO was not kept: RTPT of the triangle's own three
+						 * vertices leaves SXY0-2 / SZ1-3 as the strip would have. */
+						drawResult = RenderBucket_ProjectPrim_Normal(ctx, drawCommand, 0, 0, &depthMac0) ? RenderBucket_DispatchDrawInstPrim(ctx, drawCommand, tex, depthMac0) : 0;
+					}
+					else
+					{
+						NativeModelGate_ToGte(&mdlFifoBefore);
+						drawResult = RenderBucket_ProjectPrim_Normal(ctx, drawCommand, useRtps, reuseFirstVertex, &depthMac0) ? RenderBucket_DispatchDrawInstPrim(ctx, drawCommand, tex, depthMac0) : 0;
+					}
 					/* A writer may move the FIFO (the GTE state is the truth now). */
 					NativeModelGate_FromGte(&mdlGate.fifo);
 				}
@@ -4969,6 +5157,7 @@ void RenderBucket_DrawFunc_Normal(struct RenderBucketDrawContext *ctx)
 						NativeModelEmit_EndInstance();
 					}
 #endif
+					RB_PROFLOC(profLocPrev);
 					return;
 				}
 			}
@@ -4978,6 +5167,7 @@ void RenderBucket_DrawFunc_Normal(struct RenderBucketDrawContext *ctx)
 	}
 
 #if defined(CTR_NATIVE) && defined(CTR_NATIVE_MODEL_RENDERER) && CTR_NATIVE_MODEL_RENDERER
+	RB_PROFLOC(NATIVE_PROFLOC_MDL_END);
 	if (mdlGated)
 	{
 		/* Leave the SXY/SZ FIFO where the retail walk would have; the gate
@@ -4989,6 +5179,9 @@ void RenderBucket_DrawFunc_Normal(struct RenderBucketDrawContext *ctx)
 		NativeModelEmit_EndInstance();
 	}
 #endif
+	RB_PROFLOC(profLocPrev);
+	(void)profLocPrev;
+	(void)profLocSetup;
 }
 
 static u32 RenderBucket_MirrorSpecialPackedXY(struct RenderBucketDrawContext *ctx, u32 packedXY)

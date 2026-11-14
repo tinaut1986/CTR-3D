@@ -2481,7 +2481,24 @@ internal void PacketDepth_FillParallaxFromCapture(const s16 *xs, const s16 *ys, 
  * caller's signal to keep its existing ordinal. */
 int NativeUiMap_RouteActive(void);
 
+internal int PacketDepth_ResolveXY_Impl(const s16 *xs, const s16 *ys, int n, u16 *out, u16 *perVert, u16 *perVertPar);
+/* [SAMPLE] location while it runs (native_perf.c). */
 internal int PacketDepth_ResolveXY(const s16 *xs, const s16 *ys, int n, u16 *out, u16 *perVert, u16 *perVertPar)
+{
+#if defined(CTR_INTERNAL) && defined(__3DS__)
+	const u8 profLocPrev = g_profLoc;
+	int r;
+
+	g_profLoc = (u8)NATIVE_PROFLOC_DEPTH;
+	r = PacketDepth_ResolveXY_Impl(xs, ys, n, out, perVert, perVertPar);
+	g_profLoc = profLocPrev;
+	return r;
+#else
+	return PacketDepth_ResolveXY_Impl(xs, ys, n, out, perVert, perVertPar);
+#endif
+}
+
+internal int PacketDepth_ResolveXY_Impl(const s16 *xs, const s16 *ys, int n, u16 *out, u16 *perVert, u16 *perVertPar)
 {
 	u16 sz3s[4];
 	u16 maxSz3 = 0;
@@ -3181,6 +3198,38 @@ internal int PacketDepth_ResolvePacked(const u32 *xyPacked, int n, u16 *out, u16
 }
 #endif
 
+#if defined(__3DS__)
+/*
+ * Set by the pause background's tiles (ElimBG, the POLY_FT4 case) for the primitive being parsed and
+ * consumed by its stamp below: their parallax goes to the screen plane instead of the UI band's fixed
+ * pop-out. The tiles are a photo of the last frame with its HUD put back in its mono place
+ * (N3DS_CopyDisplayedTopFrame), so it belongs on the screen in both eyes; popped out like the live HUD,
+ * the photo moved per eye and the renderer stretched its edge tiles to cover the gap that left
+ * (N3DS_UiEdgeExtend, skipped for vertices without the UI pop-out).
+ */
+global_variable int s_ngpuPauseTileNext = 0;
+unsigned short N3DS_StereoScreenParallaxStamp(void);
+#endif
+
+/* The primitive just stamped is a pause tile: its parallax to the screen plane. Both stamp paths. */
+internal void NativeGpu_ApplyPauseTileParallax(int firstVertex)
+{
+#if defined(__3DS__)
+	if (s_ngpuPauseTileNext)
+	{
+		const u16 screen = (u16)N3DS_StereoScreenParallaxStamp();
+
+		for (int i = firstVertex; i < s_gpu.vertexIndex; i++)
+		{
+			s_gpu.vertexBuffer[i].parallaxOrdinal = screen;
+		}
+		s_ngpuPauseTileNext = 0;
+	}
+#else
+	(void)firstVertex;
+#endif
+}
+
 internal void NativeGpu_StampEmitOrdinal(int firstVertex)
 {
 	u16 stamp = NativeGpu_NextDepthStamp();
@@ -3228,6 +3277,7 @@ internal void NativeGpu_StampEmitOrdinal(int firstVertex)
 			{
 				s_pktDepth2.wldPerVert++;
 			}
+			NativeGpu_ApplyPauseTileParallax(firstVertex);
 			s_gpu.emitOrdinal++;
 			return;
 		}
@@ -3296,6 +3346,7 @@ internal void NativeGpu_StampEmitOrdinal(int firstVertex)
 		 * -than-rippling face, not a wrong depth. */
 		s_gpu.vertexBuffer[i].parallaxOrdinal = stamp;
 	}
+	NativeGpu_ApplyPauseTileParallax(firstVertex);
 	s_gpu.emitOrdinal++;
 }
 
@@ -5311,14 +5362,19 @@ void ParsePrimitivesLinkedList(u32 *p, int singlePrimitive)
 		}
 
 #if defined(CTR_INTERNAL) && defined(__3DS__)
-		const u64 profWalkStart = PARSEPROF_TICK();
+		const u64 profWalkStart = g_dbg_deepProf ? PARSEPROF_TICK() : 0;
 #endif
+
+		uintptr_t lkHost[2] = {0, 0};
+		u32 lkT0[2] = {1, 1};
+		u32 lkT1[2] = {0, 0};
+		int lkVictim = 0;
 
 		while (true)
 		{
 			otWalkIterations++;
 #if defined(CTR_INTERNAL) && defined(__3DS__)
-			const int profSample = ((otWalkIterations % PARSEPROF_SAMPLE_EVERY) == 0);
+			const int profSample = g_dbg_deepProf && ((otWalkIterations % PARSEPROF_SAMPLE_EVERY) == 0);
 			u64 profNodeStart = profSample ? PARSEPROF_TICK() : 0;
 			int profClass = PARSEPROF_EMPTY;
 
@@ -5380,6 +5436,7 @@ void ParsePrimitivesLinkedList(u32 *p, int singlePrimitive)
 				// handled node emitted its triangles and advanced the emit
 				// ordinals itself, so the parse loop must not see it. See
 				// native_direct_emit.c.
+				NATIVE_PROFLOC_SET(NATIVE_PROFLOC_WALK_DEMIT);
 				if (NativeDirectEmit_TryNode(basePacket, (u32)tagLength))
 				{
 					// handled: nothing to parse
@@ -5394,11 +5451,11 @@ void ParsePrimitivesLinkedList(u32 *p, int singlePrimitive)
 					{
 						u32 runNodes;
 #if defined(CTR_INTERNAL)
-						const u64 runStart = PARSEPROF_TICK();
+						const u64 runStart = g_dbg_deepProf ? PARSEPROF_TICK() : 0;
 #endif
 						basePacket = NativeDirectEmit_G4Run(basePacket, (u32)tagLength, &otWalkIterations, &runNodes);
 #if defined(CTR_INTERNAL)
-						if (runNodes > 0)
+						if (g_dbg_deepProf && (runNodes > 0))
 						{
 							const u64 runTicks = PARSEPROF_TICK() - runStart;
 
@@ -5418,6 +5475,7 @@ void ParsePrimitivesLinkedList(u32 *p, int singlePrimitive)
 #if defined(CTR_INTERNAL) && defined(__3DS__)
 					profClass = PARSEPROF_PARSE;
 #endif
+					NATIVE_PROFLOC_SET(NATIVE_PROFLOC_WALK_PARSE);
 					u8 *endPacket = basePacket + (tagLength + P_LEN) * sizeof(u32);
 					int primLength = 0;
 					int firstVertex = s_gpu.vertexIndex;
@@ -5451,6 +5509,7 @@ void ParsePrimitivesLinkedList(u32 *p, int singlePrimitive)
 			}
 			else
 			{
+				NATIVE_PROFLOC_SET(NATIVE_PROFLOC_WALK_EMPTY);
 				NativeGpu_WalkCrossEmptyNode((uintptr_t)basePacket);
 
 #if !defined(CTR_NATIVE_OTWALK_PROFILE)
@@ -5469,19 +5528,60 @@ void ParsePrimitivesLinkedList(u32 *p, int singlePrimitive)
 				 * unchanged. (Off in OTPROF builds, which record every node.)
 				 */
 				{
+					/* Links are followed through the registered range of the
+					 * first one (host = hostStart + token - tokenStart: what
+					 * nextPrim + NativeGpu_IsValidOTLink give, without their
+					 * two range lookups per slot); a token outside it looks
+					 * its range up once. GTECapture_MarkOTNode is applied per
+					 * contiguous stretch of slots (GTECapture_MarkOTRun: the
+					 * sticky band latch over the stretch, the per-node state of
+					 * its last slot), which is the state the per-slot calls
+					 * left: nothing reads it until a node with content. */
 					u32 emptyRun = 0;
+					uintptr_t rHost = 0;
+					u32 rTok0 = 1;
+					u32 rTok1 = 0;
+#if defined(CTR_NATIVE) && CTR_NATIVE_GTE_CAPTURE
+					u8 *segHi = NULL;
+					u8 *segLo = NULL;
+#endif
 
-					while (!isendprim(basePacket))
+					for (;;)
 					{
-						u8 *next = nextPrim(basePacket);
+						const u32 token = CTR_GPU_ReadTagWord(basePacket) & 0x00ffffffu;
+						u8 *next;
 
-						if (!NativeGpu_IsValidOTLink((uintptr_t)next) || (getlen(next) != 0) || (otWalkIterations >= 65536))
+						if (NativeGpuLinks_IsTerminator(token))
+						{
+							break;
+						}
+						if ((token < rTok0) || (token >= rTok1))
+						{
+							if (!NativeGpuLinks_TokenRange(token, &rHost, &rTok0, &rTok1))
+							{
+								break;
+							}
+						}
+						next = (u8 *)(rHost + (uintptr_t)(token - rTok0));
+						if ((((uintptr_t)next & 3u) != 0) || (getlen(next) != 0) || (otWalkIterations >= 65536))
 						{
 							break;
 						}
 						otWalkIterations++;
 #if defined(CTR_NATIVE) && CTR_NATIVE_GTE_CAPTURE
-						GTECapture_MarkOTNode(next);
+						if ((segLo != NULL) && (next + 4 == segLo))
+						{
+							segLo = next;
+						}
+						else
+						{
+							if (segLo != NULL)
+							{
+								GTECapture_MarkOTRun(segLo, segHi, segLo);
+							}
+							segLo = next;
+							segHi = next;
+						}
 #endif
 						basePacket = next;
 						NativeGpu_WalkCrossEmptyNode((uintptr_t)basePacket);
@@ -5490,6 +5590,7 @@ void ParsePrimitivesLinkedList(u32 *p, int singlePrimitive)
 					if (emptyRun > 0)
 					{
 #if defined(CTR_NATIVE) && CTR_NATIVE_GTE_CAPTURE
+						GTECapture_MarkOTRun(segLo, segHi, basePacket);
 						NativeGpu_TagWalkNode((uintptr_t)basePacket);
 #endif
 #if defined(CTR_INTERNAL) && defined(__3DS__)
@@ -5505,16 +5606,44 @@ void ParsePrimitivesLinkedList(u32 *p, int singlePrimitive)
 #endif
 			}
 
+			NATIVE_PROFLOC_SET(NATIVE_PROFLOC_WALK_LINK);
 			GPUDrawSplit *lastSplit = &s_gpu.splits[s_gpu.splitIndex];
 			lastSplit->numVerts = s_gpu.vertexIndex - lastSplit->startVertex;
 
-			if (isendprim(basePacket))
+			/* nextPrim + NativeGpu_IsValidOTLink through a two-entry cache of
+			 * registered ranges: a node's link alternates between the prim
+			 * pool and the OT, which defeated the links' one-entry hint and
+			 * cost two range scans per node. */
+			const u32 linkToken = CTR_GPU_ReadTagWord(basePacket) & 0x00ffffffu;
+
+			if (NativeGpuLinks_IsTerminator(linkToken))
 			{
 				break;
 			}
 
-			u8 *nextPacket = nextPrim(basePacket);
-			if (!NativeGpu_IsValidOTLink((uintptr_t)nextPacket))
+			u8 *nextPacket = NULL;
+			{
+				int slot = -1;
+
+				if ((linkToken >= lkT0[0]) && (linkToken < lkT1[0]))
+				{
+					slot = 0;
+				}
+				else if ((linkToken >= lkT0[1]) && (linkToken < lkT1[1]))
+				{
+					slot = 1;
+				}
+				else if (NativeGpuLinks_TokenRange(linkToken, &lkHost[lkVictim], &lkT0[lkVictim], &lkT1[lkVictim]))
+				{
+					slot = lkVictim;
+					lkVictim ^= 1;
+				}
+				if (slot >= 0)
+				{
+					nextPacket = (u8 *)(lkHost[slot] + (uintptr_t)(linkToken - lkT0[slot]));
+				}
+			}
+			if ((nextPacket == NULL) || (((uintptr_t)nextPacket & 3u) != 0))
 			{
 				char packetRegion[64];
 				char nextRegion[64];
@@ -5540,8 +5669,11 @@ void ParsePrimitivesLinkedList(u32 *p, int singlePrimitive)
 
 #if defined(CTR_INTERNAL) && defined(__3DS__)
 		s_parseProfSampleNode = 0;
-		s_parseProf.walkTicks += PARSEPROF_TICK() - profWalkStart;
-		ParseProf_FoldWalk();
+		if (g_dbg_deepProf)
+		{
+			s_parseProf.walkTicks += PARSEPROF_TICK() - profWalkStart;
+			ParseProf_FoldWalk();
+		}
 #endif
 	}
 
@@ -5826,6 +5958,65 @@ internal int ProcessGouraudLines(P_TAG *polyTag)
 	return 0;
 }
 
+#if defined(__3DS__)
+/*
+ * REAL widescreen (dumpreq/OPTIONS wide mode 2) widens the ortho window past
+ * the 4:3 display rect by NativeWide_CullMarginX on each side, but the game
+ * sizes its full-view flat fills to the display rect: the white flash of a
+ * potion or TNT hit and other fades (PushBuffer_FadeOneWindow), the clock's
+ * flat flash (DISPLAY_Blur_Main, negative strength). Those then covered the
+ * 4:3 picture only. An axis-aligned flat quad that spans at least half the
+ * view both ways has every edge on the display boundary pushed out past the
+ * wide window edge (twice the margin, so a stereo eye shift never uncovers
+ * it; the overshoot is clipped). Smaller boxes (HUD, menus) are left alone.
+ */
+int NativeWide_CullMarginX(int rectW);
+int NativeWide_UiShiftInverseX(int x);
+
+internal void NativeWide_ExtendFlatFill(GrVertex *v)
+{
+	const int dispW = (activeDispEnv.disp.w > 0) ? activeDispEnv.disp.w : 512;
+	const int dispH = (activeDispEnv.disp.h > 0) ? activeDispEnv.disp.h : 216;
+	const float pad = (float)(2 * NativeWide_CullMarginX(dispW));
+	float minX = v[0].x, maxX = v[0].x, minY = v[0].y, maxY = v[0].y;
+	int i;
+
+	if (pad <= 0.0f)
+	{
+		return;
+	}
+	for (i = 1; i < 4; i++)
+	{
+		minX = (v[i].x < minX) ? v[i].x : minX;
+		maxX = (v[i].x > maxX) ? v[i].x : maxX;
+		minY = (v[i].y < minY) ? v[i].y : minY;
+		maxY = (v[i].y > maxY) ? v[i].y : maxY;
+	}
+	if (((maxX - minX) < (float)(dispW / 2)) || ((maxY - minY) < (float)(dispH / 2)))
+	{
+		return;
+	}
+	for (i = 0; i < 4; i++)
+	{
+		if (((v[i].x != minX) && (v[i].x != maxX)) || ((v[i].y != minY) && (v[i].y != maxY)))
+		{
+			return; /* not an axis-aligned rectangle */
+		}
+	}
+	for (i = 0; i < 4; i++)
+	{
+		if (v[i].x <= 0.0f)
+		{
+			v[i].x -= pad;
+		}
+		else if (v[i].x >= (float)dispW)
+		{
+			v[i].x += pad;
+		}
+	}
+}
+#endif
+
 internal int ProcessFlatPoly(P_TAG *polyTag)
 {
 	const bool shadeTexOn = (polyTag->code & 1) == 0;
@@ -5876,10 +6067,21 @@ internal int ProcessFlatPoly(P_TAG *polyTag)
 	{
 		POLY_F4 *poly = (POLY_F4 *)polyTag;
 
+#if defined(CTR_NATIVE) && CTR_NATIVE_GTE_CAPTURE
+		/* A player view's fade (PushBuffer_FadeOneWindow) rides the smoke
+		 * deferral: redrawn after the model pass so it covers the karts. */
+		if (NativeGpu_IsSmokePacket((uintptr_t)poly))
+		{
+			s_ngpuDeferSmokeNext = 1;
+		}
+#endif
 		AddSplit(semiTrans, false, false);
 
 		GrVertex *firstVertex = &s_gpu.vertexBuffer[s_gpu.vertexIndex];
 		MakeVertexQuad(firstVertex, &poly->x0, &poly->x1, &poly->x3, &poly->x2);
+#if defined(__3DS__)
+		NativeWide_ExtendFlatFill(firstVertex);
+#endif
 		MakeTexcoordQuadZero(firstVertex, 0);
 		MakeColourQuad(firstVertex, shadeTexOn, &poly->r0, &poly->r0, &poly->r0, &poly->r0);
 
@@ -5892,6 +6094,24 @@ internal int ProcessFlatPoly(P_TAG *polyTag)
 	{
 		POLY_FT4 *poly = (POLY_FT4 *)polyTag;
 		activeDrawEnv.tpage = poly->tpage;
+
+#if defined(__3DS__)
+		/* Clock-item feedback blur tile (game/Display.c marks them): the 3DS
+		 * renderer draws it from a GPU copy of the previous frame, so it
+		 * never enters the split/texture-resolve machinery. Axis-aligned by
+		 * construction: corner 0 is top-left, corner 3 bottom-right. */
+		if ((poly->pad1 == NATIVE_FBBLUR_MARK1) && (poly->pad2 == NATIVE_FBBLUR_MARK2))
+		{
+			const int pageX = (poly->tpage & 0xF) * 64;
+			const int pageY = (poly->tpage & 0x10) ? 256 : 0;
+			float ofsX, ofsY;
+
+			DrawEnvOffset(&ofsX, &ofsY);
+			NativeRenderer_FeedbackBlurTile(poly->x0 + ofsX, poly->y0 + ofsY, poly->x3 + ofsX, poly->y3 + ofsY, pageX + poly->u0, pageY + poly->v0,
+			                                pageX + poly->u3, pageY + poly->v3);
+			return 9;
+		}
+#endif
 
 #if defined(CTR_NATIVE) && defined(CTR_NATIVE_BAKE_PARITY) && CTR_NATIVE_BAKE_PARITY
 		BakeParity_NotePolyFT4(poly);
@@ -5911,6 +6131,33 @@ internal int ProcessFlatPoly(P_TAG *polyTag)
 
 		GrVertex *firstVertex = &s_gpu.vertexBuffer[s_gpu.vertexIndex];
 		MakeVertexQuad(firstVertex, &poly->x0, &poly->x1, &poly->x3, &poly->x2);
+#if defined(__3DS__)
+		/* Pause screenshot tile (NATIVE_PAUSEBG_MARK1): the picture already
+		 * holds the wide frame, so it must cover the wide window linearly,
+		 * not through the UI ramp the renderer applies to this band. Place
+		 * each X so that the ramp lands it on the linear stretch. */
+		if ((poly->pad1 == NATIVE_PAUSEBG_MARK1) && (poly->pad2 == NATIVE_PAUSEBG_MARK2))
+		{
+			extern int g_dbg_packetDepth;
+			const int m = NativeWide_CullMarginX(512);
+			int vi;
+
+			if ((m != 0) && g_dbg_packetDepth)
+			{
+				for (vi = 0; vi < 4; vi++)
+				{
+					const int x = (int)firstVertex[vi].x;
+
+					firstVertex[vi].x = (float)NativeWide_UiShiftInverseX(x + (((x - 256) * m) / 256));
+				}
+			}
+			/* A flat photo at screen depth, not at the UI's pop-out: see s_ngpuPauseTileNext. */
+			if (g_dbg_packetDepth)
+			{
+				s_ngpuPauseTileNext = 1;
+			}
+		}
+#endif
 		MakeTexcoordQuad(firstVertex, &poly->u0, &poly->u1, &poly->u3, &poly->u2, poly->tpage, poly->clut,
 		                 GET_TPAGE_DITHER(activeDrawEnv.tpage) || activeDrawEnv.dtd);
 		MakeColourQuad(firstVertex, shadeTexOn, &poly->r0, &poly->r0, &poly->r0, &poly->r0);
@@ -6550,6 +6797,31 @@ int NativeWide_UiShiftX(int x)
 		shift = m;
 	}
 	return x + shift;
+}
+
+/* Inverse of NativeWide_UiShiftX: the X that the UI ramp moves to X. The ramp
+ * is x + clamp((x - 256) / 3, -m, m), strictly increasing, so the inverse is
+ * the matching piece: 4/3 slope in the middle, plain -/+m outside. Exact to
+ * the ramp's own integer rounding (under one unit). */
+int NativeWide_UiShiftInverseX(int x)
+{
+	const int m = NativeWide_CullMarginX(512);
+	int y;
+
+	if (m == 0)
+	{
+		return x;
+	}
+	y = ((3 * x) + 256) / 4;
+	if ((y - 256) >= (3 * m))
+	{
+		y = x - m;
+	}
+	else if ((256 - y) >= (3 * m))
+	{
+		y = x + m;
+	}
+	return y;
 }
 
 /*

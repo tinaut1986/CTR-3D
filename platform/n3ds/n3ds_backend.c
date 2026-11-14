@@ -397,12 +397,62 @@ int N3DS_O3dsSimFtpAllowed(void)
 }
 
 /* Cores 2 and 3 usable: a real New 3DS that is not pretending to be an old one. */
+/* CPU -> GPU visibility of a range the CPU wrote: the kernel's own cache
+ * maintenance on the calling core (svcFlushProcessDataCache), not
+ * GSPGPU_FlushDataCache, which is an IPC request that GSP serves on core 1 --
+ * on an Old 3DS the core the render worker shares with the system, where every
+ * such request waited behind it. Same operation (GSP makes this very call for
+ * us); GSP's path stays the fallback should the kernel refuse it. */
+void N3DS_FlushDcache(const void *addr, unsigned size)
+{
+	if ((addr == NULL) || (size == 0))
+	{
+		return;
+	}
+	if (R_FAILED(svcFlushProcessDataCache(CUR_PROCESS_HANDLE, (u32)(uintptr_t)addr, (u32)size)))
+	{
+		GSPGPU_FlushDataCache(addr, (u32)size);
+	}
+}
+
 int N3DS_ExtraCoresUsable(void)
 {
 	bool isNew3DS = false;
 
 	APT_CheckNew3DS(&isNew3DS);
 	return isNew3DS && !s_o3dsSim;
+}
+
+/* cfg `core1`: the share of core 1 the Old-3DS render worker reserves
+ * (n3ds_render_thread.c), 0 = no worker (everything on core 0, the old way).
+ * The exheader's MaxCpu (ctr3d.rsf) is the ceiling; a refused value falls back
+ * to the next lower step there. */
+int N3DS_Core1Percent(void)
+{
+	int pct = N3DS_ConfigGet("core1", 0);
+	FILE *f = fopen(N3DS_APP_DIR "/core1.txt", "rb");
+
+	/* Test override: a core1.txt holding the percentage wins over the cfg
+	 * (the cfg is rewritten from memory at every relaunch). */
+	if (f != NULL)
+	{
+		int v = 0;
+
+		if (fscanf(f, "%d", &v) == 1)
+		{
+			pct = v;
+		}
+		fclose(f);
+	}
+	if (pct < 0)
+	{
+		pct = 0;
+	}
+	if (pct > 80)
+	{
+		pct = 80;
+	}
+	return pct;
 }
 
 /* DEBUG > ACTIONS: create/remove the flag file. Takes effect at the next start
@@ -471,7 +521,20 @@ void N3DS_EarlyInit(void)
 		 * choice wins either way. */
 		if (N3DS_FramePaceOldClass())
 		{
+			extern int g_dbg_c3dFlush;
+
 			g_dbg_stereo = 2;
+			/* Frame-end flush of the frame's vertex range only: the whole-heap
+			 * flush is a GSP request, and GSP runs on core 1 beside the render
+			 * worker, where it cost the worker ~7 ms a frame ([ENDPROF] fend). */
+			g_dbg_c3dFlush = 1;
+			{
+				extern int g_dbg_kartLod;
+
+				/* Rival karts one LOD rung coarser while many are near the camera
+				 * (RenderBucket_SelectModelHeader): the race start. */
+				g_dbg_kartLod = 1;
+			}
 		}
 		g_dbg_stereo = N3DS_ConfigGet("stereo", g_dbg_stereo);
 		/* FRAME SKIP (cfg `fpsmode`: 0 AUTO, 1 30, 2 OFF) replaced FRAME CAP
@@ -1200,6 +1263,10 @@ void N3DS_ConsoleStatusClear(void)
  */
 static int s_topContentFullWidth = 0;
 
+/* This frame's UI pop-out in whole panel pixels (+ in the left eye, - in the right), 0 when the UI does not
+ * pop out: set beside s_uiShiftPsx every frame. The copy below undoes it, see there. */
+static int s_uiPopPxFrame = 0;
+
 void N3DS_SetTopContentFullWidth(int fullWidth)
 {
 	s_topContentFullWidth = fullWidth;
@@ -1211,6 +1278,17 @@ int N3DS_CopyDisplayedTopFrame(unsigned char *dstRGB, int dstW, int dstH)
 	u8 *fb = gfxGetFramebuffer(GFX_TOP, GFX_LEFT, &fbW, &fbH);
 	const int contentX = s_topContentFullWidth ? 0 : N3DS_TOP_CONTENT_X;
 	const int contentW = s_topContentFullWidth ? 400 : N3DS_TOP_CONTENT_W;
+	/*
+	 * Undo the UI pop-out. The left eye drew the HUD s_uiPopPxFrame pixels right of its place, and the
+	 * consumer (the pause background) draws this copy as one flat picture at screen depth: copied as is,
+	 * the frozen HUD sat that far right of the live one in both eyes and the speedometer ran off the
+	 * right edge. Sample the left eye that far to the right instead; the last columns, which the left eye
+	 * pushed off the panel, come from the right eye, whose HUD sits the same distance to the LEFT of its
+	 * place. Only the HUD lands exactly where it was (the world is one eye's view either way).
+	 */
+	const int popPx = (s_uiPopPxFrame > 0) ? s_uiPopPxFrame : 0;
+	u16 fbRW = 0, fbRH = 0;
+	u8 *fbR = (popPx > 0) ? gfxGetFramebuffer(GFX_TOP, GFX_RIGHT, &fbRW, &fbRH) : NULL;
 	int x, y;
 
 	if ((fb == NULL) || (dstRGB == NULL) || (dstW <= 0) || (dstH <= 0))
@@ -1226,6 +1304,10 @@ int N3DS_CopyDisplayedTopFrame(unsigned char *dstRGB, int dstW, int dstH)
 	 * actually needed it asks for it directly, on pause entry rather than
 	 * 30 times a second. */
 	GSPGPU_InvalidateDataCache(fb, (u32)fbW * (u32)fbH * 3U);
+	if (fbR != NULL)
+	{
+		GSPGPU_InvalidateDataCache(fbR, (u32)fbRW * (u32)fbRH * 3U);
+	}
 
 	for (y = 0; y < dstH; y++)
 	{
@@ -1240,7 +1322,22 @@ int N3DS_CopyDisplayedTopFrame(unsigned char *dstRGB, int dstW, int dstH)
 			 * background showed them squeezed inside the picture
 			 * (user-reported on hardware) -- or the whole panel in REAL wide. */
 			const int sx = contentX + ((x * contentW) / dstW);
-			const u8 *p = fb + (((sx * 240) + (239 - sy)) * 3);
+			const u8 *p;
+
+			if (popPx == 0)
+			{
+				p = fb + (((sx * 240) + (239 - sy)) * 3);
+			}
+			else if (((sx + popPx) < (contentX + contentW)) || (fbR == NULL))
+			{
+				const int lx = ((sx + popPx) < (contentX + contentW)) ? (sx + popPx) : (contentX + contentW - 1);
+
+				p = fb + (((lx * 240) + (239 - sy)) * 3);
+			}
+			else
+			{
+				p = fbR + ((((sx - popPx) * 240) + (239 - sy)) * 3);
+			}
 
 			dstRow[(x * 3) + 0] = p[2]; /* R */
 			dstRow[(x * 3) + 1] = p[1]; /* G */
@@ -1281,6 +1378,8 @@ int g_dbg_uiPopPx = 4;
 static float s_uiPsxPerPx = 1.6f; /* game units per panel pixel across the top screen, from the projection */
 static float s_uiShiftPsx = 0.0f; /* this frame's UI shift per eye, game units (0 in mono) */
 static float s_uiWinL = 0.0f, s_uiWinR = 512.0f; /* the top screen's X window in game units (N3DS_C3DSetProjection) */
+/* The projection's bottom edge and its unextended right edge (the display width). */
+static float s_projWinB = 216.0f, s_projDispW = 512.0f;
 
 /* A UI quad that reaches the edge of the window (letterbox bars, full-width backdrops) would show a gap
  * the width of the eye's parallax on one side; push its edge vertices out by the shift (plus a margin) so
@@ -1448,6 +1547,12 @@ static int s_trackTexturedState = -1;
  * texture is the same, which re-emits its configuration on the next draw --
  * per leaf, and again per leaf in the right eye's replay. */
 static int s_trackBoundUnit0 = -1;
+/* Direct leaf draws (N3DS_TrackDraw_RawElements). */
+int g_dbg_trackRawDraw = 1;
+static int s_trackRawReady;
+static int s_trackRawKey;
+static int s_trackRawUvDx;
+static int s_trackRawUvDy;
 static int s_trackBoundUnit1 = -1;
 static C3D_AttrInfo s_trackAttrInfo;
 static C3D_BufInfo s_trackBufInfo;
@@ -1511,7 +1616,7 @@ void N3DS_TrackGeom_FlushPatched(void)
 		return;
 	}
 
-	GSPGPU_FlushDataCache((u8 *)s_trackGeomMem + s_trackPatchLoByte, (u32)(s_trackPatchHiByte - s_trackPatchLoByte));
+	N3DS_FlushDcache((u8 *)s_trackGeomMem + s_trackPatchLoByte, (u32)(s_trackPatchHiByte - s_trackPatchLoByte));
 	s_trackPatchTouched = 0;
 }
 /* Set by Begin only when geometry is actually ready; End always clears it
@@ -1698,6 +1803,24 @@ static float N3DS_StereoConvNow(void)
 	return N3DS_StereoWindowNow() ? s_stereoConvWorld : s_stereoConv;
 }
 
+/* The parallax stamp of the screen plane: world parallax p = k - kC/d is 0 at d = C, and a stamp s
+ * reads as d = 65535 - s in the shaders (ctr.v.pica). For flat content that must sit at screen depth
+ * in both eyes, outside the UI band's pop-out (the pause background, NativeGpu_StampEmitOrdinal). */
+unsigned short N3DS_StereoScreenParallaxStamp(void)
+{
+	int d = (int)(N3DS_StereoConvNow() + 0.5f);
+
+	if (d < 64)
+	{
+		d = 64;
+	}
+	if (d > 65534)
+	{
+		d = 65534;
+	}
+	return (unsigned short)(65535 - d);
+}
+
 static float N3DS_StereoPopNow(void)
 {
 	return N3DS_StereoWindowNow() ? 0.0f : s_stereoPopMul;
@@ -1805,6 +1928,7 @@ static void N3DS_StereoLatchFrame(void)
 		int eye;
 
 		s_uiShiftPsx = (float)uiPx * s_uiPsxPerPx; /* before the eye vectors: they clamp the world to it */
+		s_uiPopPxFrame = pktLive ? uiPx : 0;
 		for (eye = 0; eye < 2; eye++)
 		{
 			const float k = (eye == 1) ? mag : -mag;
@@ -2085,6 +2209,8 @@ int g_dbg_rosaFix = 0;
 
 void N3DS_C3DSetProjection(float left, float right, float bottom)
 {
+	s_projWinB = bottom;
+	s_projDispW = right;
 	if (g_dbg_widescreen == 2)
 	{
 		/* REAL widescreen: grow the window by exactly the viewport's
@@ -3035,6 +3161,269 @@ void N3DS_C3DNoteDrawOutsideFrame(const char *site)
 	}
 }
 
+/* ------------------------------------------------ feedback blur (clock) --- */
+/*
+ * The clock item's screen blur (game/Display.c DISPLAY_Blur_Main) draws the
+ * previous presented frame back over the new one, slightly zoomed and at 50%,
+ * every frame the effect is live; the intro flybys drive the same call. On PS1
+ * that is a VRAM-to-VRAM textured quad. Here the previous frame still sits in
+ * the render target's colour buffer when the next frame begins, so
+ * N3DS_FBBlurCopyPrevious queues one GPU texture copy of it (VRAM to VRAM, 375
+ * KB) ahead of the clear, and N3DS_C3DFeedbackBlurDraw draws the game's tiles
+ * from that copy. No CPU readback, no decode, nothing at all on the frames the
+ * effect is off. The walk marks the effect as wanted (N3DS_FBBlurNoteWanted);
+ * the copy follows at the next frame begin, so the effect's first frame draws
+ * nothing, which is what retail does too (blurCameraMask).
+ *
+ * Layout: the colour buffer is 240x400 RGBA8 in PICA tiles, rotated (its rows
+ * are screen columns). The copy keeps the bytes and pads each 8-row tile row
+ * from 240 to 256 texels, so the texture (256x512, same format) holds memory
+ * row a = screen x, column c = 239 - screen y. PICA's T axis is bottom-up
+ * (see the atlas V flip in native_renderer_3ds.c), so t = 1 - a/512 and
+ * s = c/256. dumpreq `fbblurflip N` mirrors either axis if hardware disagrees
+ * (bit 0: rows, bit 1: columns); `fbblur 0` drops the effect (the old build).
+ */
+#define N3DS_FBBLUR_TEX_W 256
+#define N3DS_FBBLUR_TEX_H 512
+#define N3DS_FBBLUR_MAX_TILES 16
+
+int g_dbg_fbBlur = 1;
+/* Debug ITEMS page / dumpreq giveitem, hititem (include/platform/debug_items.h). */
+int g_dbg_giveItem = -1;
+int g_dbg_hitItem = -1;
+int g_dbg_fbBlurFlip = 0;
+static C3D_Tex s_fbBlurTex[2];
+static int s_fbBlurTexState = 0; /* 0 not allocated yet, 1 ready, -1 refused */
+static int s_fbBlurHasRight = 0;
+static int s_fbBlurWant = 0;     /* frames left to copy at frame begin */
+static int s_fbBlurCopied = 0;   /* bit 0: left copy queued this frame, bit 1: right */
+static int s_fbBlurLastStereo = 0;
+static int s_fbBlurBase = -1;    /* this frame's tile vertices, for the right eye */
+static int s_fbBlurVerts = 0;
+static unsigned s_fbBlurFrames = 0;
+
+void N3DS_FBBlurNoteWanted(void)
+{
+	s_fbBlurWant = 2;
+}
+
+static int N3DS_FBBlurAlloc(void)
+{
+	int i;
+
+	if (s_fbBlurTexState != 0)
+	{
+		return s_fbBlurTexState > 0;
+	}
+	s_fbBlurTexState = -1;
+	s_fbBlurHasRight = (s_renderTargetRight != NULL) ? 1 : 0;
+	for (i = 0; i < (1 + s_fbBlurHasRight); i++)
+	{
+		if (!C3D_TexInitVRAM(&s_fbBlurTex[i], N3DS_FBBLUR_TEX_W, N3DS_FBBLUR_TEX_H, GPU_RGBA8))
+		{
+			if (i == 0)
+			{
+				N3DS_DebugLog("[CTR-3DS] fbblur: no VRAM for the copy, effect off");
+				return 0;
+			}
+			s_fbBlurHasRight = 0; /* the right eye then reuses the left copy */
+			break;
+		}
+		C3D_TexSetFilter(&s_fbBlurTex[i], GPU_LINEAR, GPU_LINEAR);
+		C3D_TexSetWrap(&s_fbBlurTex[i], GPU_CLAMP_TO_EDGE, GPU_CLAMP_TO_EDGE);
+	}
+	s_fbBlurTexState = 1;
+	N3DS_DebugLog(s_fbBlurHasRight ? "[CTR-3DS] fbblur: copy textures ready (2 x 512 KB VRAM)" : "[CTR-3DS] fbblur: copy texture ready (512 KB VRAM)");
+	return 1;
+}
+
+static void N3DS_FBBlurCopyTarget(C3D_RenderTarget *target, C3D_Tex *tex)
+{
+	/* One tile row: 240/8 tiles x 256 bytes in, the same plus a 2-tile gap
+	 * out. GX_BUFFER_DIM takes 16-byte units for TextureCopy. Queued on
+	 * citro3d's GX queue like the clears that follow it, so it runs after the
+	 * previous frame's transfer and before this frame's clear. */
+	const u32 lineBytes = (240u / 8u) * 256u;
+	const u32 gapBytes = ((N3DS_FBBLUR_TEX_W - 240u) / 8u) * 256u;
+
+	GX_TextureCopy((u32 *)target->frameBuf.colorBuf, GX_BUFFER_DIM(lineBytes >> 4, 0), (u32 *)tex->data, GX_BUFFER_DIM(lineBytes >> 4, gapBytes >> 4),
+	               lineBytes * (400u / 8u), GX_TRANSFER_RAW_COPY(1));
+}
+
+/* Frame begin, before the clears (N3DS_C3DBeginFrame). */
+static void N3DS_FBBlurCopyPrevious(void)
+{
+	const int lastStereo = s_fbBlurLastStereo;
+
+	s_fbBlurCopied = 0;
+	s_fbBlurBase = -1;
+	s_fbBlurVerts = 0;
+	s_fbBlurLastStereo = s_stereoFrameActive;
+	if ((s_fbBlurWant <= 0) || !g_dbg_fbBlur)
+	{
+		return;
+	}
+	s_fbBlurWant--;
+	if (!N3DS_FBBlurAlloc())
+	{
+		return;
+	}
+	N3DS_FBBlurCopyTarget(s_renderTarget, &s_fbBlurTex[0]);
+	s_fbBlurCopied = 1;
+	/* The right target holds last frame's right eye only if last frame was
+	 * stereo too; otherwise that eye samples the left copy. */
+	if (s_stereoFrameActive && lastStereo && s_fbBlurHasRight && (s_renderTargetRight != NULL))
+	{
+		N3DS_FBBlurCopyTarget(s_renderTargetRight, &s_fbBlurTex[1]);
+		s_fbBlurCopied |= 2;
+	}
+}
+
+/* PSX display coordinates -> texture numerators (the shader divides by 2048).
+ * The window is the projection's (N3DS_C3DSetProjection keeps it). */
+static void N3DS_FBBlurTexcoord(float px, float py, s16 *u, s16 *v)
+{
+	const float vpX = g_dbg_widescreen ? 0.0f : (float)N3DS_TOP_CONTENT_X;
+	const float vpW = g_dbg_widescreen ? 400.0f : (float)N3DS_TOP_CONTENT_W;
+	float a = vpX + (((px - s_uiWinL) * vpW) / (s_uiWinR - s_uiWinL)); /* panel x = colour-buffer row */
+	float c = 240.0f - ((py * 240.0f) / s_projWinB);                   /* 240 - panel y = column */
+
+	if (g_dbg_fbBlurFlip & 1)
+	{
+		a = 400.0f - a;
+	}
+	if (g_dbg_fbBlurFlip & 2)
+	{
+		c = 240.0f - c;
+	}
+	*u = (s16)(c * (2048.0f / (float)N3DS_FBBLUR_TEX_W));
+	*v = (s16)(2048.0f - (a * (2048.0f / (float)N3DS_FBBLUR_TEX_H)));
+}
+
+static void N3DS_FBBlurBindDraw(int eye)
+{
+	/* Packet program, layout and combiner: the right eye's replay can end
+	 * inside a track/model bracket. */
+	N3DS_BindPacketDrawState();
+	C3D_TexBind(0, &s_fbBlurTex[((eye == 1) && (s_fbBlurCopied & 2)) ? 1 : 0]);
+	N3DS_C3DSetColorDoubling(0);
+	N3DS_C3DSetBlendMode(1); /* 0.5 * dst + 0.5 * src, PS1 TRANS_50 */
+	/* Zero parallax: each eye samples its own previous picture at the same
+	 * panel position, so the ghost keeps that eye's parallax by itself. */
+	if (s_uLocStereo >= 0)
+	{
+		C3D_FVUnifSet(GPU_VERTEX_SHADER, s_uLocStereo, 0.0f, 0.0f, 0.0f, 0.0f);
+	}
+	if (s_uLocStereoUi >= 0)
+	{
+		C3D_FVUnifSet(GPU_VERTEX_SHADER, s_uLocStereoUi, 0.0f, 0.0f, 0.0f, 0.0f);
+	}
+	C3D_DrawArrays(GPU_TRIANGLES, s_fbBlurBase, s_fbBlurVerts);
+	N3DS_StereoUploadUniform(s_uLocStereo, (const float(*)[4])s_stereoVecPkt);
+	N3DS_StereoUploadUniform(s_uLocStereoUi, (const float(*)[4])s_stereoVecUi);
+}
+
+/* tiles: count x {dstX0, dstY0, dstX1, dstY1, srcX0, srcY0, srcX1, srcY1},
+ * all in display-relative PSX coordinates. Left eye; the right eye redraws
+ * the same vertices at the end of N3DS_StereoRenderRightEye. */
+void N3DS_C3DFeedbackBlurDraw(const float *tiles, int count)
+{
+	N3DS_Vertex verts[N3DS_FBBLUR_MAX_TILES * 6];
+	int t, n = 0;
+
+	if (!s_frameOpen || !(s_fbBlurCopied & 1) || (count <= 0))
+	{
+		return;
+	}
+	if (count > N3DS_FBBLUR_MAX_TILES)
+	{
+		count = N3DS_FBBLUR_MAX_TILES;
+	}
+
+	for (t = 0; t < count; t++)
+	{
+		const float *tile = tiles + (t * 8);
+		float dx0 = tile[0], dy0 = tile[1], dx1 = tile[2], dy1 = tile[3];
+		float sx0 = tile[4], sy0 = tile[5], sx1 = tile[6], sy1 = tile[7];
+		s16 u0, v0, u1, v1;
+		int i;
+
+		if ((dx1 <= dx0) || (dy1 <= dy0))
+		{
+			continue;
+		}
+		/* REAL widescreen: a tile on the display's edge reaches the panel's
+		 * edge (the game knows only the 4:3 rect), its source following at
+		 * the tile's own scale. */
+		if (s_uiWinL < 0.0f)
+		{
+			const float k = (sx1 - sx0) / (dx1 - dx0);
+
+			if (dx0 <= 0.5f)
+			{
+				sx0 -= (dx0 - s_uiWinL) * k;
+				dx0 = s_uiWinL;
+			}
+			if (dx1 >= (s_projDispW - 0.5f))
+			{
+				sx1 += (s_uiWinR - dx1) * k;
+				dx1 = s_uiWinR;
+			}
+		}
+		N3DS_FBBlurTexcoord(sx0, sy0, &u0, &v0);
+		N3DS_FBBlurTexcoord(sx1, sy1, &u1, &v1);
+
+		/* Two triangles; each corner's texcoord is mapped on its own, which
+		 * swaps the axes for the rotated buffer: screen x moves v, y moves u. */
+		verts[n + 0].x = (s16)dx0; verts[n + 0].y = (s16)dy0; verts[n + 0].u = u0; verts[n + 0].v = v0;
+		verts[n + 1].x = (s16)dx0; verts[n + 1].y = (s16)dy1; verts[n + 1].u = u1; verts[n + 1].v = v0;
+		verts[n + 2].x = (s16)dx1; verts[n + 2].y = (s16)dy1; verts[n + 2].u = u1; verts[n + 2].v = v1;
+		verts[n + 3] = verts[n + 0];
+		verts[n + 4] = verts[n + 2];
+		verts[n + 5].x = (s16)dx1; verts[n + 5].y = (s16)dy0; verts[n + 5].u = u0; verts[n + 5].v = v1;
+		for (i = 0; i < 6; i++)
+		{
+			verts[n + i].z = N3DS_DEPTH_TOPMOST;
+			verts[n + i].w = N3DS_DEPTH_TOPMOST;
+			verts[n + i].r = 255;
+			verts[n + i].g = 255;
+			verts[n + i].b = 255;
+			verts[n + i]._pad = 0;
+		}
+		n += 6;
+	}
+	if (n == 0)
+	{
+		return;
+	}
+
+	s_fbBlurBase = N3DS_C3DAppendVertices(verts, n);
+	if (s_fbBlurBase < 0)
+	{
+		return;
+	}
+	s_fbBlurVerts = n;
+	N3DS_FBBlurBindDraw(0);
+
+	if ((s_fbBlurFrames++ & 255u) == 0u)
+	{
+		char msg[112];
+
+		snprintf(msg, sizeof(msg), "[CTR-3DS] fbblur: frame %u tiles=%d src0=%d,%d..%d,%d stereoCopy=%d", s_fbBlurFrames, count, (int)tiles[4], (int)tiles[5],
+		         (int)tiles[6], (int)tiles[7], (s_fbBlurCopied & 2) ? 1 : 0);
+		N3DS_DebugLog(msg);
+	}
+}
+
+/* Right eye, after the journal replay (N3DS_StereoRenderRightEye). */
+static void N3DS_FBBlurDrawRightEye(void)
+{
+	if ((s_fbBlurBase >= 0) && (s_fbBlurVerts > 0))
+	{
+		N3DS_FBBlurBindDraw(1);
+	}
+}
+
 void N3DS_C3DBeginFrame(void)
 {
 	/* Latch the physical 3D slider for the whole frame BEFORE anything is
@@ -3055,6 +3444,9 @@ void N3DS_C3DBeginFrame(void)
 	}
 	N3DS_FrameTrace("[CTR-3DS] FrameBegin: returned");
 	s_frameOpen = 1;
+	/* Before the clears: the colour buffer still holds the frame just
+	 * presented, which the clock blur draws back (see above). */
+	N3DS_FBBlurCopyPrevious();
 	/* Depth clears to FAR. Mtx_OrthoTilt maps LARGER vertex z to SMALLER
 	 * stored depth (verified empirically, see below), so far = max. */
 	C3D_RenderTargetClear(s_renderTarget, C3D_CLEAR_ALL, 0x000000FF, 0x00FFFFFF);
@@ -3170,7 +3562,7 @@ void N3DS_C3DEndFrame(void)
 
 		if (s_vertexCursor > 0)
 		{
-			GSPGPU_FlushDataCache(s_vertexBufferMem, (u32)((size_t)s_vertexCursor * sizeof(N3DS_Vertex)));
+			N3DS_FlushDcache(s_vertexBufferMem, (u32)((size_t)s_vertexCursor * sizeof(N3DS_Vertex)));
 		}
 		(void)N3DS_EndProfMark(N3DS_ENDPROF_FLUSH, flushT);
 		C3D_FrameEnd(GX_CMDLIST_FLUSH);
@@ -3348,7 +3740,7 @@ static void N3DS_C3DUploadTileBlock(C3D_Tex *tex, int tilesPerRow, int baseTileC
 		u8 *flushStart = texData + (size_t)((baseTileRow * tilesPerRow) + baseTileCol) * N3DS_TILE_BYTES;
 		size_t flushBytes = (size_t)(((tilesHigh - 1) * tilesPerRow) + tilesWide) * N3DS_TILE_BYTES;
 
-		GSPGPU_FlushDataCache(flushStart, (u32)flushBytes);
+		N3DS_FlushDcache(flushStart, (u32)flushBytes);
 	}
 }
 
@@ -3653,7 +4045,7 @@ int N3DS_TrackGeom_Upload(const void *verts, int vertCount, int vertStride, cons
 	/* Once per level load. Covered by C3D_FrameEnd(0)'s whole-heap flush
 	 * anyway; required under `c3dflush 1`, which flushes only the frame's
 	 * vertex range. */
-	GSPGPU_FlushDataCache(block, (u32)totalBytes);
+	N3DS_FlushDcache(block, (u32)totalBytes);
 
 	s_trackGeomMem = block;
 	s_trackIndexPtr = block + indexOffset;
@@ -4061,6 +4453,7 @@ void N3DS_TrackDraw_Begin(const float *qx, const float *qy, const float *qw, flo
 	 * N3DS_TrackDraw_SetTextured last recorded is stale by now. */
 	s_trackTexturedState = 0;
 	s_trackBoundUnit0 = -1;
+	s_trackRawReady = 0;
 	s_trackBoundUnit1 = -1;
 
 	s_trackDrawActive = 1;
@@ -4123,9 +4516,81 @@ static void N3DS_TrackDraw_SetTextured(int mode)
 	s_trackTexturedState = mode;
 }
 
+/*
+ * Direct leaf draws (dumpreq `trkraw`, default on). A track pass is ~100 leaf
+ * draws whose GPU state is identical from one to the next except the
+ * depth-range uniform; C3D_DrawElements still runs C3Di_UpdateContext (every
+ * dirty flag, a scan of all 96 float uniforms per shader stage) for each, ~16
+ * us a draw on an Old 3DS ([SAMPLE] trk.leafc3d). After one draw through
+ * citro3d has flushed the state, a leaf with the same state key and UV offset
+ * uploads its one uniform and issues the draw with C3D_DrawElements' own
+ * command sequence (libcitro3d drawElements.o: PRIMITIVE_CONFIG,
+ * RESTART_PRIMITIVE, INDEXBUFFER_CONFIG, NUMVERTICES, VERTEX_OFFSET, the
+ * GEOSTAGE / START_DRAW_FUNC0 / DRAWELEMENTS bracket, VTX_FUNC). citro3d's
+ * uniform mirror gets the same value, not dirty, so it still matches the GPU.
+ * Reset at every pass boundary (Begin/End) and by any state change.
+ */
+
+static void N3DS_TrackDraw_RawElements(const u16 *indexBase, int indexCount, float otIndexLo, float ordinalLo, float ordinalSpan, float invIndexSpan)
+{
+	C3D_FVec *mirror = &C3D_FVUnif[GPU_VERTEX_SHADER][s_trackULocDepthRange];
+	const u32 pa = osConvertVirtToPhys(indexBase);
+	const u32 base = C3D_GetBufInfo()->base_paddr;
+
+	if (pa < base)
+	{
+		return; /* C3D_DrawElements' own guard */
+	}
+	mirror->x = -otIndexLo;
+	mirror->y = ordinalLo;
+	mirror->z = ordinalSpan;
+	mirror->w = invIndexSpan;
+
+	/* Straight into the command buffer, in GPUCMD_Add's own layout (param,
+	 * header, extra params, a pad word after an odd extra count): 38 words,
+	 * one bounds check instead of 17 calls. */
+	if ((gpuCmdBuf == NULL) || (gpuCmdBufOffset + 38u > gpuCmdBufSize))
+	{
+		return;
+	}
+	{
+		u32 *b = gpuCmdBuf + gpuCmdBufOffset;
+		const u32 *m = (const u32 *)mirror;
+#define N3DS_CMD1(mask, reg, val) do { *b++ = (u32)(val); *b++ = GPUCMD_HEADER(0, (mask), (reg)); } while (0)
+
+		N3DS_CMD1(0xF, GPUREG_VSH_FLOATUNIFORM_CONFIG, 0x80000000u | (u32)s_trackULocDepthRange);
+		*b++ = m[0];
+		*b++ = GPUCMD_HEADER(0, 0xF, GPUREG_VSH_FLOATUNIFORM_DATA) | (3u << 20);
+		*b++ = m[1];
+		*b++ = m[2];
+		*b++ = m[3];
+		*b++ = 0; /* alignment */
+		N3DS_CMD1(0x2, GPUREG_PRIMITIVE_CONFIG, GPU_GEOMETRY_PRIM);
+		N3DS_CMD1(0xF, GPUREG_RESTART_PRIMITIVE, 1);
+		N3DS_CMD1(0xF, GPUREG_INDEXBUFFER_CONFIG, (pa - base) | ((u32)C3D_UNSIGNED_SHORT << 31));
+		N3DS_CMD1(0xF, GPUREG_NUMVERTICES, (u32)indexCount);
+		N3DS_CMD1(0xF, GPUREG_VERTEX_OFFSET, 0);
+		N3DS_CMD1(0x2, GPUREG_GEOSTAGE_CONFIG, 0x100);
+		N3DS_CMD1(0x2, GPUREG_GEOSTAGE_CONFIG2, 0x100);
+		N3DS_CMD1(0x1, GPUREG_START_DRAW_FUNC0, 0);
+		N3DS_CMD1(0xF, GPUREG_DRAWELEMENTS, 1);
+		N3DS_CMD1(0x1, GPUREG_START_DRAW_FUNC0, 1);
+		N3DS_CMD1(0x2, GPUREG_GEOSTAGE_CONFIG, 0);
+		N3DS_CMD1(0x2, GPUREG_GEOSTAGE_CONFIG2, 0);
+		N3DS_CMD1(0xF, GPUREG_VTX_FUNC, 1);
+		N3DS_CMD1(0x8, GPUREG_PRIMITIVE_CONFIG, 0);
+		N3DS_CMD1(0x8, GPUREG_PRIMITIVE_CONFIG, 0);
+#undef N3DS_CMD1
+		gpuCmdBufOffset = (u32)(b - gpuCmdBuf);
+	}
+}
+
 void N3DS_TrackDraw_Leaf(int firstIndex, int indexCount, float otIndexLo, float ordinalLo, float ordinalSpan, float invIndexSpan, int atlasBin, int blend, int uvDx, int uvDy)
 {
 	const u16 *indexBase;
+	/* Everything the state block below can change, in one word. */
+	const int rawKey = (((atlasBin >= 0) && (atlasBin < s_trackAtlasUnitsAllocated)) ? (atlasBin & 0xfff) : 0xfff) | ((blend & 0xf) << 12) |
+	                   ((g_dbg_trackBilinear ? 1 : 0) << 16) | ((N3DS_DepthTintOn() ? 1 : 0) << 17);
 
 	{
 		N3DS_StereoOp *op = N3DS_StereoRecord(N3DS_STEREO_OP_TRACK_LEAF);
@@ -4208,6 +4673,13 @@ void N3DS_TrackDraw_Leaf(int firstIndex, int indexCount, float otIndexLo, float 
 	 * platform/native_track_frame.c's math a direct, literal reading of the
 	 * design doc's formulas.
 	 */
+	if (g_dbg_trackRawDraw && s_trackRawReady && (rawKey == s_trackRawKey) && (uvDx == s_trackRawUvDx) && (uvDy == s_trackRawUvDy) && s_frameOpen &&
+	    (g_dbg_depthTest != 2))
+	{
+		N3DS_TrackDraw_RawElements((const u16 *)s_trackIndexPtr + firstIndex, indexCount, otIndexLo, ordinalLo, ordinalSpan, invIndexSpan);
+		return;
+	}
+
 	C3D_FVUnifSet(GPU_VERTEX_SHADER, s_trackULocDepthRange, -otIndexLo, ordinalLo, ordinalSpan, invIndexSpan);
 
 	/*
@@ -4283,10 +4755,15 @@ void N3DS_TrackDraw_Leaf(int firstIndex, int indexCount, float otIndexLo, float 
 		return;
 	}
 	C3D_DrawElements(GPU_TRIANGLES, indexCount, C3D_UNSIGNED_SHORT, indexBase);
+	s_trackRawReady = 1;
+	s_trackRawKey = rawKey;
+	s_trackRawUvDx = uvDx;
+	s_trackRawUvDy = uvDy;
 }
 
 void N3DS_TrackDraw_End(void)
 {
+	s_trackRawReady = 0;
 	N3DS_StereoRecord(N3DS_STEREO_OP_TRACK_END);
 
 	/* Program + attribute layout + vertex buffer + texture-modulate combiner
@@ -4757,7 +5234,7 @@ int N3DS_BottomPass_Begin(void)
 		const size_t bytes = (size_t)N3DS_BOTTOM_UI_TEX_W * (firstUpload ? (size_t)N3DS_BOTTOM_UI_TEX_H : 240U) * 2U;
 
 		memcpy(s_bottomUiTex.data, tiled, bytes);
-		GSPGPU_FlushDataCache(s_bottomUiTex.data, (u32)bytes);
+		N3DS_FlushDcache(s_bottomUiTex.data, (u32)bytes);
 	}
 
 	/* Queued clear before any bottom draw; every draw this frame executes at
@@ -5057,6 +5534,10 @@ void N3DS_StereoRenderRightEye(void)
 		}
 	}
 
+	/* The clock blur over the right eye too (not journaled: it is drawn
+	 * after the left eye's UI pass, outside the merge). */
+	N3DS_FBBlurDrawRightEye();
+
 	/* s_stereoEye stays 1 until the next frame's latch resets it -- nothing
 	 * else draws between here and N3DS_C3DEndFrame. */
 	s_rightEyeLastTicks = (unsigned long long)svcGetSystemTick() - rightT0;
@@ -5129,7 +5610,7 @@ void N3DS_C3DUploadVramDisplayChunk(int slotIndex, const void *tiled256)
 	/* C3D_TexUpload is a plain memcpy into linear memory. Covered by
 	 * C3D_FrameEnd(0)'s whole-heap flush anyway; required under
 	 * `c3dflush 1` (see g_dbg_c3dFlush). */
-	GSPGPU_FlushDataCache(s_vramDisplayTex[slotIndex].data, s_vramDisplayTex[slotIndex].size);
+	N3DS_FlushDcache(s_vramDisplayTex[slotIndex].data, s_vramDisplayTex[slotIndex].size);
 }
 
 void N3DS_C3DBindVramDisplayTex(int slotIndex)
@@ -5507,6 +5988,56 @@ unsigned int N3DS_ReadButtons(void)
 					N3DS_AudioThreadStopAndJoin();
 					N3DS_DebugLog("[CTR-3DS] audiothread: STOPPED (main-thread fallback)");
 				}
+				else if (strcmp(word, "trkraw") == 0)
+				{
+					extern int g_dbg_trackRawDraw;
+
+					g_dbg_trackRawDraw = !g_dbg_trackRawDraw;
+					N3DS_DebugLog(g_dbg_trackRawDraw ? "[CTR-3DS] trkraw: ON (same-state track leaves drawn directly)" : "[CTR-3DS] trkraw: OFF (every leaf through C3D_DrawElements)");
+				}
+				else if (strcmp(word, "kartlod") == 0)
+				{
+					extern int g_dbg_kartLod;
+					char msg[80];
+
+					g_dbg_kartLod = (g_dbg_kartLod + 1) % 3;
+					snprintf(msg, sizeof(msg), "[CTR-3DS] kartlod: %d (0 off, 1 dynamic, 2 always)", g_dbg_kartLod);
+					N3DS_DebugLog(msg);
+				}
+				else if (strcmp(word, "skyfast") == 0)
+				{
+					extern int g_dbg_skyFast;
+
+					g_dbg_skyFast = !g_dbg_skyFast;
+					N3DS_DebugLog(g_dbg_skyFast ? "[CTR-3DS] skyfast: ON (sky faces through the gate RTPT)" : "[CTR-3DS] skyfast: OFF (software GTE RTPT)");
+				}
+				else if (strcmp(word, "sampler") == 0)
+				{
+					extern int N3DS_SamplerToggle(void);
+
+					N3DS_DebugLog(N3DS_SamplerToggle() ? "[CTR-3DS] sampler: ON ([SAMPLE] every [PERF] window)" : "[CTR-3DS] sampler: OFF");
+				}
+				else if (strcmp(word, "mdlfast") == 0)
+				{
+					extern int g_dbg_modelFast;
+
+					g_dbg_modelFast = !g_dbg_modelFast;
+					N3DS_DebugLog(g_dbg_modelFast ? "[CTR-3DS] mdlfast: ON (gated models: camera-space accept, no projection)" : "[CTR-3DS] mdlfast: OFF (projected gate)");
+				}
+				else if (strcmp(word, "deepprof") == 0)
+				{
+					extern int g_dbg_deepProf;
+
+					g_dbg_deepProf = !g_dbg_deepProf;
+					N3DS_DebugLog(g_dbg_deepProf ? "[CTR-3DS] deepprof: ON ([INSTPROF] [GTEPROF] [PARSEPROF] sampling)" : "[CTR-3DS] deepprof: OFF");
+				}
+				else if (strcmp(word, "xaprefetch") == 0)
+				{
+					extern int g_dbg_xaPrefetch;
+
+					g_dbg_xaPrefetch = !g_dbg_xaPrefetch;
+					N3DS_DebugLog(g_dbg_xaPrefetch ? "[CTR-3DS] xaprefetch: ON (XA spans read ahead on the io thread)" : "[CTR-3DS] xaprefetch: OFF");
+				}
 				else if (strncmp(word, "cpulimit", 8) == 0)
 				{
 					/* Rosalina-freeze bisect: reassert APT_SetAppCpuTimeLimit at
@@ -5625,6 +6156,50 @@ unsigned int N3DS_ReadButtons(void)
 					g_dbg_fastPresent ^= 1;
 					N3DS_DebugLog(g_dbg_fastPresent ? "[CTR-3DS] fastpresent: ON (flush bottom framebuffer only)"
 					                                : "[CTR-3DS] fastpresent: off (whole-system gfxFlushBuffers)");
+				}
+				else if ((strncmp(word, "giveitem", 8) == 0) || (strncmp(word, "hititem", 7) == 0))
+				{
+					/* Player 1 gets item option N, or is hit by option N, on the
+					 * next race frame (lists: include/platform/debug_items.h). */
+					const int give = (word[0] == 'g');
+					const char *arg = word + (give ? 8 : 7);
+					char msg[64];
+					int n = (*arg == ' ') ? atoi(arg + 1) : 0;
+
+					if (give)
+					{
+						g_dbg_giveItem = n;
+					}
+					else
+					{
+						g_dbg_hitItem = n;
+					}
+					snprintf(msg, sizeof(msg), "[CTR-3DS] %s %d", give ? "giveitem" : "hititem", n);
+					N3DS_DebugLog(msg);
+				}
+				else if (strncmp(word, "fbblurflip", 10) == 0)
+				{
+					/* Clock blur texture mapping: bit 0 mirrors the copy's rows
+					 * (panel x), bit 1 its columns (panel y). 'fbblurflip N'. */
+					char msg[64];
+
+					g_dbg_fbBlurFlip = (word[10] == ' ') ? (atoi(&word[11]) & 3) : 0;
+					snprintf(msg, sizeof(msg), "[CTR-3DS] fbblurflip: %d", g_dbg_fbBlurFlip);
+					N3DS_DebugLog(msg);
+				}
+				else if (strncmp(word, "fbblur", 6) == 0)
+				{
+					/* Clock-item feedback blur from a GPU copy of the previous
+					 * frame (default ON); off drops the effect as before. */
+					if (word[6] == ' ')
+					{
+						g_dbg_fbBlur = (atoi(&word[7]) != 0) ? 1 : 0;
+					}
+					else
+					{
+						g_dbg_fbBlur = !g_dbg_fbBlur;
+					}
+					N3DS_DebugLog(g_dbg_fbBlur ? "[CTR-3DS] fbblur: ON (clock blur from a GPU copy of the last frame)" : "[CTR-3DS] fbblur: off (no clock blur)");
 				}
 				else if (strncmp(word, "fbcap", 5) == 0)
 				{
@@ -7310,9 +7885,17 @@ static void N3DS_BeatMainTick(void)
 			snprintf(msg, sizeof(msg), "[BEAT] THAW gapMs=%u vb0=%lu vb1=%lu", (unsigned)gapMs, (unsigned long)C3D_FrameCounter(0),
 			         (unsigned long)C3D_FrameCounter(1));
 			N3DS_DebugLog(msg);
-			s_frameTraceBudget = 64;
-			s_beatPostThawFrames = 600;
-			N3DS_LogFlushNow();
+			/* The freeze trail (frame trace, ALIVE lines, synchronous SD
+			 * flushes) only for a real system freeze (Rosalina, HOME, lid).
+			 * A level load's end or a slow frame passes 500 ms too, and on an
+			 * Old 3DS each synchronous flush here was a 100-250 ms (up to
+			 * 1.5 s) game-thread stall: one long frame became 10 s of hitches. */
+			if (gapMs > 5000)
+			{
+				s_frameTraceBudget = 64;
+				s_beatPostThawFrames = 600;
+				N3DS_LogFlushNow();
+			}
 			if (g_dbg_rosaFix && (gapMs > 2000))
 			{
 				Result rc;
