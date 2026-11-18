@@ -120,8 +120,29 @@ void MM_CupSelect_MenuProc(struct RectMenu *menu)
 		int startY = (s16)D230.transitionMeta_cupSel[cupIndex].currY + (cupIndex >> 1) * MM_CUP_SELECT_ROW_HEIGHT;
 
 		// draw the name of the cup
+#if defined(CTR_NATIVE)
+		{
+			// The PAL names selectable in OPTIONS > LANGUAGE can be wider than the cup's box
+			// ("TORNEO DEL CRISTAL", "COPPA CRISTALLO", "COUPE CRISTAL") and run into the next
+			// column. Those wrap at a space onto a second line, the pair centred where the single
+			// line was; names that fit (every English one) draw exactly as before.
+			char *cupName = sdata->lngStrings[data.ArcadeCups[cupIndex].lngIndex_CupName];
+
+			if (DecalFont_GetLineWidth(cupName, FONT_CREDITS) >= MM_CUP_SELECT_BACKGROUND_WIDTH)
+			{
+				DecalFont_DrawMultiLine(cupName, startX + MM_CUP_SELECT_NAME_X_OFFSET,
+				                        startY + MM_CUP_SELECT_NAME_Y_OFFSET - (data.font_charPixHeight[FONT_CREDITS] >> 1), MM_CUP_SELECT_BACKGROUND_WIDTH,
+				                        FONT_CREDITS, txtColor);
+			}
+			else
+			{
+				DecalFont_DrawLine(cupName, startX + MM_CUP_SELECT_NAME_X_OFFSET, startY + MM_CUP_SELECT_NAME_Y_OFFSET, FONT_CREDITS, txtColor);
+			}
+		}
+#else
 		DecalFont_DrawLine(sdata->lngStrings[data.ArcadeCups[cupIndex].lngIndex_CupName], startX + MM_CUP_SELECT_NAME_X_OFFSET,
 		                   startY + MM_CUP_SELECT_NAME_Y_OFFSET, FONT_CREDITS, txtColor);
+#endif
 
 		startX = startX + MM_CUP_SELECT_CONTENT_X_OFFSET;
 		startY = startY + MM_CUP_SELECT_CONTENT_Y_OFFSET;
