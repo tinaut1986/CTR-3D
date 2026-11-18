@@ -272,6 +272,9 @@ void LOAD_LangFile(int bigfilePtr, int lang)
 		gNativePalGlyphs = (lang >= 2);
 	}
 
+	// speech follows the language too: a PAL voice pack from mods/pal-voices, if installed
+	NativeAudio_SetVoiceLanguage(lang);
+
 #endif
 #if BUILD == EurRetail
 	// set voicelines to new lang
