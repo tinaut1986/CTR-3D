@@ -65,7 +65,16 @@ The screens:
 
 The main menu has an **OPTIONS** entry with four toggles: PAL PENTA (Penta Penguin's PAL/Japanese stats), RESERVES METER (the boost-reserves bar), BOTTOM MAP, and TEXTURE FILTER. They return to their defaults on every launch.
 
-Below the toggles is a **LANGUAGE** row: confirm cycles through English, French, German, Italian, Spanish and Dutch, and the game text changes immediately. Unlike the toggles, the choice is remembered in `/3ds/ctr_native/language.cfg`; delete that file to go back to English. The OPTIONS menu itself is translated too. Voices stay in English, because the NTSC-U disc has no other voice tracks. VS and Battle modes are not on the menu; one console has one controller.
+Below the toggles is a **LANGUAGE** row: confirm cycles through English, French, German, Italian, Spanish and Dutch, and the game text changes immediately. Unlike the toggles, the choice is remembered in `/3ds/ctr_native/language.cfg`; delete that file to go back to English. The OPTIONS menu itself is translated too. Voices follow the language when its PAL voice pack is installed (see below); otherwise they stay in English, the only speech on the NTSC-U disc. VS and Battle modes are not on the menu; one console has one controller.
+
+### Voices in other languages
+
+The NTSC-U disc only has English speech. The PAL disc (SCES-02105) also has French, German, Italian, Spanish and Dutch, and the game can use them from an image of **your own** PAL disc (raw `.bin`, 2352-byte sectors, about 34 MB per language once extracted). Two ways to get them:
+
+- **On the console:** copy the PAL `.bin` next to `ctr-u.bin` in `/3ds/ctr_native/assets/` (any name other than `ctr-u.bin`). At the next start the game offers to extract the voices, with a checkbox per language, and then to delete the image. The **VOICES** tab of the bottom screen shows the same at any time: which languages are extracted (and lets you delete them), which the image has, and a button to delete the image.
+- **On a PC:** run [`tools/pal-voices/ctr_pal_voices.py`](tools/pal-voices/) (Python 3, nothing else to install). Pick the image, pick the SD card (or any folder) and the languages. Run it without arguments for a small window, or `python ctr_pal_voices.py IMAGE.bin DESTINATION [--lang FRN,SPN]` from a terminal.
+
+Either way the voices end up in `/3ds/ctr_native/mods/pal-voices/`. Pick the language in OPTIONS and restart the game once, so the voice cache fills with the new language; a line a pack does not have plays in English.
 
 ## Reporting a bug
 
@@ -90,6 +99,7 @@ Everything here is on by default unless it says otherwise. The toggles are the O
 - **The close-up "mosaic" texture tier is not rendered.** Near surfaces use the standard texture.
 - **The Spyro 2 demo cheat code does something else now**, since a native build cannot launch the demo off the disc. One new cheat code has been added.
 - **Language selection** (English, French, German, Italian, Spanish, Dutch), using the localized text files that are already on the NTSC-U disc. The n-tilde, inverted `¡` `¿`, the ordinal `º` and quotation marks that those files rely on are drawn from existing font icons, because the NTSC-U font code does not know them. Remembered between launches. From [LopezTutoriales' fork](https://github.com/LopezTutoriales/CTR-3D).
+- **Voices in the selected language** (French, German, Italian, Spanish, Dutch) from your own PAL disc, extracted on the console or with the PC tool (see [Voices in other languages](#voices-in-other-languages)). The NTSC-U to PAL line mapping is the PS Vita port's ([Rinnegatamante/Crash-Team-Racing-High-Octane](https://github.com/Rinnegatamante/Crash-Team-Racing-High-Octane)), by way of LopezTutoriales' fork.
 - **Nitros Oxide as a playable character.** Enter SOAR (originally the code for the Spyro 2 demo, which this port cannot chain-load) at the cheat-code screen to unlock him for Arcade and Versus; it still cycles the flag-color easter egg too. His character-select model is his racer model, read from your own disc. Ported from [LopezTutoriales' fork](https://github.com/LopezTutoriales/CTR-3D); the select-screen layout comes from the PS Vita port ([Rinnegatamante/Crash-Team-Racing-High-Octane](https://github.com/Rinnegatamante/Crash-Team-Racing-High-Octane), GPL-3.0).
 - **VS and Battle modes** are not offered.
 
