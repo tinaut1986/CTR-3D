@@ -63,7 +63,9 @@ The screens:
 - The Options tab has AUTO-HIDE HUD (the top screen drops the HUD while the Map tab is up), 3D EFFECT, FRAME SKIP, SHOW FPS, a colour theme and, on a New 3DS, CPU 804 MHZ.
 - The 3D slider works in real time. On an Old 3DS / 2DS, 3D EFFECT defaults to AUTO and turns itself off if the game runs slow.
 
-The main menu has an **OPTIONS** entry with four toggles: PAL PENTA (Penta Penguin's PAL/Japanese stats), RESERVES METER (the boost-reserves bar), BOTTOM MAP, and TEXTURE FILTER. They return to their defaults on every launch. VS and Battle modes are not on the menu; one console has one controller.
+The main menu has an **OPTIONS** entry with four toggles: PAL PENTA (Penta Penguin's PAL/Japanese stats), RESERVES METER (the boost-reserves bar), BOTTOM MAP, and TEXTURE FILTER. They return to their defaults on every launch.
+
+Below the toggles is a **LANGUAGE** row: confirm cycles through English, French, German, Italian, Spanish and Dutch, and the game text changes immediately. Unlike the toggles, the choice is remembered in `/3ds/ctr_native/language.cfg`; delete that file to go back to English. The OPTIONS menu itself is translated too. Voices stay in English, because the NTSC-U disc has no other voice tracks. VS and Battle modes are not on the menu; one console has one controller.
 
 ## Reporting a bug
 
@@ -87,6 +89,8 @@ Everything here is on by default unless it says otherwise. The toggles are the O
 - **Ice reflections no longer merge each kart's mirrored wheel pairs onto its centreline.** That is a bug in the shipped PS1 game.
 - **The close-up "mosaic" texture tier is not rendered.** Near surfaces use the standard texture.
 - **The Spyro 2 demo cheat code does something else now**, since a native build cannot launch the demo off the disc. One new cheat code has been added.
+- **Language selection** (English, French, German, Italian, Spanish, Dutch), using the localized text files that are already on the NTSC-U disc. The n-tilde, inverted `¡` `¿`, the ordinal `º` and quotation marks that those files rely on are drawn from existing font icons, because the NTSC-U font code does not know them. Remembered between launches. From [LopezTutoriales' fork](https://github.com/LopezTutoriales/CTR-3D).
+- **Nitros Oxide as a playable character.** Enter SOAR (originally the code for the Spyro 2 demo, which this port cannot chain-load) at the cheat-code screen to unlock him for Arcade and Versus; it still cycles the flag-color easter egg too. His character-select model is his racer model, read from your own disc. Ported from [LopezTutoriales' fork](https://github.com/LopezTutoriales/CTR-3D); the select-screen layout comes from the PS Vita port ([Rinnegatamante/Crash-Team-Racing-High-Octane](https://github.com/Rinnegatamante/Crash-Team-Racing-High-Octane), GPL-3.0).
 - **VS and Battle modes** are not offered.
 
 The PC build from this repository carries the changes that are not 3DS-specific: PAL Penta, the reserves meter, the ice-reflection fix and the cheat codes. On PC they are always on; only the 3DS build has the OPTIONS menu.
