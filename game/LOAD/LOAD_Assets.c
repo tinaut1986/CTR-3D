@@ -272,6 +272,20 @@ void LOAD_LangFile(int bigfilePtr, int lang)
 		gNativePalGlyphs = (lang >= 2);
 	}
 
+	// The Italian and Spanish files on the NTSC-U disc have an 'N' where the demo banner's line
+	// break ('\r') belongs ("MODO DEMONPULSA...", "MODALITA' DEMONPREMI..."); the PAL disc's
+	// Spanish file has it fixed. Restore the break: only "DEMON" followed by a letter, so a
+	// language that spells it right, or uses the word some other way, is left alone.
+	if ((lang >= 2) && (numStrings > LNG_DEMO_MODE_PRESS_ANY_BUTTON_TO_EXIT))
+	{
+		char *demo = strstr(strArray[LNG_DEMO_MODE_PRESS_ANY_BUTTON_TO_EXIT], "DEMON");
+
+		if ((demo != NULL) && (demo[5] >= 'A') && (demo[5] <= 'Z'))
+		{
+			demo[4] = '\r';
+		}
+	}
+
 	// speech follows the language too: a PAL voice pack from mods/pal-voices, if installed
 	NativeAudio_SetVoiceLanguage(lang);
 
