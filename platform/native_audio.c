@@ -3537,6 +3537,20 @@ int NativeAudio_HasPalVoicePack(void)
 	return (s_voicePack != 0) && (NativeAudio_GetPalXnf(s_voicePack) != NULL);
 }
 
+/* After the SD card changed under the packs (n3ds_palvoice.c extracted or deleted one): forget
+ * every pack and file state and load the selected language's manifest again. Every lookup runs
+ * on the game thread, like this, so nothing can be using an XNF while it is freed. */
+internal void NativeAudio_PalVoiceShutdown(void);
+
+void NativeAudio_PalVoiceRescan(void)
+{
+	NativeAudio_PalVoiceShutdown();
+	if (s_voicePack != 0)
+	{
+		(void)NativeAudio_GetPalXnf(s_voicePack);
+	}
+}
+
 internal void NativeAudio_PalVoiceShutdown(void)
 {
 	for (int pack = 0; pack <= NATIVE_AUDIO_PAL_PACK_COUNT; pack++)
@@ -3555,6 +3569,10 @@ void NativeAudio_SetVoiceLanguage(int languageFileIndex)
 int NativeAudio_HasPalVoicePack(void)
 {
 	return 0;
+}
+
+void NativeAudio_PalVoiceRescan(void)
+{
 }
 #endif /* __3DS__ */
 

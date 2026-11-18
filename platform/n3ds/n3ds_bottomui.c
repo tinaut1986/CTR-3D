@@ -42,6 +42,7 @@
 #include "n3ds_bottomui.h"
 #include "n3ds_debuglink.h"
 #include "n3ds_dspfirm.h"
+#include "n3ds_palvoice.h"
 #include "n3ds_ftp.h"
 #include "update_manifest.h"
 #include "updater.h"
@@ -75,6 +76,7 @@ enum
 	TAB_MAP = 0,
 	TAB_UPDATER,
 	TAB_OPTIONS,
+	TAB_VOICES,
 #ifdef CTR_INTERNAL
 	TAB_DEBUG,
 #endif
@@ -350,6 +352,7 @@ static int ui_tab_list(int *ids)
 	ids[n++] = TAB_MAP;
 	ids[n++] = TAB_UPDATER;
 	ids[n++] = TAB_OPTIONS;
+	ids[n++] = TAB_VOICES;
 #ifdef CTR_INTERNAL
 	ids[n++] = TAB_DEBUG;
 #endif
@@ -391,6 +394,10 @@ static void ui_tab_icon(int id, int x, int y, u16 c)
 	case TAB_OPTIONS: /* sliders */
 		R(-6, -4, 12, 1); R(-6, 0, 12, 1); R(-6, 4, 12, 1);
 		R(-2, -5, 3, 3); R(2, -1, 3, 3); R(-5, 3, 3, 3);
+		break;
+	case TAB_VOICES: /* speaker and two sound waves */
+		R(-7, -2, 3, 5); R(-4, -3, 1, 7); R(-3, -4, 1, 9); R(-2, -5, 1, 11);
+		R(1, -2, 1, 5); R(3, -4, 1, 9); R(5, -6, 1, 13);
 		break;
 #ifdef CTR_INTERNAL
 	default: /* bug */
@@ -913,6 +920,311 @@ static void ui_draw_dspq(void)
 		ui_button(x, y, w, h, COL_BTN_ACT, 0);
 		ui_text_c(x + (w / 2), y + 9, 1, COL_TEXT, "OK");
 	}
+}
+
+/* The PAL voice extraction (n3ds_palvoice.c): a modal box after the DSP question. The question
+ * lists the five languages with a checkbox each; the other states reuse the DSP box's size. */
+#define PALQ_W 288
+#define PALQ_H 184
+#define PALQ_ROW_Y 30
+#define PALQ_ROW_H 18
+
+static int ui_palq_h(void)
+{
+	return (N3DS_PalVoice_State() == N3DS_PALVOICE_ASK) ? PALQ_H : DSPQ_H;
+}
+
+static void ui_palq_rect(int i, int *x, int *y, int *w, int *h)
+{
+	const int ph = ui_palq_h();
+	const int bx = (UI_W - PALQ_W) / 2, by = (UI_H - ph) / 2;
+	const int st = N3DS_PalVoice_State();
+
+	*y = by + ph - DSPQ_BTN_H - 8;
+	*w = DSPQ_BTN_W;
+	*h = DSPQ_BTN_H;
+	*x = (i == 0) ? (bx + 14) : (bx + PALQ_W - 14 - DSPQ_BTN_W);
+	if ((st != N3DS_PALVOICE_ASK) && (st != N3DS_PALVOICE_ASKDEL))
+	{
+		*x = (UI_W - DSPQ_BTN_W) / 2; /* one OK button */
+	}
+}
+
+/* ASK: the row of language `lang` (the whole width of the box is the hit area) */
+static void ui_palq_row(int lang, int *x, int *y, int *w, int *h)
+{
+	const int bx = (UI_W - PALQ_W) / 2, by = (UI_H - PALQ_H) / 2;
+
+	*x = bx + 10;
+	*y = by + PALQ_ROW_Y + lang * PALQ_ROW_H;
+	*w = PALQ_W - 20;
+	*h = PALQ_ROW_H;
+}
+
+static void ui_draw_palq(void)
+{
+	const int state = N3DS_PalVoice_State();
+	const int ph = ui_palq_h();
+	const int bx = (UI_W - PALQ_W) / 2, by = (UI_H - ph) / 2;
+	char line[48];
+	int x, y, w, h, lang;
+
+	if ((state == N3DS_PALVOICE_NONE) || (N3DS_DspFirm_State() != N3DS_DSPFIRM_NONE))
+	{
+		return;
+	}
+	ui_cell(bx - 2, by - 2, PALQ_W + 4, ph + 4, ui_shade(COL_BG, 4), COL_EDGE);
+	ui_cell(bx, by, PALQ_W, ph, COL_PANEL, COL_ACCENT);
+	ui_text_c(UI_W / 2, by + 10, 1, COL_LABEL, TR("PAL DISC: EXTRACT ITS VOICES?", "DISCO PAL: EXTRAER SUS VOCES?"));
+	ui_rect(bx + 10, by + 22, PALQ_W - 20, 1, COL_SEP);
+	if (state == N3DS_PALVOICE_ASK)
+	{
+		int any = 0;
+
+		for (lang = 0; lang < N3DS_PALVOICE_LANGS; lang++)
+		{
+			const int installed = N3DS_PalVoice_LangInstalled(lang);
+			const int present = N3DS_PalVoice_LangInImage(lang);
+			const int on = N3DS_PalVoice_LangSelected(lang) || installed;
+
+			ui_palq_row(lang, &x, &y, &w, &h);
+			/* the checkbox: filled when ticked, dim when it cannot change */
+			ui_cell(x + 30, y + 3, 11, 11, on ? ((installed || !present) ? COL_SEP : COL_ACCENT) : COL_PANEL, (installed || !present) ? COL_SEP : COL_EDGE);
+			ui_text(x + 50, y + 5, 1, (installed || !present) ? TH->faint : COL_TEXT, N3DS_PalVoice_LangName(lang));
+			if (installed)
+			{
+				ui_text(x + 160, y + 5, 1, TH->faint, TR("INSTALLED", "INSTALADO"));
+			}
+			else if (!present)
+			{
+				ui_text(x + 160, y + 5, 1, TH->faint, TR("NOT IN IMAGE", "NO ESTA"));
+			}
+			any |= N3DS_PalVoice_LangSelected(lang);
+		}
+		snprintf(line, sizeof(line), TR("ABOUT %d MB ON THE SD CARD", "UNOS %d MB EN LA SD"), N3DS_PalVoice_SelectedMB());
+		ui_text_c(UI_W / 2, by + PALQ_ROW_Y + N3DS_PALVOICE_LANGS * PALQ_ROW_H + 6, 1, TH->faint, line);
+		ui_palq_rect(0, &x, &y, &w, &h);
+		ui_button(x, y, w, h, any ? COL_BTN_ACT : COL_BTN_OFF, 0);
+		ui_text_c(x + (w / 2), y + 9, 1, any ? COL_TEXT : TH->faint, TR("EXTRACT", "EXTRAER"));
+		ui_palq_rect(1, &x, &y, &w, &h);
+		ui_button(x, y, w, h, COL_BTN_OFF, 0);
+		ui_text_c(x + (w / 2), y + 9, 1, COL_TEXT, TR("NOT NOW", "AHORA NO"));
+	}
+	else if (state == N3DS_PALVOICE_WORKING)
+	{
+		snprintf(line, sizeof(line), TR("EXTRACTING THE VOICES... %d%%", "EXTRAYENDO LAS VOCES... %d%%"), N3DS_PalVoice_Percent());
+		ui_text_c(UI_W / 2, by + 40, 1, COL_WARN, line);
+		ui_rect(bx + 24, by + 58, PALQ_W - 48, 6, COL_SEP);
+		ui_rect(bx + 24, by + 58, ((PALQ_W - 48) * N3DS_PalVoice_Percent()) / 100, 6, COL_ACCENT);
+		ui_text_c(UI_W / 2, by + 76, 1, TH->faint, TR("YOU CAN KEEP PLAYING", "PUEDES SEGUIR JUGANDO"));
+	}
+	else if (state == N3DS_PALVOICE_ASKDEL)
+	{
+		ui_text_c(UI_W / 2, by + 32, 1, COL_GOOD, TR("DONE: CHOOSE THE LANGUAGE IN OPTIONS", "LISTO: ELIGE EL IDIOMA EN OPCIONES"));
+		snprintf(line, sizeof(line), TR("DELETE THE IMAGE? (%d MB)", "BORRAR LA IMAGEN? (%d MB)"), N3DS_PalVoice_ImageMB());
+		ui_text_c(UI_W / 2, by + 48, 1, COL_LABEL, line);
+		ui_palq_rect(0, &x, &y, &w, &h);
+		ui_button(x, y, w, h, COL_BTN_ACT, 0);
+		ui_text_c(x + (w / 2), y + 9, 1, COL_TEXT, TR("DELETE", "BORRAR"));
+		ui_palq_rect(1, &x, &y, &w, &h);
+		ui_button(x, y, w, h, COL_BTN_OFF, 0);
+		ui_text_c(x + (w / 2), y + 9, 1, COL_TEXT, TR("KEEP", "CONSERVAR"));
+	}
+	else
+	{
+		ui_text_c(UI_W / 2, by + 36, 1, COL_BAD, TR("COULD NOT EXTRACT THE VOICES", "NO SE PUDIERON EXTRAER LAS VOCES"));
+		ui_text_c(UI_W / 2, by + 52, 1, TH->faint, N3DS_PalVoice_Failure());
+		ui_palq_rect(0, &x, &y, &w, &h);
+		ui_button(x, y, w, h, COL_BTN_ACT, 0);
+		ui_text_c(x + (w / 2), y + 9, 1, COL_TEXT, "OK");
+	}
+}
+
+/* VOICES tab: where the speech comes from, and the PAL voice packs (n3ds_palvoice.c). English is
+ * the NTSC-U disc's own. A PAL image of the player's disc in assets/ lets them extract the
+ * other five; extracted packs can be deleted. Deletions take two taps (the button asks first). */
+#define VO_ROW_Y 84
+#define VO_ROW_H 20
+#define VO_DEL_X 236
+#define VO_DEL_W 78
+#define VO_BTN_Y 208
+#define VO_BTN_H 24
+#define VO_BTN_BASE 700 /* s_pressBtn ids: 700 + row, 710 extract, 711 delete image */
+#define VO_CONFIRM_IMAGE 99
+
+static int ui_in(int px, int py, int x, int y, int w, int h);
+static int s_voConfirm = -1; /* the language (or VO_CONFIRM_IMAGE) whose delete awaits a second tap */
+
+static void ui_vo_row(int lang, int *x, int *y, int *w, int *h) /* lang -1 = English */
+{
+	*x = 6;
+	*y = VO_ROW_Y + (lang + 1) * VO_ROW_H;
+	*w = 308;
+	*h = VO_ROW_H - 2;
+}
+
+static void ui_vo_del_rect(int lang, int *x, int *y, int *w, int *h)
+{
+	ui_vo_row(lang, x, y, w, h);
+	*x = VO_DEL_X;
+	*w = VO_DEL_W;
+}
+
+static void ui_vo_btn_rect(int i, int *x, int *y, int *w, int *h) /* 0 extract, 1 delete image */
+{
+	*x = (i == 0) ? 6 : 164;
+	*y = VO_BTN_Y;
+	*w = 150;
+	*h = VO_BTN_H;
+}
+
+static void ui_draw_voices(void)
+{
+	const int st = N3DS_PalVoice_State();
+	const int image = N3DS_PalVoice_HasImage();
+	char line[48];
+	int x, y, w, h, lang, any = 0;
+
+	ui_header(32, TR("VOICES", "VOCES"), NULL);
+	ui_text(6, 44, 1, COL_LABEL, TR("US DISC (CTR-U.BIN)", "DISCO US (CTR-U.BIN)"));
+	ui_text(200, 44, 1, N3DS_PalVoice_UsDiscPresent() ? COL_GOOD : COL_BAD, N3DS_PalVoice_UsDiscPresent() ? "OK" : TR("MISSING", "NO ESTA"));
+	ui_text(6, 56, 1, COL_LABEL, TR("PAL DISC", "DISCO PAL"));
+	if (image)
+	{
+		snprintf(line, sizeof(line), "%s (%d MB)", N3DS_PalVoice_ImageFile(), N3DS_PalVoice_ImageMB());
+		ui_text(200 - 80, 56, 1, COL_GOOD, line);
+	}
+	else
+	{
+		ui_text(200, 56, 1, TH->faint, TR("NOT FOUND", "NO ENCONTRADO"));
+	}
+
+	ui_header(72, TR("LANGUAGES", "IDIOMAS"), NULL);
+	ui_vo_row(-1, &x, &y, &w, &h);
+	ui_text(x + 22, y + 5, 1, COL_TEXT, "ENGLISH");
+	ui_text(x + 130, y + 5, 1, TH->faint, TR("FROM THE US DISC", "DEL DISCO US"));
+	for (lang = 0; lang < N3DS_PALVOICE_LANGS; lang++)
+	{
+		const int installed = N3DS_PalVoice_LangInstalled(lang);
+		const int present = N3DS_PalVoice_LangInImage(lang);
+		const int ticked = N3DS_PalVoice_LangSelected(lang);
+
+		ui_vo_row(lang, &x, &y, &w, &h);
+		if (present && !installed)
+		{
+			ui_cell(x + 4, y + 3, 11, 11, ticked ? COL_ACCENT : COL_PANEL, COL_EDGE);
+			any |= ticked;
+		}
+		ui_text(x + 22, y + 5, 1, (installed || present) ? COL_TEXT : TH->faint, N3DS_PalVoice_LangName(lang));
+		if (installed)
+		{
+			ui_text(x + 130, y + 5, 1, COL_GOOD, TR("EXTRACTED", "EXTRAIDO"));
+			ui_vo_del_rect(lang, &x, &y, &w, &h);
+			ui_button(x, y, w, h, COL_BTN_OFF, s_pressBtn == (VO_BTN_BASE + lang));
+			ui_text_c(x + (w / 2), y + 5, 1, (s_voConfirm == lang) ? COL_BAD : COL_TEXT, (s_voConfirm == lang) ? TR("SURE?", "SEGURO?") : TR("DELETE", "BORRAR"));
+		}
+		else
+		{
+			ui_text(x + 130, y + 5, 1, TH->faint, present ? TR("IN THE PAL IMAGE", "EN LA IMAGEN PAL") : TR("NOT AVAILABLE", "NO DISPONIBLE"));
+		}
+	}
+
+	if (st == N3DS_PALVOICE_WORKING)
+	{
+		snprintf(line, sizeof(line), TR("EXTRACTING... %d%%", "EXTRAYENDO... %d%%"), N3DS_PalVoice_Percent());
+		ui_text_c(UI_W / 2, VO_BTN_Y, 1, COL_WARN, line);
+		ui_rect(30, VO_BTN_Y + 14, UI_W - 60, 6, COL_SEP);
+		ui_rect(30, VO_BTN_Y + 14, ((UI_W - 60) * N3DS_PalVoice_Percent()) / 100, 6, COL_ACCENT);
+	}
+	else if (image)
+	{
+		ui_vo_btn_rect(0, &x, &y, &w, &h);
+		ui_button(x, y, w, h, any ? COL_BTN_ACT : COL_BTN_OFF, s_pressBtn == (VO_BTN_BASE + 10));
+		snprintf(line, sizeof(line), TR("EXTRACT (%d MB)", "EXTRAER (%d MB)"), N3DS_PalVoice_SelectedMB());
+		ui_text_c(x + (w / 2), y + 8, 1, any ? COL_TEXT : TH->faint, any ? line : TR("TICK A LANGUAGE", "MARCA UN IDIOMA"));
+		ui_vo_btn_rect(1, &x, &y, &w, &h);
+		ui_button(x, y, w, h, COL_BTN_OFF, s_pressBtn == (VO_BTN_BASE + 11));
+		ui_text_c(x + (w / 2), y + 8, 1, (s_voConfirm == VO_CONFIRM_IMAGE) ? COL_BAD : COL_TEXT,
+		          (s_voConfirm == VO_CONFIRM_IMAGE) ? TR("SURE? TAP AGAIN", "SEGURO? OTRA VEZ") : TR("DELETE PAL IMAGE", "BORRAR IMAGEN PAL"));
+	}
+	else
+	{
+		ui_text(6, VO_BTN_Y, 1, TH->faint, TR("FOR OTHER LANGUAGES, COPY YOUR PAL DISC", "PARA OTROS IDIOMAS, COPIA TU DISCO PAL"));
+		ui_text(6, VO_BTN_Y + 11, 1, TH->faint, TR("(.BIN) TO 3DS/CTR_NATIVE/ASSETS/", "(.BIN) A 3DS/CTR_NATIVE/ASSETS/"));
+	}
+}
+
+/* VOICES tab touch: 1 if handled */
+static int ui_voices_touch(int px, int py)
+{
+	int x, y, w, h, lang;
+
+	if (N3DS_PalVoice_State() == N3DS_PALVOICE_WORKING)
+	{
+		return 0;
+	}
+	for (lang = 0; lang < N3DS_PALVOICE_LANGS; lang++)
+	{
+		if (N3DS_PalVoice_LangInstalled(lang))
+		{
+			ui_vo_del_rect(lang, &x, &y, &w, &h);
+			if (ui_in(px, py, x, y, w, h))
+			{
+				s_pressBtn = VO_BTN_BASE + lang;
+				s_pressFrames = 8;
+				if (s_voConfirm == lang)
+				{
+					s_voConfirm = -1;
+					N3DS_PalVoice_DeleteLang(lang);
+				}
+				else
+				{
+					s_voConfirm = lang;
+				}
+				return 1;
+			}
+		}
+		else
+		{
+			ui_vo_row(lang, &x, &y, &w, &h);
+			if (ui_in(px, py, x, y, w, h))
+			{
+				N3DS_PalVoice_Toggle(lang);
+				s_voConfirm = -1;
+				return 1;
+			}
+		}
+	}
+	if (N3DS_PalVoice_HasImage())
+	{
+		ui_vo_btn_rect(0, &x, &y, &w, &h);
+		if (ui_in(px, py, x, y, w, h))
+		{
+			s_pressBtn = VO_BTN_BASE + 10;
+			s_pressFrames = 8;
+			s_voConfirm = -1;
+			N3DS_PalVoice_Extract();
+			return 1;
+		}
+		ui_vo_btn_rect(1, &x, &y, &w, &h);
+		if (ui_in(px, py, x, y, w, h))
+		{
+			s_pressBtn = VO_BTN_BASE + 11;
+			s_pressFrames = 8;
+			if (s_voConfirm == VO_CONFIRM_IMAGE)
+			{
+				s_voConfirm = -1;
+				N3DS_PalVoice_DeleteImage();
+			}
+			else
+			{
+				s_voConfirm = VO_CONFIRM_IMAGE;
+			}
+			return 1;
+		}
+	}
+	s_voConfirm = -1;
+	return 0;
 }
 
 static void ui_draw_map(void)
@@ -1500,6 +1812,7 @@ static void ui_draw_all(void)
 	{
 	case TAB_MAP: ui_draw_map(); break;
 	case TAB_OPTIONS: ui_draw_options(); break;
+	case TAB_VOICES: ui_draw_voices(); break;
 	case TAB_UPDATER: ui_draw_updater(); break;
 #ifdef CTR_INTERNAL
 	case TAB_DEBUG: ui_draw_debug(); break;
@@ -1509,6 +1822,7 @@ static void ui_draw_all(void)
 	ui_draw_banner();
 	ui_draw_status_modal();
 	ui_draw_dspq();
+	ui_draw_palq();
 }
 
 /* ------------------------------------------------- picture -> texture/panel --- */
@@ -1797,6 +2111,7 @@ void N3DS_BottomUi_Touch(void)
 #endif
 
 	N3DS_DspFirm_Pump();
+	N3DS_PalVoice_Pump();
 	if (!injected && !(hidKeysDown() & KEY_TOUCH))
 	{
 		return;
@@ -1836,6 +2151,46 @@ void N3DS_BottomUi_Touch(void)
 		return;
 	}
 
+	/* Then the PAL voice extraction, also modal. */
+	if (N3DS_PalVoice_State() != N3DS_PALVOICE_NONE)
+	{
+		const int pst = N3DS_PalVoice_State();
+
+		if (pst != N3DS_PALVOICE_WORKING)
+		{
+			const int two = (pst == N3DS_PALVOICE_ASK) || (pst == N3DS_PALVOICE_ASKDEL);
+
+			if (pst == N3DS_PALVOICE_ASK)
+			{
+				for (i = 0; i < N3DS_PALVOICE_LANGS; i++)
+				{
+					int x, y, w, h;
+
+					ui_palq_row(i, &x, &y, &w, &h);
+					if (ui_in(t.px, t.py, x, y, w, h))
+					{
+						N3DS_PalVoice_Toggle(i);
+						s_dirty = 1;
+						return;
+					}
+				}
+			}
+			for (i = 0; i < (two ? 2 : 1); i++)
+			{
+				int x, y, w, h;
+
+				ui_palq_rect(i, &x, &y, &w, &h);
+				if (ui_in(t.px, t.py, x, y, w, h))
+				{
+					N3DS_PalVoice_Answer(i == 0);
+					s_dirty = 1;
+					break;
+				}
+			}
+		}
+		return;
+	}
+
 	if (t.py < TAB_H)
 	{
 		n = ui_tab_list(ids);
@@ -1843,6 +2198,11 @@ void N3DS_BottomUi_Touch(void)
 		if ((t.px >= TABBTN_X0) && (i < n) && (((t.px - TABBTN_X0) % TABBTN_PITCH) < TABBTN_W))
 		{
 			s_tab = ids[i];
+			if (s_tab == TAB_VOICES)
+			{
+				N3DS_PalVoice_Refresh();
+				s_voConfirm = -1;
+			}
 			s_notesOpen = 0;
 			s_msg[0] = '\0';
 			s_dirty = 1;
@@ -1851,6 +2211,13 @@ void N3DS_BottomUi_Touch(void)
 	}
 	switch (s_tab)
 	{
+	case TAB_VOICES:
+		if (ui_voices_touch(t.px, t.py))
+		{
+			s_dirty = 1;
+			return;
+		}
+		break;
 	case TAB_OPTIONS:
 		for (i = 0; i < OPT_COUNT; i++)
 		{
@@ -2104,6 +2471,22 @@ void N3DS_BottomUi_Frame(const struct N3DS_BottomUiGameInfo *gi)
 			s_dirty = 1;
 		}
 		N3DS_DspFirm_FrameTick();
+	}
+	{
+		static int s_lastPalq = -1, s_lastPalPct = -1;
+		const int palq = N3DS_PalVoice_State();
+
+		/* Look for a PAL image once, after boot, when no DSP question is up. */
+		if (N3DS_DspFirm_State() == N3DS_DSPFIRM_NONE)
+		{
+			N3DS_PalVoice_Raise();
+		}
+		if ((palq != s_lastPalq) || ((palq == N3DS_PALVOICE_WORKING) && (N3DS_PalVoice_Percent() != s_lastPalPct)))
+		{
+			s_lastPalq = palq;
+			s_lastPalPct = N3DS_PalVoice_Percent();
+			s_dirty = 1;
+		}
 	}
 	N3DS_FtpPoll();
 	ui_updater_poll();
